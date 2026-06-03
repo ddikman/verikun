@@ -1,0 +1,17 @@
+{
+  "name": "verikun",
+  "owner": {
+    "name": "ddikman",
+    "url": "https://github.com/ddikman"
+  },
+  "description": "Drive mobile devices/emulators for AI agents — Puppeteer-style UI automation via adb (Android) and simctl (iOS).",
+  "plugins": [
+    {
+      "name": "verikun",
+      "source": "./",
+      "description": "Tap, type, swipe, screenshot, and inspect the UI hierarchy by semantic identifiers on Android (adb) and iOS (simctl) — built for AI agents.",
+      "category": "testing",
+      "keywords": ["android", "adb", "ios", "ui-automation", "ai-agent"]
+    }
+  ]
+}

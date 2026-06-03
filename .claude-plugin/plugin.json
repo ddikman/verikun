@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "verikun",
+  "description": "Drive Android devices/emulators (and iOS simulators) for AI agents — tap, type, swipe, screenshot, and inspect the UI hierarchy by semantic identifiers, like Puppeteer for native apps.",
+  "version": "0.1.0",
+  "author": {
+    "name": "ddikman",
+    "url": "https://github.com/ddikman"
+  },
+  "homepage": "https://github.com/ddikman/verikun#readme",
+  "repository": "https://github.com/ddikman/verikun",
+  "license": "MIT",
+  "keywords": [
+    "android",
+    "adb",
+    "ios",
+    "simulator",
+    "ui-automation",
+    "testing",
+    "puppeteer",
+    "ai-agent"
+  ],
+  "skills": "./.claude/skills/"
+}
