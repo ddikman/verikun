@@ -4,7 +4,7 @@ import { formatInline } from './format';
 
 // Selector grammar (shell-safe, explicit):
 //   @value / id:value   resource-id
-//   text:value          visible text
+//   text:value          visible text (falls back to desc if not found)
 //   desc:value          content-desc / accessibility label
 //   class:value         simplified type or full class
 //   value               bare string == text:value
@@ -17,9 +17,11 @@ import { formatInline } from './format';
 //   2. partial    — case-insensitive substring
 //   3. normalized — ignore case + all punctuation / whitespace / emoji
 // `text:sign up`, `text:SIGN UP`, and `text:signup` all find a "Sign up" button.
-// --contains forces substring (skips the exact tier); --index N picks the Nth.
-// Ambiguity is never auto-resolved: if the winning tier has >1 match, an action
-// reports the candidates and asks you to refine — it never targets a guess.
+// For text: selectors, if no text matches are found, it also tries desc with the
+// same matching tiers. --contains forces substring (skips the exact tier);
+// --index N picks the Nth. Ambiguity is never auto-resolved: if the winning tier
+// has >1 match, an action reports the candidates and asks you to refine —
+// it never targets a guess.
 
 export type SelectorKind = 'id' | 'text' | 'desc' | 'class';
 export type MatchTier = 'exact' | 'partial' | 'normalized';
@@ -132,6 +134,21 @@ export function matchElements(elements: Element[], sel: Selector): MatchResult {
     }
     return { matches: found, tier };
   }
+
+  // For text: selectors, if no text matches found, fall back to desc
+  if (sel.kind === 'text') {
+    const descSel = { ...sel, kind: 'desc' as const };
+    for (const { tier, test } of tiers(descSel)) {
+      const found = elements.filter(test);
+      if (found.length === 0) continue;
+      if (sel.index !== undefined) {
+        const picked = found[sel.index];
+        return picked ? { matches: [picked], tier } : { matches: [], tier: null };
+      }
+      return { matches: found, tier };
+    }
+  }
+
   return { matches: [], tier: null };
 }
 

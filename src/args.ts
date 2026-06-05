@@ -25,6 +25,7 @@ const ALIASES: Record<string, string> = {
   h: 'help',
   v: 'version',
   t: 'timeout',
+  w: 'wait',
 };
 
 // Flags that never consume a following value.
@@ -42,6 +43,7 @@ const BOOLEAN = new Set([
   'ios',
   'android',
   'fix',
+  'no-wait',
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {

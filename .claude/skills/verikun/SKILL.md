@@ -8,8 +8,13 @@ description: >-
   or asserting the state of a native app on a device/emulator: "tap the login
   button", "type into the email field", "verify the screen shows X", "scroll down
   and check Y", "automate this signup flow", "screenshot the current screen",
-  "is the spinner gone yet". Prefer this over raw adb. iOS (--ios): screenshots +
-  launch/stop work today via simctl; tap/type/swipe/hierarchy need idb (planned).
+  "is the spinner gone yet". Prefer this over raw adb. Selector commands auto-wait
+  ~5s for elements to appear, so you rarely need explicit waits (`--no-wait` opts
+  out). Recorded actions form a
+  test run you can archive to a JUnit + HTML report (`vk run archive`) — use when
+  asked to "test", "verify the flow", or "produce a report". iOS (--ios):
+  screenshots + launch/stop work today via simctl; tap/type/swipe/hierarchy need
+  idb (planned).
 ---
 
 # verikun — drive & verify mobile apps
@@ -49,6 +54,10 @@ resolve the tap point. This is the whole point of the tool.
 
 ## Act
 
+Selector lookups **auto-wait up to 5s** (see [Auto-wait](#auto-wait)), so you
+usually don't need a `wait` before an action — `vk tap @next` already polls for
+`@next` to appear.
+
 - `vk tap <selector|index>`  ·  `vk tap --at x,y`
 - `vk text <selector> "the text" [--clear] [--enter]` — focus the field, then type
 - `vk type "text" [--enter]` — type into the already-focused field
@@ -81,6 +90,28 @@ candidates and exits 2 rather than guess.
 Modifiers: `--contains` forces substring (skips the exact tier); `--index N`
 picks the Nth match (0-based) when a selector intentionally matches several.
 
+## Auto-wait
+
+Selector commands (`tap`, `text`, `find`, `assert`, `swipe --on`) **retry the
+lookup for up to 5s** instead of failing on the first miss — they re-capture the
+hierarchy until it resolves. The screen is usually still settling after the prior
+action, so this lets you act/verify directly without a `wait` in between, saving
+round-trips and tokens.
+
+- **Default:** 5s. `--wait <dur>` overrides it (`--wait 8s`, `--wait 800ms`, or a
+  bare ms count like `--wait 3000`).
+- **`--no-wait` (or `--wait 0`):** fail immediately if the lenient lookup misses.
+  Use it for a pure existence probe where you want the answer *now*, e.g.
+  `vk find @spinner --no-wait` to check "is it there this instant".
+- **Ambiguity is never waited on** — a present-but-plural match exits 2 right
+  away (the elements are already there); add `--index N` or refine the selector.
+- **`vk assert <sel> --gone` waits for *disappearance*** — it polls until the
+  element is absent, so you don't need a separate `wait --gone`.
+
+When you *do* want to block on a condition as an explicit step (e.g. a long
+network wait beyond 5s), the `wait` command is still there with its own
+`--timeout`/`--interval`; or just bump the inline window with `--wait`.
+
 ## Be frugal: text over images, and remember identifiers
 
 **Perceive with text, not pixels.** `vk ui` / `vk find` / `vk assert` return a
@@ -104,6 +135,32 @@ runs. Re-verify cheaply with `vk assert` / `vk find`; only fall back to a full
 `vk ui` when a remembered selector stops resolving (the app changed — then update
 the memory). Auto-healing selectors make remembered identifiers resilient to
 small label/casing changes.
+
+## Test runs & reports
+
+Every action is **recorded into a test run** — one auto-starts on your first
+action, no setup needed. Each command becomes a step with its timing, the
+selector + identifier it resolved through, and pass/fail. When a step fails, `vk`
+automatically captures a screenshot **and** the UI hierarchy of that page.
+
+- `vk run status` — the current run's steps and outcomes
+- `vk run archive [name]` — finish the run: writes a **JUnit XML** + a
+  self-contained **HTML report** (screenshots, captured hierarchies, and the
+  identifiers used) to `./.verikun/runs/<id>/`, and exits non-zero if any step
+  failed — so it gates CI
+- `vk run clear` — discard the run, no report
+- `vk run start [name]` — begin a fresh named run explicitly (optional)
+
+An implicit run **rolls over automatically** when the context changes — a
+different device, a different `VERIKUN_SESSION`, or 30 min idle
+(`VERIKUN_RUN_IDLE_MIN`, 0 disables): the stale run is archived and a fresh one
+starts, so unrelated sessions never merge into one report. A run you named with
+`vk run start` is sticky to idle (only a device/session change rolls it over).
+
+When the task is "run/verify flow X and give me a report", just drive the flow
+and end with `vk run archive` — the report *is* the deliverable. The archived
+`run.json` records which selector resolved each step, so it doubles as the
+identifier memory described above. Set `VERIKUN_NO_RUN=1` to disable recording.
 
 ## Exit codes — rely on these for control flow
 
@@ -134,11 +191,12 @@ small label/casing changes.
 ```sh
 vk doctor --fix                              # deterministic UI
 vk launch com.example.app
-vk wait @email_input                         # screen ready?
-vk text @email_input "user@example.com"
+vk text @email_input "user@example.com"      # field lookup auto-waits up to 5s
 vk text @password_input "hunter2" --enter
-vk wait text:"Welcome back" --timeout 8000   # exit 0 → logged in
-vk assert @error_banner --gone               # exit 0 → no error shown
+vk assert text:"Welcome back" --wait 8s      # poll up to 8s, then assert → exit 0 = logged in
+vk assert @error_banner --gone               # exit 0 → no error banner shown
+vk run archive login-smoke                   # -> ./.verikun/runs/<id>/report.html (+ report.xml)
 ```
 
+Note there's no explicit `wait @email_input` — `text` auto-waits for the field.
 Check `$?` after `assert`/`wait`/`find` to branch on success vs failure.

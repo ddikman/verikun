@@ -5,9 +5,10 @@ import { CliError } from './errors';
 import { runText } from './exec';
 import { getDriver, AdbDriver, SimctlDriver } from './drivers';
 import { Driver, DeviceInfo, Element, Platform, Point } from './types';
-import { parseSelector, matchElements, resolveOne, Selector, MatchTier } from './ui/selector';
+import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
 import { out, err, json, defaultScreenshotPath } from './output';
+import { Recorder, isRecordable } from './run';
 
 const VERSION = '0.1.0';
 
@@ -19,6 +20,8 @@ interface Ctx {
   device?: string;
   positionals: string[];
   flags: Flags;
+  /** Present when the command is being recorded into a test run. */
+  record?: Recorder;
 }
 
 function platformFromFlags(flags: Flags): Platform {
@@ -55,6 +58,87 @@ function parsePoint(s: string): Point {
 /** A short note appended to action output when the selector matched non-exactly. */
 function healNote(tier: MatchTier | null): string {
   return tier && tier !== 'exact' ? ` (healed: ${tier} match)` : '';
+}
+
+// --- Auto-wait on selector lookups -----------------------------------------
+// A selector-resolving command does not fail the instant a lookup misses: it
+// re-captures the hierarchy and retries until the (lenient) match succeeds or a
+// wait window elapses (default 5s). A straightforward flow can then skip explicit
+// `wait` calls — fewer round-trips, fewer tokens — while `--no-wait` / `--wait 0`
+// restores fail-fast. Ambiguity (a present-but-plural match) is never waited on:
+// the elements are already there, so it surfaces at once.
+
+const DEFAULT_WAIT_MS = 5000;
+const DEFAULT_POLL_MS = 300;
+
+/** Parse a duration: a bare number is milliseconds (CLI convention), or `5s` / `800ms`. */
+function parseDuration(raw: string, flag: string): number {
+  const m = /^(\d+(?:\.\d+)?)\s*(ms|s)?$/.exec(raw.trim());
+  if (!m) throw new CliError(`--${flag} must be a duration like 5000, 5s, or 800ms; got '${raw}'`, 2);
+  const n = Number(m[1]);
+  return Math.max(0, Math.round(m[2] === 's' ? n * 1000 : n));
+}
+
+/** Wait window (ms) for selector lookups: `--no-wait`/`--wait 0` → 0; else `--wait <dur>`, else 5s. */
+function waitWindowMs(flags: Flags): number {
+  if (flagBool(flags, 'no-wait')) return 0;
+  const v = flags['wait'];
+  if (v === undefined || v === true) return DEFAULT_WAIT_MS; // absent, or bare `--wait` → default
+  return parseDuration(String(v), 'wait');
+}
+
+/** A short note appended to a confirmation when the action had to wait for its target. */
+function waitNote(ms: number): string {
+  return ms >= 100 ? ` (waited ${(ms / 1000).toFixed(1)}s)` : '';
+}
+
+/** Poll interval (ms) for auto-wait, capped so a sleep never overshoots the deadline. */
+function pollStep(flags: Flags, deadline: number): number {
+  const interval = flagNum(flags, 'interval') ?? DEFAULT_POLL_MS;
+  return Math.min(interval, Math.max(0, deadline - Date.now()));
+}
+
+/**
+ * matchElements with auto-wait: re-capture + re-match until at least one element
+ * matches or the window elapses. Returns the final result either way (empty on miss).
+ */
+async function matchWaiting(ctx: Ctx, sel: Selector, opts: { all?: boolean } = {}): Promise<MatchResult> {
+  const deadline = Date.now() + waitWindowMs(ctx.flags);
+  for (;;) {
+    const res = matchElements(ctx.driver.getElements(opts), sel);
+    if (res.matches.length > 0 || Date.now() >= deadline) return res;
+    await sleep(pollStep(ctx.flags, deadline));
+  }
+}
+
+/**
+ * resolveOne with auto-wait: poll until exactly one element resolves. A hit (1) or
+ * an ambiguous (>1) match returns/throws at once via resolveOne — only an empty
+ * result is retried. On a final miss, throws not-found (exit 1), noting the wait.
+ */
+async function resolveOneWaiting(
+  ctx: Ctx,
+  sel: Selector,
+  opts: { all?: boolean } = {},
+): Promise<{ element: Element; tier: MatchTier; waitedMs: number }> {
+  const windowMs = waitWindowMs(ctx.flags);
+  const start = Date.now();
+  const deadline = start + windowMs;
+  for (;;) {
+    const els = ctx.driver.getElements(opts);
+    if (matchElements(els, sel).matches.length >= 1) {
+      const { element, tier } = resolveOne(els, sel); // 1 → resolved; >1 → throws ambiguity
+      return { element, tier, waitedMs: Date.now() - start };
+    }
+    if (Date.now() >= deadline) {
+      const waited = windowMs > 0 ? ` after ${(windowMs / 1000).toFixed(1)}s` : '';
+      throw new CliError(
+        `No element matched selector '${sel.raw}'${waited}. Run \`verikun ui\` to inspect the current screen.`,
+        1,
+      );
+    }
+    await sleep(pollStep(ctx.flags, deadline));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,10 +228,9 @@ function cmdUi(ctx: Ctx): number {
   return 0;
 }
 
-function cmdFind(ctx: Ctx): number {
+async function cmdFind(ctx: Ctx): Promise<number> {
   const sel = buildSelector(ctx.positionals[0], ctx.flags);
-  const els = ctx.driver.getElements({ all: flagBool(ctx.flags, 'all') });
-  const { matches, tier } = matchElements(els, sel);
+  const { matches, tier } = await matchWaiting(ctx, sel, { all: flagBool(ctx.flags, 'all') });
   if (flagBool(ctx.flags, 'json')) json(matches.map(toJsonShape));
   else if (!matches.length) err(`no match for '${sel.raw}'`);
   else {
@@ -157,19 +240,20 @@ function cmdFind(ctx: Ctx): number {
   return matches.length ? 0 : 1;
 }
 
-function cmdTap(ctx: Ctx): number {
+async function cmdTap(ctx: Ctx): Promise<number> {
   const at = flagStr(ctx.flags, 'at');
   if (at) {
     const p = parsePoint(at);
     ctx.driver.tap(p.x, p.y);
+    ctx.record?.note({ message: `tapped coordinates (${p.x},${p.y})` });
     out(`tapped (${p.x},${p.y})`);
     return 0;
   }
 
   const raw = ctx.positionals[0];
-  const els = ctx.driver.getElements({ all: flagBool(ctx.flags, 'all') });
 
   // Bare integer == tap the element with that index from the latest `ui` snapshot.
+  // An index points at a specific prior dump, so it is single-shot (never waited on).
   const isBareIndex =
     raw !== undefined &&
     /^\d+$/.test(raw) &&
@@ -179,27 +263,38 @@ function cmdTap(ctx: Ctx): number {
 
   let target: Element;
   let tier: MatchTier | null = null;
+  let waitedMs = 0;
   if (isBareIndex) {
+    const els = ctx.driver.getElements({ all: flagBool(ctx.flags, 'all') });
     const idx = Number(raw);
     const found = els.find((e) => e.index === idx);
     if (!found) throw new CliError(`No element with index [${idx}] on the current screen. Run \`verikun ui\`.`, 1);
     target = found;
+    ctx.record?.note({ element: target, message: `tapped by index [${idx}]` });
   } else {
-    ({ element: target, tier } = resolveOne(els, buildSelector(raw, ctx.flags)));
+    const sel = buildSelector(raw, ctx.flags);
+    ({ element: target, tier, waitedMs } = await resolveOneWaiting(ctx, sel, { all: flagBool(ctx.flags, 'all') }));
+    ctx.record?.note({ selector: sel, tier, element: target });
   }
 
   ctx.driver.tap(target.center.x, target.center.y);
-  out(`tapped ${formatInline(target)}${healNote(tier)}`);
+  out(`tapped ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}`);
   return 0;
 }
 
-function cmdText(ctx: Ctx): number {
+async function cmdText(ctx: Ctx): Promise<number> {
   if (ctx.positionals.length < 2) {
     throw new CliError('Usage: verikun text <selector> <text...>  (use -- before text starting with "-")', 2);
   }
   const sel = buildSelector(ctx.positionals[0], ctx.flags);
   const value = ctx.positionals.slice(1).join(' ');
-  const { element: target, tier } = resolveOne(ctx.driver.getElements(), sel);
+  const { element: target, tier, waitedMs } = await resolveOneWaiting(ctx, sel);
+  ctx.record?.note({
+    selector: sel,
+    tier,
+    element: target,
+    message: target.password ? 'typed «redacted»' : `typed ${JSON.stringify(value)}`,
+  });
 
   ctx.driver.tap(target.center.x, target.center.y);
   if (flagBool(ctx.flags, 'clear') && target.text) {
@@ -208,7 +303,7 @@ function cmdText(ctx: Ctx): number {
   }
   ctx.driver.inputText(value);
   if (flagBool(ctx.flags, 'enter')) ctx.driver.pressKey('enter');
-  out(`typed ${JSON.stringify(value)} into ${formatInline(target)}${healNote(tier)}`);
+  out(`typed ${JSON.stringify(value)} into ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}`);
   return 0;
 }
 
@@ -217,6 +312,7 @@ function cmdType(ctx: Ctx): number {
   if (!value) throw new CliError('Usage: verikun type <text...>  (types into the focused field)', 2);
   ctx.driver.inputText(value);
   if (flagBool(ctx.flags, 'enter')) ctx.driver.pressKey('enter');
+  ctx.record?.note({ message: `typed ${value.length} char(s) into focused field` });
   out(`typed ${JSON.stringify(value)}`);
   return 0;
 }
@@ -225,17 +321,19 @@ function cmdKey(ctx: Ctx): number {
   const name = ctx.positionals[0];
   if (!name) throw new CliError('Usage: verikun key <name|code>', 2);
   ctx.driver.pressKey(name);
+  ctx.record?.note({ message: `key ${name}` });
   out(`key ${name}`);
   return 0;
 }
 
 function quickKey(ctx: Ctx, name: string): number {
   ctx.driver.pressKey(name);
+  ctx.record?.note({ message: `key ${name}` });
   out(name);
   return 0;
 }
 
-function cmdSwipe(ctx: Ctx): number {
+async function cmdSwipe(ctx: Ctx): Promise<number> {
   const duration = flagNum(ctx.flags, 'duration') ?? 300;
   const from = flagStr(ctx.flags, 'from');
   const to = flagStr(ctx.flags, 'to');
@@ -243,6 +341,7 @@ function cmdSwipe(ctx: Ctx): number {
     const a = parsePoint(from);
     const b = parsePoint(to);
     ctx.driver.swipe(a.x, a.y, b.x, b.y, duration);
+    ctx.record?.note({ message: `swiped (${a.x},${a.y})->(${b.x},${b.y})` });
     out(`swiped (${a.x},${a.y})->(${b.x},${b.y})`);
     return 0;
   }
@@ -254,9 +353,13 @@ function cmdSwipe(ctx: Ctx): number {
 
   // Region the swipe happens within: the whole screen, or one element via --on.
   let region;
+  let waitedMs = 0;
   const on = flagStr(ctx.flags, 'on');
   if (on) {
-    const { element } = resolveOne(ctx.driver.getElements(), parseSelector(on, { contains: flagBool(ctx.flags, 'contains') }));
+    const onSel = parseSelector(on, { contains: flagBool(ctx.flags, 'contains') });
+    const { element, waitedMs: w } = await resolveOneWaiting(ctx, onSel);
+    waitedMs = w;
+    ctx.record?.note({ selector: onSel, element });
     region = element.bounds;
   } else {
     const { width, height } = ctx.driver.screenSize();
@@ -292,7 +395,8 @@ function cmdSwipe(ctx: Ctx): number {
       throw new CliError(`Unknown direction '${dir}' (use up|down|left|right)`, 2);
   }
   ctx.driver.swipe(a.x, a.y, b.x, b.y, duration);
-  out(`swiped ${dir}`);
+  ctx.record?.note({ message: `swiped ${dir}${on ? ` on ${on}` : ''}` });
+  out(`swiped ${dir}${waitNote(waitedMs)}`);
   return 0;
 }
 
@@ -301,6 +405,8 @@ function cmdScreenshot(ctx: Ctx): number {
   const outFlag = flagStr(ctx.flags, 'out');
   const path = outFlag ? resolve(process.cwd(), outFlag) : defaultScreenshotPath();
   writeFileSync(path, buf);
+  ctx.record?.attachImage(buf);
+  ctx.record?.note({ message: path });
   if (flagBool(ctx.flags, 'json')) json({ path, bytes: buf.length });
   else out(path);
   return 0;
@@ -314,23 +420,29 @@ async function cmdWait(ctx: Ctx): Promise<number> {
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
-    const { matches } = matchElements(ctx.driver.getElements(), sel);
+    const { matches, tier } = matchElements(ctx.driver.getElements(), sel);
     if (gone ? matches.length === 0 : matches.length > 0) {
+      ctx.record?.note({ selector: sel, tier, element: matches[0], message: gone ? 'gone' : `${matches.length} match(es)` });
       if (gone) out(`gone: '${sel.raw}'`);
       else out(formatCompact(matches));
       return 0;
     }
     await sleep(interval);
   }
+  ctx.record?.note({ selector: sel, message: `timeout after ${timeout}ms${gone ? ' (still present)' : ' (never appeared)'}` });
   err(`timeout after ${timeout}ms waiting for '${sel.raw}'${gone ? ' to disappear' : ''}`);
   return 1;
 }
 
-function cmdAssert(ctx: Ctx): number {
-  const sel = buildSelector(ctx.positionals[0], ctx.flags);
-  const { matches } = matchElements(ctx.driver.getElements(), sel);
-  const gone = flagBool(ctx.flags, 'gone');
-  const wantText = flagStr(ctx.flags, 'text');
+/** Evaluate an assertion against a single captured snapshot. */
+function evalAssert(
+  els: Element[],
+  sel: Selector,
+  flags: Flags,
+): { pass: boolean; reason: string; matches: Element[] } {
+  const { matches } = matchElements(els, sel);
+  const gone = flagBool(flags, 'gone');
+  const wantText = flagStr(flags, 'text');
 
   let pass: boolean;
   let reason: string;
@@ -341,7 +453,7 @@ function cmdAssert(ctx: Ctx): number {
     pass = false;
     reason = 'not found';
   } else if (wantText !== undefined) {
-    const contains = flagBool(ctx.flags, 'contains');
+    const contains = flagBool(flags, 'contains');
     pass = matches.some((m) =>
       contains
         ? m.text.toLowerCase().includes(wantText.toLowerCase())
@@ -352,7 +464,22 @@ function cmdAssert(ctx: Ctx): number {
     pass = true;
     reason = `found ${matches.length}`;
   }
+  return { pass, reason, matches };
+}
 
+async function cmdAssert(ctx: Ctx): Promise<number> {
+  const sel = buildSelector(ctx.positionals[0], ctx.flags);
+  // Auto-wait subsumes the common "wait then assert": poll until the assertion
+  // passes or the window elapses. `--gone` therefore waits for disappearance.
+  const deadline = Date.now() + waitWindowMs(ctx.flags);
+  let result = evalAssert(ctx.driver.getElements(), sel, ctx.flags);
+  while (!result.pass && Date.now() < deadline) {
+    await sleep(pollStep(ctx.flags, deadline));
+    result = evalAssert(ctx.driver.getElements(), sel, ctx.flags);
+  }
+  const { pass, reason, matches } = result;
+
+  ctx.record?.note({ selector: sel, element: matches[0], message: `${pass ? 'PASS' : 'FAIL'} — ${reason}` });
   if (flagBool(ctx.flags, 'json')) json({ pass, selector: sel.raw, reason, matches: matches.map(toJsonShape) });
   else out(`${pass ? 'PASS' : 'FAIL'} ${sel.raw} — ${reason}`);
   return pass ? 0 : 1;
@@ -362,6 +489,7 @@ function cmdLaunch(ctx: Ctx): number {
   const appId = ctx.positionals[0];
   if (!appId) throw new CliError('Usage: verikun launch <package|bundleId>', 2);
   ctx.driver.launch(appId);
+  ctx.record?.note({ message: `launched ${appId}` });
   out(`launched ${appId}`);
   return 0;
 }
@@ -370,6 +498,7 @@ function cmdStop(ctx: Ctx): number {
   const appId = ctx.positionals[0];
   if (!appId) throw new CliError('Usage: verikun stop <package|bundleId>', 2);
   ctx.driver.stop(appId);
+  ctx.record?.note({ message: `stopped ${appId}` });
   out(`stopped ${appId}`);
   return 0;
 }
@@ -379,9 +508,120 @@ function cmdCurrent(ctx: Ctx): number {
   return 0;
 }
 
+// Manage the active test run. Needs no device, so it is dispatched before the
+// driver is built and is itself never recorded as a step.
+function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?: string): number {
+  const sub = (positionals[0] ?? 'status').toLowerCase();
+  const asJson = flagBool(flags, 'json');
+  const tally = (steps: { status: string }[]) => ({
+    passed: steps.filter((s) => s.status === 'passed').length,
+    failed: steps.filter((s) => s.status !== 'passed').length,
+  });
+
+  switch (sub) {
+    case 'start': {
+      const state = Recorder.start(positionals[1], platform, device, flagBool(flags, 'force'));
+      if (asJson) json({ started: state.id, name: state.name });
+      else err(`started test run '${state.name}' (${state.id})`);
+      return 0;
+    }
+    case 'status': {
+      const state = Recorder.status();
+      if (asJson) {
+        json(state ?? { active: false });
+        return 0;
+      }
+      if (!state) {
+        out('no active test run');
+        return 0;
+      }
+      const { passed, failed } = tally(state.steps);
+      out(`run '${state.name}' (${state.id})${state.implicit ? ' [implicit]' : ''}: ${state.steps.length} step(s), ${passed} passed, ${failed} failed/error`);
+      out(`  ${Recorder.contextLine(state)}`);
+      for (const s of state.steps) out(`  #${s.index} ${s.status.toUpperCase()} ${s.name} (${s.durationMs}ms)`);
+      return 0;
+    }
+    case 'clear':
+    case 'stop':
+    case 'discard': {
+      const cleared = Recorder.clear();
+      if (asJson) json({ cleared: cleared?.id ?? null });
+      else out(cleared ? `discarded test run '${cleared.name}' (${cleared.steps.length} step(s))` : 'no active test run');
+      return 0;
+    }
+    case 'archive':
+    case 'finish':
+    case 'save': {
+      const { dir, xmlPath, htmlPath, state } = Recorder.archive(positionals[1]);
+      const { passed, failed } = tally(state.steps);
+      if (asJson) {
+        json({ archived: dir, report: htmlPath, junit: xmlPath, steps: state.steps.length, passed, failed });
+      } else {
+        out(dir); // primary result: the archived run directory
+        err(`archived '${state.name}': ${state.steps.length} step(s), ${passed} passed, ${failed} failed/error`);
+        err(`  JUnit: ${xmlPath}`);
+        err(`  HTML:  ${htmlPath}`);
+      }
+      // Exit non-zero when the run contained failures, so CI can gate on it.
+      return failed > 0 ? 1 : 0;
+    }
+    default:
+      throw new CliError(`Unknown 'run' subcommand '${sub}'. Use: start | status | archive | clear.`, 2);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
+
+async function executeCommand(command: string, ctx: Ctx): Promise<number> {
+  switch (command) {
+    case 'devices':
+      return cmdDevices(ctx);
+    case 'doctor':
+      return cmdDoctor(ctx);
+    case 'ui':
+    case 'dump':
+      return cmdUi(ctx);
+    case 'find':
+      return await cmdFind(ctx);
+    case 'tap':
+    case 'click':
+      return await cmdTap(ctx);
+    case 'text':
+      return await cmdText(ctx);
+    case 'type':
+      return cmdType(ctx);
+    case 'key':
+      return cmdKey(ctx);
+    case 'back':
+      return quickKey(ctx, 'back');
+    case 'home':
+      return quickKey(ctx, 'home');
+    case 'enter':
+      return quickKey(ctx, 'enter');
+    case 'swipe':
+    case 'scroll':
+      return await cmdSwipe(ctx);
+    case 'screenshot':
+    case 'shot':
+      return cmdScreenshot(ctx);
+    case 'wait':
+      return await cmdWait(ctx);
+    case 'assert':
+      return await cmdAssert(ctx);
+    case 'launch':
+    case 'open':
+      return cmdLaunch(ctx);
+    case 'stop':
+      return cmdStop(ctx);
+    case 'current':
+      return cmdCurrent(ctx);
+    default:
+      err(`Unknown command '${command}'. Run \`verikun help\`.`);
+      return 2;
+  }
+}
 
 export async function run(argv: string[]): Promise<number> {
   const { command, positionals, flags } = parseArgs(argv);
@@ -398,55 +638,34 @@ export async function run(argv: string[]): Promise<number> {
   const platform = platformFromFlags(flags);
   const device = deviceFromFlags(flags, platform);
 
+  // Test-run management is dispatched before any device work and isn't recorded.
+  if (command === 'run') return cmdRun(positionals, flags, platform, device);
+
+  // Recordable commands open a step (auto-starting an implicit run if needed);
+  // the step is finalized with the outcome — and, on failure, screenshot + UI
+  // hierarchy of the page are captured — whether the command returns or throws.
+  const recordable = isRecordable(command);
+  let driver: Driver | undefined;
+  let recorder: Recorder | null = null;
   try {
-    const ctx: Ctx = { driver: getDriver(platform, device), platform, device, positionals, flags };
-    switch (command) {
-      case 'devices':
-        return cmdDevices(ctx);
-      case 'doctor':
-        return cmdDoctor(ctx);
-      case 'ui':
-      case 'dump':
-        return cmdUi(ctx);
-      case 'find':
-        return cmdFind(ctx);
-      case 'tap':
-      case 'click':
-        return cmdTap(ctx);
-      case 'text':
-        return cmdText(ctx);
-      case 'type':
-        return cmdType(ctx);
-      case 'key':
-        return cmdKey(ctx);
-      case 'back':
-        return quickKey(ctx, 'back');
-      case 'home':
-        return quickKey(ctx, 'home');
-      case 'enter':
-        return quickKey(ctx, 'enter');
-      case 'swipe':
-      case 'scroll':
-        return cmdSwipe(ctx);
-      case 'screenshot':
-      case 'shot':
-        return cmdScreenshot(ctx);
-      case 'wait':
-        return await cmdWait(ctx);
-      case 'assert':
-        return cmdAssert(ctx);
-      case 'launch':
-      case 'open':
-        return cmdLaunch(ctx);
-      case 'stop':
-        return cmdStop(ctx);
-      case 'current':
-        return cmdCurrent(ctx);
-      default:
-        err(`Unknown command '${command}'. Run \`verikun help\`.`);
-        return 2;
+    driver = getDriver(platform, device);
+    if (recordable) {
+      // Resolve the serial up front (cheap; the driver caches it) so the run can
+      // detect a device change. Tolerate failure — the handler raises the real error.
+      let serial: string | undefined;
+      try {
+        serial = driver.resolvedSerial();
+      } catch {
+        /* surfaced by the command handler below */
+      }
+      recorder = Recorder.beginStep(command, positionals, flags, platform, device, serial);
     }
+    const ctx: Ctx = { driver, platform, device, positionals, flags, record: recorder ?? undefined };
+    const code = await executeCommand(command, ctx);
+    recorder?.finish(code, driver);
+    return code;
   } catch (e) {
+    recorder?.finishError(e as Error, driver);
     if (e instanceof CliError) {
       if (flagBool(flags, 'json')) json({ error: e.message, exitCode: e.exitCode });
       else err(e.message);
@@ -485,6 +704,15 @@ ENVIRONMENT
   devices [--json]                    List attached devices/simulators
   doctor [--fix]                      Diagnose adb/device; --fix disables animations
 
+TEST RUNS (actions are recorded; a run auto-starts on first action)
+  run start [name] [--force]          Begin a named run (else one starts implicitly)
+  run status                          Show the active run, its device/session, and steps
+  run archive [name]                  Write JUnit + HTML report, move to ./.verikun/runs/<id>/
+  run clear                           Discard the active run with no report
+  An implicit run auto-closes (archives) and rolls over on a device change, a
+  VERIKUN_SESSION change, or VERIKUN_RUN_IDLE_MIN minutes idle (default 30; 0 off).
+  VERIKUN_NO_RUN=1 disables recording entirely.
+
 SELECTORS
   @login          shorthand for id:login
   id:login        resource-id (full, suffix, or short name)
@@ -493,6 +721,14 @@ SELECTORS
   class:Button    type or full class name
   "Sign in"       bare string == text:"Sign in"
   Modifiers: --contains (substring), --index N (pick Nth match)
+
+AUTO-WAIT (selector lookups retry until they resolve)
+  Selector commands (tap, text, find, assert, swipe --on) re-poll the screen for
+  up to 5s when a lookup misses, so a settling UI needs no explicit \`wait\`.
+  --wait <dur>   override the window: 8s, 800ms, or bare ms (3000); 0 disables
+  --no-wait      fail fast on the first miss (same as --wait 0)
+  Ambiguity is never waited on (the elements are already there). The \`wait\`
+  command stays for explicit polling, including --gone, with --timeout/--interval.
 
 GLOBAL FLAGS
   -d, --device <serial>   target a specific device (or VERIKUN_DEVICE / ANDROID_SERIAL)

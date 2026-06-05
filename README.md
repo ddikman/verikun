@@ -63,19 +63,19 @@ vk screenshot                   # -> ./.verikun/screen.png
 | Command | Description |
 |---|---|
 | `ui [--all] [--tree] [--json]` | Compact list of interactive/labeled elements. `--all` keeps layout nodes; `--tree` indents by nesting; `--json` is structured. |
-| `find <selector> [--json]` | Print elements matching a selector. Exit 1 if none. |
-| `assert <selector> [--text S] [--gone] [--contains]` | Assertion for tests. Exit 0 pass / 1 fail. |
-| `wait <selector> [--timeout ms] [--interval ms] [--gone]` | Poll the hierarchy until match (or absence). Exit 1 on timeout. |
+| `find <selector> [--json] [--wait <dur>\|--no-wait]` | Print elements matching a selector. [Auto-waits](#auto-wait) up to 5s; exit 1 if still none. |
+| `assert <selector> [--text S] [--gone] [--contains] [--wait <dur>\|--no-wait]` | Assertion for tests. [Auto-waits](#auto-wait) until it passes. Exit 0 pass / 1 fail. |
+| `wait <selector> [--timeout ms] [--interval ms] [--gone]` | Poll the hierarchy until match (or absence). Exit 1 on timeout. (Explicit polling — distinct from the `--wait` flag.) |
 | `current` | Best-effort foreground app/activity. |
 
 ### Act
 | Command | Description |
 |---|---|
-| `tap <selector\|index>` / `tap --at x,y` | Tap an element (or raw coordinates). A bare integer taps `[index]` from the latest `ui`. |
-| `text <selector> <text…> [--clear] [--enter]` | Focus a field and type. `--clear` deletes existing text first. |
+| `tap <selector\|index>` / `tap --at x,y` | Tap an element (or raw coordinates). Selector taps [auto-wait](#auto-wait); a bare integer taps `[index]` from the latest `ui` (never waits). |
+| `text <selector> <text…> [--clear] [--enter]` | Focus a field and type. `--clear` deletes existing text first. The field lookup [auto-waits](#auto-wait). |
 | `type <text…> [--enter]` | Type into the currently focused field. |
 | `key <name\|code>` / `back` / `home` / `enter` | Send a key event (named keys or a raw Android keycode). |
-| `swipe <up\|down\|left\|right> [--on <selector>] [--distance f] [--duration ms]` | Directional swipe over the screen (or within an element via `--on`). `--distance` is a fraction of the region (default 0.6). |
+| `swipe <up\|down\|left\|right> [--on <selector>] [--distance f] [--duration ms]` | Directional swipe over the screen (or within an element via `--on`, whose lookup [auto-waits](#auto-wait)). `--distance` is a fraction of the region (default 0.6). |
 | `swipe --from x,y --to x,y [--duration ms]` | Explicit swipe between two points. |
 | `screenshot [--out path] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. |
 | `launch <app>` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). |
@@ -85,6 +85,49 @@ vk screenshot                   # -> ./.verikun/screen.png
 |---|---|
 | `devices [--json]` | List attached devices/simulators. |
 | `doctor [--fix]` | Diagnose adb + device; `--fix` sets the three animation scales to 0 for deterministic UI. |
+
+### Test runs
+| Command | Description |
+|---|---|
+| `run start [name] [--force]` | Begin a named run. One auto-starts on the first action if you don't. |
+| `run status` | Show the active run and its recorded steps. |
+| `run archive [name]` | Write JUnit + HTML report to `./.verikun/runs/<id>/`; exits non-zero if any step failed. |
+| `run clear` | Discard the active run without a report. |
+
+## Test runs & reports
+
+Actions are recorded into a **test run** — one auto-starts on the first action
+(set `VERIKUN_NO_RUN=1` to disable). Every command becomes a step with its
+timing, the selector + identifier it resolved through, and pass/fail; a failing
+step also captures a screenshot **and** the UI hierarchy of the page.
+
+`vk run archive` finalizes the run into `./.verikun/runs/<id>/`:
+
+- **`report.xml`** — JUnit: one `<testcase>` per step with timings, `<failure>`
+  for failed assertions, `<error>` for environment errors, and the resolved
+  identifier in `<system-out>`. Drops straight into CI.
+- **`report.html`** — a self-contained report: every step, the identifiers used,
+  any screenshots taken, and the screenshot + hierarchy of any failed page.
+- **`run.json`** — the raw recording.
+
+`vk run archive` exits non-zero when the run contained failures, so the same
+command both produces the report and gates CI.
+
+### Automatic rollover
+
+So an implicit run never silently merges unrelated activity, the active run
+**auto-closes (archives) and a fresh one starts** when the context changes:
+
+| Trigger | Applies to | Tune with |
+|---|---|---|
+| Idle too long (default 30 min) | implicit runs only | `VERIKUN_RUN_IDLE_MIN` (minutes; `0` disables) |
+| Different device serial | any run | — |
+| Different session | any run | `VERIKUN_SESSION` (falls back to `TERM_SESSION_ID`) |
+
+A run you named with `vk run start` is **sticky to idle** — only a hard context
+change (device or session) rolls it over. Rollover always *archives* the old run
+(never discards it) and prints the reason + destination to stderr. Set
+`VERIKUN_NO_RUN=1` to disable recording entirely.
 
 ## Selectors
 
@@ -102,6 +145,39 @@ selects the Nth match (0-based) when a selector intentionally matches several.
 If a selector for an action matches more than one element and no `--index` is
 given, the command fails with exit code 2 and lists the candidates — it never
 taps a guess.
+
+## Auto-wait
+
+A UI rarely settles the instant the previous action returns. So selector
+commands — `tap`, `text`, `find`, `assert`, and `swipe --on` — **don't fail the
+moment a lookup misses**: they re-capture the hierarchy and retry until it
+resolves or a **5-second** window elapses. A straightforward flow can then skip
+explicit `wait` calls (fewer round-trips, fewer tokens):
+
+```sh
+vk tap @next            # waits up to 5s for @next to appear, then taps
+vk assert text:"Done"   # waits up to 5s for "Done" to show, then asserts
+vk find @spinner --no-wait   # existence probe: answer now, don't wait
+```
+
+| Flag | Effect |
+|---|---|
+| *(none)* | Wait up to **5s** (the default) for the lookup to resolve. |
+| `--wait <dur>` | Override the window: `8s`, `800ms`, or a bare number of ms (`3000`). `0` disables. |
+| `--no-wait` | Fail immediately on the first miss (identical to `--wait 0`). |
+| `--interval <ms>` | Poll cadence while waiting (default 300 ms). |
+
+Two deliberate boundaries:
+
+- **Ambiguity is never waited on.** If the lookup matches more than one element,
+  they're already on screen — the command reports the candidates and exits 2 at
+  once (waiting can't disambiguate). Add `--index N` or refine the selector.
+- **`assert --gone` waits for *disappearance*** — it polls until the element is
+  absent, so it subsumes "`wait --gone` then assert" in one call.
+
+This is distinct from the `wait` **command**, which stays for explicit polling
+(with its own `--timeout`/`--interval` and `--gone`) when you want to block on a
+condition as a step in its own right.
 
 ## Global flags
 
