@@ -46,7 +46,7 @@ These conventions span files; breaking one quietly breaks agent control flow.
 - **stdout = data, stderr = diagnostics.** `out()` → stdout, `err()` → stderr (`src/output.ts`). Healed-match notes, "tapped …" confirmations, and warnings go to stderr so stdout stays parseable.
 - **`--json` everywhere, including errors.** When `--json` is set, the catch in `run()` emits `{error, exitCode}` as JSON. New commands should honor `--json` for their success output too.
 - **No host shell, ever.** `exec.ts` runs everything via `spawnSync` with an args array (no `shell: true`) — so host-side injection is impossible. *Device-side* shell escaping (for `adb shell input text …`) is the driver's job: see `escapeText()` in `drivers/adb.ts` (` ` → `%s`, backslash-escape shell metacharacters). Add new device-shell args through that, not by string-concatenating into a command.
-- **Zero runtime dependencies is a design constraint.** The XML parser (`ui/android-parse.ts`) and arg parser (`args.ts`) are hand-rolled on purpose. Don't add an npm runtime dep without a deliberate decision.
+- **Zero runtime dependencies is a design constraint.** The XML parser (`ui/android-parse.ts`), arg parser (`args.ts`), and PNG downscaler (`image.ts`, decode/box-resample/encode over `node:zlib` only) are hand-rolled on purpose. Don't add an npm runtime dep without a deliberate decision — reach for a Node builtin first.
 
 ## Selector auto-healing (`ui/selector.ts`)
 
@@ -65,6 +65,10 @@ Load-bearing rules, mirroring auto-healing:
 - Handlers that wait return `waitedMs`; `waitNote()` appends ` (waited 1.2s)` to the confirmation. The recorded step's `durationMs` already includes the wait, so the report reflects it with no extra plumbing.
 
 When you add a selector-resolving command, route it through these helpers (not a raw `resolveOne`/`matchElements`) so it inherits auto-wait, and add `--no-wait` to your mental model of its fast path. The `wait` *command* is unrelated — it stays the explicit blocking poll (own `--timeout`/`--interval`, `--gone`).
+
+## Screenshot downscaling (`image.ts`)
+
+An agent reading a screenshot pays tokens for its pixel **area**, so `cmdScreenshot` runs the raw capture through `downscalePng(buf, maxEdge)` before writing/attaching it — by default capping the longest edge at `DEFAULT_SHOT_MAX_EDGE` (700px; we seldom need more to tell what's on screen). Precedence for the cap is `--full` (skip resampling entirely) > `--max <px>` (explicit) > `--more` (the `MORE_SHOT_MAX_EDGE` 1400px preset) > `VERIKUN_SHOT_MAX_EDGE` env > the default. `image.ts` is platform-agnostic (it's image math, not device I/O — keep it that way, like `ui/*`) and dependency-free: it parses the PNG, `inflateSync`es IDAT, reverses the per-scanline filters, box-averages to the target size, and re-encodes with a None filter + `deflateSync` + a hand-rolled CRC-32. Load-bearing: it only handles 8-bit non-interlaced gray/RGB/gray-alpha/RGBA; **any other PNG (palette, 16-bit, interlaced) is returned untouched with a `reason`** so a capture is never corrupted, only left full-size. It never upscales. Failure-evidence captures in `run.ts` deliberately stay full-resolution (humans read those in the report), so route only agent-facing screenshots through the downscaler.
 
 ## Test runs (recording → JUnit/HTML)
 

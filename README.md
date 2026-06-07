@@ -77,7 +77,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `key <name\|code>` / `back` / `home` / `enter` | Send a key event (named keys or a raw Android keycode). |
 | `swipe <up\|down\|left\|right> [--on <selector>] [--distance f] [--duration ms]` | Directional swipe over the screen (or within an element via `--on`, whose lookup [auto-waits](#auto-wait)). `--distance` is a fraction of the region (default 0.6). |
 | `swipe --from x,y --to x,y [--duration ms]` | Explicit swipe between two points. |
-| `screenshot [--out path] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. |
+| `screenshot [--out path] [--more] [--max px] [--full] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. [Downscaled](#screenshots) to a 700px longest edge by default to save tokens; `--more` bumps detail, `--max px` sets an exact cap, `--full` keeps the original. |
 | `launch <app>` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). |
 
 ### Environment
@@ -198,6 +198,29 @@ condition as a step in its own right.
 | `3` | environment error (adb/simctl missing, no/multiple devices, dump failed) |
 
 Data goes to stdout; diagnostics/errors go to stderr.
+
+## Screenshots
+
+A device screenshot is large (~1080×2400), and an agent that reads it back as an
+image pays for that pixel area in tokens — yet you seldom need much detail to see
+what's on screen. So `vk screenshot` **downscales by default** to a **700px
+longest edge**: UI text stays legible while the image shrinks ~12× in area (and
+proportionally in tokens).
+
+| Flag | Effect |
+|---|---|
+| *(none)* | Cap the longest edge at **700px** (never upscales). |
+| `--more` | Bump to a higher-detail **1400px** cap when 700 reads too coarse. |
+| `--max <px>` | Use an exact cap — e.g. `--max 500` to save even more. |
+| `--full` | Write the original, full-resolution capture. |
+| `VERIKUN_SHOT_MAX_EDGE` | Env var to change the default cap globally. |
+
+Precedence: `--full` > `--max <px>` > `--more` > the default.
+
+Resizing is a dependency-free, pure-Node PNG resample (box filter). PNGs it can't
+safely resample (palette, 16-bit, interlaced) are written through untouched, so a
+screenshot is never corrupted — only sometimes left full-size (noted on stderr).
+Failure-evidence captures in test-run reports stay full-resolution for debugging.
 
 ## How it works
 

@@ -1,6 +1,6 @@
 {
   "name": "verikun",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Drive Android emulators/devices (and later iOS simulators) for AI agents: tap, type, swipe, screenshot, and inspect the UI hierarchy by semantic identifiers — like Puppeteer for native apps.",
   "bin": {
     "verikun": "dist/bin/verikun.js",

@@ -9,8 +9,9 @@ import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchRes
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
 import { out, err, json, defaultScreenshotPath } from './output';
 import { Recorder, isRecordable } from './run';
+import { downscalePng } from './image';
 
-const VERSION = '0.1.0';
+const VERSION = '0.3.0';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -400,15 +401,54 @@ async function cmdSwipe(ctx: Ctx): Promise<number> {
   return 0;
 }
 
+// Screenshots are downscaled by default so an agent reading them spends fewer
+// tokens (image cost scales with pixel area) — we rarely need much detail to tell
+// what's on screen, and text stays legible at a small size. The cap is the
+// longest edge in px: the default is deliberately small; --more bumps it up,
+// --max <px> sets an exact cap, VERIKUN_SHOT_MAX_EDGE changes the default, and
+// --full writes the original.
+const DEFAULT_SHOT_MAX_EDGE = 700;
+const MORE_SHOT_MAX_EDGE = 1400;
+
+function shotMaxEdge(): number {
+  const env = process.env.VERIKUN_SHOT_MAX_EDGE;
+  if (env) {
+    const n = Number(env);
+    if (Number.isFinite(n) && n >= 1) return n;
+  }
+  return DEFAULT_SHOT_MAX_EDGE;
+}
+
 function cmdScreenshot(ctx: Ctx): number {
-  const buf = ctx.driver.screenshot();
+  const raw = ctx.driver.screenshot();
+  // Precedence: --full (original) > --max <px> (explicit) > --more (preset) > default.
+  const maxEdge = flagNum(ctx.flags, 'max') ?? (flagBool(ctx.flags, 'more') ? MORE_SHOT_MAX_EDGE : shotMaxEdge());
+  const res = flagBool(ctx.flags, 'full') ? null : downscalePng(raw, maxEdge);
+  const buf = res?.scaled ? res.buf : raw;
+
   const outFlag = flagStr(ctx.flags, 'out');
   const path = outFlag ? resolve(process.cwd(), outFlag) : defaultScreenshotPath();
   writeFileSync(path, buf);
   ctx.record?.attachImage(buf);
-  ctx.record?.note({ message: path });
-  if (flagBool(ctx.flags, 'json')) json({ path, bytes: buf.length });
-  else out(path);
+  ctx.record?.note({ message: res?.scaled ? `${path} (${res.width}×${res.height})` : path });
+
+  // Surface the one case worth knowing about: we wanted to shrink but couldn't.
+  if (res && !res.scaled && res.reason?.startsWith('unsupported')) {
+    err(`screenshot not downscaled: ${res.reason}`);
+  }
+
+  if (flagBool(ctx.flags, 'json')) {
+    json({
+      path,
+      bytes: buf.length,
+      ...(res?.scaled
+        ? { width: res.width, height: res.height, scaledFrom: { width: res.origWidth, height: res.origHeight } }
+        : {}),
+    });
+  } else {
+    out(path);
+    if (res?.scaled) err(`scaled ${res.origWidth}×${res.origHeight} -> ${res.width}×${res.height} (max edge ${maxEdge}px; --more for detail, --full for original)`);
+  }
   return 0;
 }
 
@@ -697,7 +737,10 @@ ACT
   key <name|code> | back | home | enter            Send a key event
   swipe <up|down|left|right> [--on <selector>] [--distance f] [--duration ms]
   swipe --from x,y --to x,y [--duration ms]
-  screenshot [--out path] [--json]    Save a PNG (default: ./.verikun/screen.png)
+  screenshot [--out path] [--more] [--max px] [--full] [--json]   Save a PNG (default: ./.verikun/screen.png)
+                                      Downscaled to <=700px longest edge for token-cheap, legible reads;
+                                      --more bumps detail (1400px), --max px sets an exact cap
+                                      (VERIKUN_SHOT_MAX_EDGE changes the default), --full keeps original
   launch <app>   stop <app>           App lifecycle (package id / bundle id)
 
 ENVIRONMENT
