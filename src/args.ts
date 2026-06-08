@@ -44,6 +44,8 @@ const BOOLEAN = new Set([
   'android',
   'fix',
   'no-wait',
+  'full',
+  'more',
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {

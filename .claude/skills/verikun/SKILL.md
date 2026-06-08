@@ -64,8 +64,11 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
 - `vk swipe up|down|left|right [--on <selector>] [--distance f] [--duration ms]`
 - `vk swipe --from x,y --to x,y [--duration ms]`
 - `vk key <name|code>`  ·  `vk back`  ·  `vk home`  ·  `vk enter`
-- `vk screenshot [--out path]` — saves a PNG (default `./.verikun/screen.png`) and
-  prints the path; then read that file to *see* the screen.
+- `vk screenshot [--out path] [--more] [--max px] [--full]` — saves a PNG (default
+  `./.verikun/screen.png`) and prints the path; then read that file to *see* the
+  screen. It's **downscaled to a 700px longest edge by default** to save tokens
+  (text stays legible); add `--more` if a screen reads too coarse, `--max px` for
+  an exact cap, or `--full` for the original.
 - `vk launch <pkg>`  ·  `vk stop <pkg>`
 
 ## Selectors
@@ -119,7 +122,9 @@ few hundred bytes; a screenshot read back as an image costs far more tokens.
 Default to the textual hierarchy to see and verify state. Reach for `vk
 screenshot` (then read the PNG) only when you genuinely need pixels — visual
 layout, rendering/spacing bugs, or content with no text/id/desc. One image can
-outweigh dozens of `vk ui` calls.
+outweigh dozens of `vk ui` calls. When you do, `vk` already downscales the PNG
+(700px longest edge) so the read stays cheap while text remains legible — add
+`--more` if a screen is too coarse to read, or `--full` when you need exact detail.
 
 **Remember identifiers across runs.** After a flow succeeds, save the selectors
 you found to memory — the mapping from human intent to selector, plus the screen
