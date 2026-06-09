@@ -12,7 +12,8 @@ description: >-
   ~5s for elements to appear, so you rarely need explicit waits (`--no-wait` opts
   out). Recorded actions form a
   test run you can archive to a JUnit + HTML report (`vk run archive`) — use when
-  asked to "test", "verify the flow", or "produce a report". iOS (--ios):
+  asked to "test", "verify the flow", or "produce a report". Run a whole known
+  flow in one call with `vk batch` (commands piped on stdin or via --file). iOS (--ios):
   screenshots + launch/stop work today via simctl; tap/type/swipe/hierarchy need
   idb (planned).
 ---
@@ -140,6 +141,34 @@ runs. Re-verify cheaply with `vk assert` / `vk find`; only fall back to a full
 `vk ui` when a remembered selector stops resolving (the app changed — then update
 the memory). Auto-healing selectors make remembered identifiers resilient to
 small label/casing changes.
+
+## Batch a known flow into one call
+
+When you already know the steps (e.g. from a remembered flow), run them as a single
+`vk batch` instead of one tool call per command — one process, far fewer
+round-trips. Pipe newline-separated commands on **stdin**, or pass `--file <path>`:
+
+```sh
+vk batch <<'EOF'
+launch com.example.app
+text @email_input "user@example.com"
+text @password_input "hunter2" --enter
+assert text:"Welcome back" --wait 8s
+run archive login-smoke
+EOF
+```
+
+Each line runs **exactly as if called standalone** — same [auto-wait](#auto-wait),
+same recording as a test-run step, same exit codes. The batch **streams each result
+to stdout, then stops at the first non-zero exit and propagates that code**, so a
+failed `tap`/`assert` halts the flow (its screenshot + hierarchy are captured in the
+run, like any failed step). Blank lines and `#` comments are skipped, and the
+`batch` call's `--device` / `--ios` / `--android` / `--json` apply to every line.
+
+Reach for it once a flow is *known*; keep using single commands while you're still
+**discovering** a screen (you need `vk ui` between steps anyway). If a batch halts,
+read its stderr line (`batch stopped at line N (…)`) to see which command failed,
+fix that selector, and re-run.
 
 ## Test runs & reports
 

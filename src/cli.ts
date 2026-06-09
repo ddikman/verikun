@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError } from './errors';
@@ -611,6 +611,153 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
 }
 
 // ---------------------------------------------------------------------------
+// batch — run many commands from stdin or a --file, one per line
+// ---------------------------------------------------------------------------
+//
+// Each non-blank, non-`#` line is parsed and executed exactly as if it had been
+// its own `vk` invocation: same driver resolution, same auto-wait, same recording
+// into the active test run, same stdout/stderr/exit semantics. Lines run in order
+// and the batch STOPS at the first command that exits non-zero, propagating that
+// code — a failed step means the flow's assumptions no longer hold, so continuing
+// would be meaningless ("break on an irrecoverable error"). Device/output globals
+// on the `batch` call are inherited by every line unless the line sets its own.
+
+const BATCH_GLOBALS = ['device', 'platform', 'ios', 'android', 'json'] as const;
+
+/** Read the batch source text: --file if given, else stdin (which must be piped). */
+function readBatchSource(flags: Flags): string {
+  const file = flagStr(flags, 'file');
+  if (file) {
+    const path = resolve(process.cwd(), file);
+    try {
+      return readFileSync(path, 'utf8');
+    } catch (e) {
+      throw new CliError(`batch: cannot read --file '${file}' (${(e as Error).message})`, 2);
+    }
+  }
+  // No --file: read newline-separated commands piped on stdin. A TTY means nothing
+  // was piped, so guide the caller instead of blocking forever on input.
+  if (process.stdin.isTTY) {
+    throw new CliError(
+      'batch: no commands. Pipe them on stdin, or pass --file <path>.\n' +
+        "  printf 'tap @login\\nassert text:Home\\n' | vk batch\n" +
+        '  vk batch --file flow.txt',
+      2,
+    );
+  }
+  try {
+    return readFileSync(0, 'utf8'); // fd 0 == stdin
+  } catch (e) {
+    throw new CliError(`batch: could not read stdin (${(e as Error).message})`, 2);
+  }
+}
+
+/**
+ * Split a batch line into argv tokens with shell-like single/double quoting and
+ * backslash escapes — but WITHOUT a shell: this is pure string scanning, so a line
+ * can never spawn a host process or expand a variable (the same no-host-shell rule
+ * the rest of the CLI follows). Throws on an unterminated quote.
+ */
+function tokenizeLine(line: string): string[] {
+  const tokens: string[] = [];
+  let cur = '';
+  let started = false; // lets an empty "" / '' still produce a real empty token
+  for (let i = 0; i < line.length; ) {
+    const c = line[i];
+    if (c === '"' || c === "'") {
+      started = true;
+      i++;
+      while (i < line.length && line[i] !== c) {
+        if (c === '"' && line[i] === '\\' && (line[i + 1] === '"' || line[i + 1] === '\\')) {
+          cur += line[i + 1];
+          i += 2;
+        } else {
+          cur += line[i++];
+        }
+      }
+      if (i >= line.length) {
+        throw new CliError(`batch: unterminated ${c === '"' ? 'double' : 'single'} quote in: ${line}`, 2);
+      }
+      i++; // consume the closing quote
+    } else if (c === '\\' && i + 1 < line.length) {
+      cur += line[i + 1];
+      started = true;
+      i += 2;
+    } else if (c === ' ' || c === '\t') {
+      if (started) {
+        tokens.push(cur);
+        cur = '';
+        started = false;
+      }
+      i++;
+    } else {
+      cur += c;
+      started = true;
+      i++;
+    }
+  }
+  if (started) tokens.push(cur);
+  return tokens;
+}
+
+/** Globals on the `batch` call become defaults for each line (the line may override). */
+function withBatchGlobals(lineFlags: Flags, batchFlags: Flags): Flags {
+  const merged: Flags = { ...lineFlags };
+  for (const k of BATCH_GLOBALS) {
+    if (merged[k] === undefined && batchFlags[k] !== undefined) merged[k] = batchFlags[k];
+  }
+  return merged;
+}
+
+async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<number> {
+  let source: string;
+  try {
+    if (positionals.length > 0) {
+      throw new CliError(
+        `batch: unexpected argument '${positionals[0]}'. Pipe commands on stdin or pass --file <path>.`,
+        2,
+      );
+    }
+    source = readBatchSource(batchFlags);
+  } catch (e) {
+    return mapError(e, batchFlags);
+  }
+
+  // Number lines first (so messages point at the true source line), then drop
+  // blank lines and `#` comments.
+  const all = source.split(/\r?\n/).map((text, i) => ({ n: i + 1, text: text.trim() }));
+  const commands = all.filter((l) => l.text.length > 0 && !l.text.startsWith('#'));
+  const quiet = flagBool(batchFlags, 'quiet');
+
+  if (commands.length === 0) {
+    err('[verikun] batch: no commands to run');
+    return 0;
+  }
+
+  for (const { n, text } of commands) {
+    let code: number;
+    try {
+      const { command, positionals: pos, flags } = parseArgs(tokenizeLine(text));
+      if (!command) continue; // tokens were all flags — nothing to run
+      if (command === 'batch') {
+        throw new CliError(`batch: a batch line may not itself be 'batch' (line ${n})`, 2);
+      }
+      if (!quiet) err(`[verikun] batch ${n}: ${text}`);
+      code = await executeParsed(command, pos, withBatchGlobals(flags, batchFlags));
+    } catch (e) {
+      // A malformed line (bad quoting, nested batch) is itself an error to halt on.
+      code = mapError(e, batchFlags);
+    }
+    if (code !== 0) {
+      err(`[verikun] batch stopped at line ${n} (\`${text}\`) — exit ${code}`);
+      return code;
+    }
+  }
+  if (!quiet) err(`[verikun] batch: ${commands.length} command(s) ok`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -663,23 +810,32 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
   }
 }
 
-export async function run(argv: string[]): Promise<number> {
-  const { command, positionals, flags } = parseArgs(argv);
-
-  if (flagBool(flags, 'version') || command === 'version') {
-    out(VERSION);
-    return 0;
+/** Map a thrown error to an exit code, emitting it as text or JSON per --json. */
+function mapError(e: unknown, flags: Flags): number {
+  if (e instanceof CliError) {
+    if (flagBool(flags, 'json')) json({ error: e.message, exitCode: e.exitCode });
+    else err(e.message);
+    return e.exitCode;
   }
-  if (!command || command === 'help' || flagBool(flags, 'help')) {
-    out(usageText());
-    return command && command !== 'help' && !flagBool(flags, 'help') ? 2 : 0;
-  }
+  err('Unexpected error: ' + (e as Error).message);
+  if (process.env.VERIKUN_DEBUG) err((e as Error).stack ?? '');
+  return 3;
+}
 
+/**
+ * Run one already-parsed command: resolve the driver, record it if recordable,
+ * execute, and map any failure to an exit code. This is the per-command core that
+ * both a top-level `run()` and each `batch` line go through, so a batched command
+ * behaves identically to a standalone invocation.
+ */
+async function executeParsed(command: string, positionals: string[], flags: Flags): Promise<number> {
   const platform = platformFromFlags(flags);
   const device = deviceFromFlags(flags, platform);
 
-  // Test-run management is dispatched before any device work and isn't recorded.
+  // Meta-commands manage local state / orchestrate other commands. They build no
+  // driver of their own and are dispatched before the recording machinery.
   if (command === 'run') return cmdRun(positionals, flags, platform, device);
+  if (command === 'batch') return cmdBatch(positionals, flags);
 
   // Recordable commands open a step (auto-starting an implicit run if needed);
   // the step is finalized with the outcome — and, on failure, screenshot + UI
@@ -706,15 +862,23 @@ export async function run(argv: string[]): Promise<number> {
     return code;
   } catch (e) {
     recorder?.finishError(e as Error, driver);
-    if (e instanceof CliError) {
-      if (flagBool(flags, 'json')) json({ error: e.message, exitCode: e.exitCode });
-      else err(e.message);
-      return e.exitCode;
-    }
-    err('Unexpected error: ' + (e as Error).message);
-    if (process.env.VERIKUN_DEBUG) err((e as Error).stack ?? '');
-    return 3;
+    return mapError(e, flags);
   }
+}
+
+export async function run(argv: string[]): Promise<number> {
+  const { command, positionals, flags } = parseArgs(argv);
+
+  if (flagBool(flags, 'version') || command === 'version') {
+    out(VERSION);
+    return 0;
+  }
+  if (!command || command === 'help' || flagBool(flags, 'help')) {
+    out(usageText());
+    return command && command !== 'help' && !flagBool(flags, 'help') ? 2 : 0;
+  }
+
+  return executeParsed(command, positionals, flags);
 }
 
 function usageText(): string {
@@ -742,6 +906,13 @@ ACT
                                       --more bumps detail (1400px), --max px sets an exact cap
                                       (VERIKUN_SHOT_MAX_EDGE changes the default), --full keeps original
   launch <app>   stop <app>           App lifecycle (package id / bundle id)
+
+BATCH (script many commands in one process)
+  batch [--file path] [--quiet]       Run newline-separated commands — from --file,
+                                      else piped stdin — each exactly as its own
+                                      command. Streams each result to stdout; stops
+                                      and propagates the exit code on the first
+                                      failure. Blank lines and # comments are skipped.
 
 ENVIRONMENT
   devices [--json]                    List attached devices/simulators
