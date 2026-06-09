@@ -80,6 +80,11 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `screenshot [--out path] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. |
 | `launch <app>` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). |
 
+### Batch
+| Command | Description |
+|---|---|
+| `batch [--file <path>] [--quiet]` | Run newline-separated commands — from `--file`, else piped **stdin** — each exactly as its own command (same auto-wait, recording, exit codes). Streams each result to stdout and **stops on the first non-zero exit**, propagating that code. Blank lines and `#` comments are skipped; `--quiet` hides per-line progress. See [Batch](#batch). |
+
 ### Environment
 | Command | Description |
 |---|---|
@@ -128,6 +133,44 @@ A run you named with `vk run start` is **sticky to idle** — only a hard contex
 change (device or session) rolls it over. Rollover always *archives* the old run
 (never discards it) and prints the reason + destination to stderr. Set
 `VERIKUN_NO_RUN=1` to disable recording entirely.
+
+## Batch
+
+Drive a whole flow from a single process instead of one `vk` call per step.
+`vk batch` reads newline-separated commands — from `--file <path>`, or piped on
+**stdin** — and runs each **exactly as if you'd typed it as its own `vk` command**:
+the same [selector auto-wait](#auto-wait), the same
+[test-run recording](#test-runs--reports) (every line is its own step), and the
+same stdout/stderr split and [exit codes](#exit-codes).
+
+```sh
+vk batch --file login.flow            # from a file
+
+vk batch <<'EOF'                      # …or piped on stdin
+launch com.example.app
+text @email_input "user@example.com"
+text @password_input "hunter2" --enter
+assert text:"Welcome back" --wait 8s
+EOF
+```
+
+- **Each result streams to stdout** as the command finishes — the same bytes you'd
+  get running the line on its own.
+- **It stops at the first command that exits non-zero**, noting where it halted (on
+  stderr) and **exiting with that command's code**. A failed `tap`/`assert` means
+  the rest of the flow can no longer be trusted, so it breaks rather than press on.
+- **Blank lines and `#` comments** are skipped, so a flow file can be annotated.
+- **Globals on the `batch` call carry into every line** unless the line overrides
+  them — `--device`, `--platform` / `--ios` / `--android`, and `--json`. So
+  `vk batch --ios --file f` runs the whole flow against the simulator.
+- `--quiet` silences the per-line progress notes on stderr; stdout data is untouched.
+
+Because each line records like an individual action, ending a batch with
+`run archive` turns the flow into a JUnit + HTML report in one shot:
+
+```sh
+printf 'launch com.example.app\nassert @home_tab\nrun archive smoke\n' | vk batch
+```
 
 ## Selectors
 
