@@ -45,16 +45,32 @@ const KEYCODES: Record<string, number> = {
 const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'];
 
 /**
- * `adb shell input text` is parsed by the on-device shell and then by `input`,
- * which maps the literal token "%s" to a space. So: encode spaces as %s, and
- * backslash-escape characters the device shell would otherwise interpret.
- * (Arbitrary Unicode is a known limitation of `input text`; use an IME like
- * ADBKeyboard for that — see SKILL.md.)
+ * Escape a string for `adb shell input text <arg>`. The argument is parsed twice
+ * before it reaches the field: once by the on-device shell (mksh), then by
+ * `input`, which maps the literal token "%s" back to a space.
+ *
+ * Strategy is an ALLOWLIST: leave ASCII letters/digits and any non-ASCII bytes
+ * untouched, and backslash-escape EVERY ASCII punctuation/symbol. For a char mksh
+ * treats as ordinary (e.g. @ . + _ - , : /) the backslash is a no-op (\x -> x),
+ * so `input` receives the same character; for one mksh would interpret
+ * (quote, backtick, $ & | ; < > ( ) * ? ~ # ! { } [ ] backslash) the escape keeps
+ * it literal. So bob@mail.com (or a value with + = % # & ;) types verbatim.
+ * Spaces are encoded last as the token %s, which `input` decodes back to a space.
+ * (One inherent limit of that convention, unchanged here: a literal "%s" in the
+ * text also decodes to a space. The backslash on % only guards the shell, not
+ * `input`'s own %s handling.)
+ *
+ * Arbitrary Unicode (accents, emoji) is a known limitation of `input text` and is
+ * passed through unchanged; use an IME like ADBKeyboard for that — see SKILL.md.
  */
 function escapeText(s: string): string {
   return s
-    .replace(/ /g, '%s')
-    .replace(/(["'`$&|;<>()*?~#!{}[\]\\])/g, '\\$1');
+    // Backslash-escape every ASCII punctuation/symbol the device shell might
+    // interpret. Ranges cover all ASCII punctuation, excluding space (\x20),
+    // 0-9, A-Z, a-z. $& is the matched char.
+    .replace(/[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]/g, '\\$&')
+    // `input` maps the literal token %s back to a space, so encode spaces last.
+    .replace(/ /g, '%s');
 }
 
 export class AdbDriver implements Driver {
