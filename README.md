@@ -72,7 +72,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 | Command | Description |
 |---|---|
 | `tap <selector\|index>` / `tap --at x,y` | Tap an element (or raw coordinates). Selector taps [auto-wait](#auto-wait); a bare integer taps `[index]` from the latest `ui` (never waits). |
-| `text <selector> <text…> [--clear] [--enter]` | Focus a field and type. `--clear` deletes existing text first. The field lookup [auto-waits](#auto-wait). |
+| `text <selector> <text…> [--clear] [--enter]` | Focus a field and type. `--clear` deletes existing text first. The field lookup [auto-waits](#auto-wait). Punctuation/symbols (e.g. emails like `bob@mail.com`) are escaped for the device shell and type verbatim — quote the value in your shell, or use [`batch`](#batch)/stdin (no host shell), so the caller's shell can't drop the `@`. |
 | `type <text…> [--enter]` | Type into the currently focused field. |
 | `key <name\|code>` / `back` / `home` / `enter` | Send a key event (named keys or a raw Android keycode). |
 | `swipe <up\|down\|left\|right> [--on <selector>] [--distance f] [--duration ms]` | Directional swipe over the screen (or within an element via `--on`, whose lookup [auto-waits](#auto-wait)). `--distance` is a fraction of the region (default 0.6). |

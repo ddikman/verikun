@@ -217,6 +217,12 @@ identifier memory described above. Set `VERIKUN_NO_RUN=1` to disable recording.
   dismiss it before re-inspecting (it can cover elements).
 - **Unicode/emoji** may not type via `adb input text` (an Android limitation);
   ASCII is reliable.
+- **Special characters type fine.** Emails and symbols (`@ . + _ - / = : , ; ! # % & …`)
+  go in verbatim — `vk` backslash-escapes every device-shell metacharacter before
+  `adb input text`, so `vk text @email "bob+tag@mail.com"` lands the whole address,
+  not just `bob`. **Quote the value** when you build the command in a shell (or feed
+  it via `vk batch`/stdin, which uses no host shell) so your *own* shell can't split
+  or drop the `@`/`#`/`&` before `vk` sees it.
 - **iOS** (`--ios`): `screenshot`, `launch`, `stop` work via simctl; everything
   interactive (tap/type/swipe/`ui`) needs `idb` and is not wired yet.
 
