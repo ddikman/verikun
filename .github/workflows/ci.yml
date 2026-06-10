@@ -43,5 +43,22 @@ jobs:
       - name: Lint (TypeScript strict type-check)
         run: npm run build
 
+      # `test:ci` runs the suite through two reporters at once: `spec` to stdout
+      # (the readable ✔/✖ list you see in this log) and a small custom reporter
+      # (scripts/github-test-summary.mjs) to test-results/summary.md.
       - name: Test (unit suite)
-        run: npm test
+        run: npm run test:ci
+        env:
+          TEST_SUMMARY_LABEL: Node ${{ matrix.node-version }}
+
+      # Surface that markdown summary on the run's page (the "Summary" tab), so a
+      # formatted test list is one click away instead of buried in the log.
+      # `always()` so it still reports when tests fail — that is when it matters.
+      - name: Publish test summary
+        if: always()
+        run: |
+          if [ -f test-results/summary.md ]; then
+            cat test-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ No test summary produced (the suite may have failed to compile)." >> "$GITHUB_STEP_SUMMARY"
+          fi
