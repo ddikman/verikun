@@ -174,7 +174,7 @@ function fmtAge(ms: number): string {
 }
 
 /** Why the active run should be closed before recording the next step, or null to keep it. */
-function rolloverReason(state: RunState, serial: string | undefined, session: string | undefined): string | null {
+export function rolloverReason(state: RunState, serial: string | undefined, session: string | undefined): string | null {
   // A different device or session is a hard context change — applies to any run.
   if (state.device && serial && state.device !== serial) return `device changed (${state.device} → ${serial})`;
   if (state.session && session && state.session !== session) return 'different session';
@@ -185,7 +185,7 @@ function rolloverReason(state: RunState, serial: string | undefined, session: st
   return null;
 }
 
-function stepName(command: string, positionals: string[], flags: Record<string, string | boolean>): string {
+export function stepName(command: string, positionals: string[], flags: Record<string, string | boolean>): string {
   const p = positionals;
   const at = typeof flags['at'] === 'string' ? (flags['at'] as string) : undefined;
   const from = typeof flags['from'] === 'string' ? (flags['from'] as string) : undefined;

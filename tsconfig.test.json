@@ -1,0 +1,14 @@
+{
+  // Type-checks and compiles the unit tests (tests/) alongside src/ into a
+  // gitignored .test-build/ directory, which `node --test` then runs. Kept
+  // separate from tsconfig.json so the published build (dist/) never includes
+  // tests, and so the `npm run build` gate stays src-only.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".test-build",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

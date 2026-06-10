@@ -351,9 +351,22 @@ prompt-cache hits (1 M cache-read tokens kept cost low on a long conversation).
 ## Development
 
 ```sh
-npm run dev      # tsc --watch
-npm run build    # one-off compile
+npm run dev       # tsc --watch
+npm run build     # one-off compile
+npm test          # type-check + run the unit suite
+npm run test:watch  # re-run the suite on change
 ```
 
 Zero runtime dependencies; the only dev dependencies are `typescript` and
 `@types/node`.
+
+### Tests
+
+Unit tests cover the platform-agnostic core (selector matching, the
+`uiautomator` XML parser, formatting, the PNG downscaler, report rendering,
+argument/duration parsing, and the device-shell escaper) and run on **Node's
+built-in test runner** (`node:test`) — no test framework is added, in keeping
+with the zero-runtime-dependency rule. They live in `tests/*.test.ts`, compile
+via `tsconfig.test.json` into the gitignored `.test-build/`, and need no device.
+Driver code that talks to `adb`/`xcrun` is verified end-to-end instead, by
+running the built CLI against a real device (`vk doctor`, `vk ui`).

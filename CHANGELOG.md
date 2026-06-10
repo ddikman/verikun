@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Unit test suite** (`npm test`) for the platform-agnostic core — selector
+  matching/auto-healing, the `uiautomator` XML parser, element formatting, the
+  PNG downscaler, JUnit/HTML report rendering, argument/duration parsing, and
+  the device-shell escaper. It runs on Node's built-in test runner
+  (`node:test`), so no test framework is added and the zero-runtime-dependency
+  rule holds (dev deps remain `typescript` + `@types/node`). Tests live in
+  `tests/*.test.ts`, compile via `tsconfig.test.json` into a gitignored
+  `.test-build/`, and need no connected device.
+
 ## [0.3.0] - 2026-06-07
 
 ### Added

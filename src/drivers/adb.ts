@@ -63,7 +63,7 @@ const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'
  * Arbitrary Unicode (accents, emoji) is a known limitation of `input text` and is
  * passed through unchanged; use an IME like ADBKeyboard for that — see SKILL.md.
  */
-function escapeText(s: string): string {
+export function escapeText(s: string): string {
   return s
     // Backslash-escape every ASCII punctuation/symbol the device shell might
     // interpret. Ranges cover all ASCII punctuation, excluding space (\x20),
