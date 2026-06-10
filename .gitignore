@@ -6,6 +6,9 @@ dist/
 .test-build/
 *.tsbuildinfo
 
+# Unit-test CI output (spec log + markdown step summary)
+test-results/
+
 # Logs
 *.log
 npm-debug.log*

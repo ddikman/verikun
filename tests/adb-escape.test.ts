@@ -12,8 +12,17 @@ test('escapeText: spaces become %s', () => {
   assert.equal(escapeText('a b c'), 'a%sb%sc');
 });
 
-test('escapeText: plain text passes through unchanged', () => {
-  assert.equal(escapeText('me@example.com'), 'me@example.com');
+test('escapeText: alphanumerics pass through unchanged', () => {
+  // Only ASCII letters/digits (and non-ASCII) are left alone; everything in the
+  // ASCII punctuation range is escaped.
+  assert.equal(escapeText('hello'), 'hello');
+  assert.equal(escapeText('abc123XYZ'), 'abc123XYZ');
+});
+
+test('escapeText: email punctuation is escaped so it types verbatim', () => {
+  // The whole point of the hardening: `@` and `.` are device-shell punctuation,
+  // so they are backslash-escaped to be typed literally rather than interpreted.
+  assert.equal(escapeText('me@example.com'), 'me\\@example\\.com');
 });
 
 test('escapeText: shell metacharacters are backslash-escaped', () => {
