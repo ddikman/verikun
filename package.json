@@ -14,8 +14,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "verikun": "node dist/bin/verikun.js",
-    "test": "tsc -p tsconfig.test.json && node --test .test-build/tests/",
-    "test:watch": "tsc -p tsconfig.test.json && node --test --watch .test-build/tests/",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/tests/*.test.js",
+    "test:watch": "tsc -p tsconfig.test.json && node --test --watch .test-build/tests/*.test.js",
     "prepublishOnly": "npm run build"
   },
   "engines": {
