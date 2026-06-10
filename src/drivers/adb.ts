@@ -51,7 +51,7 @@ const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'
  * (Arbitrary Unicode is a known limitation of `input text`; use an IME like
  * ADBKeyboard for that — see SKILL.md.)
  */
-function escapeText(s: string): string {
+export function escapeText(s: string): string {
   return s
     .replace(/ /g, '%s')
     .replace(/(["'`$&|;<>()*?~#!{}[\]\\])/g, '\\$1');

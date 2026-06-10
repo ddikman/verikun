@@ -12,10 +12,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm install        # dev deps only (typescript, @types/node) — there are NO runtime deps
 npm run build      # tsc: src/ -> dist/
 npm run dev        # tsc --watch
+npm test           # type-check + run the unit suite (node:test) — see Unit tests below
 npm link           # optional: put `verikun` + `vk` on PATH (else: node dist/bin/verikun.js <cmd>)
 ```
 
-There is **no automated test suite and no linter configured.** TypeScript `strict` is the only static check — a clean `npm run build` (or `npx tsc --noEmit`) is the gate. Behaviour is verified by running the built CLI against a real device (`vk doctor`, `vk ui`, etc.); the connected Android device may be a personal phone, so avoid destructive actions (submitting forms, creating accounts) when exercising it.
+**No linter is configured;** TypeScript `strict` is the only static check — a clean `npm run build` (or `npx tsc --noEmit`) is the static gate. There is a **unit suite** (`npm test`) covering the platform-agnostic core — selector matching, XML parsing, formatting, image downscaling, report rendering, arg/duration parsing, and the device-shell escaper — but it does **not** touch a device. End-to-end behaviour is still verified by running the built CLI against a real device (`vk doctor`, `vk ui`, etc.); the connected Android device may be a personal phone, so avoid destructive actions (submitting forms, creating accounts) when exercising it.
 
 `dist/` is gitignored. After editing any `src/**` file you must rebuild before the linked `vk`/`node dist/...` reflects the change — the dist on PATH is stale until `npm run build` runs.
 
@@ -88,6 +89,12 @@ Key behaviours, each load-bearing:
 - **Pass/fail mapping.** Returned exit code or thrown `CliError.exitCode`: `0`→passed, `1`→`<failure>` (assertion), `≥2`→`<error>` (env/usage). `vk run archive` itself **exits non-zero when the run had failures**, so the archive command doubles as a CI gate.
 - **Secrets.** Step names never include typed text; `cmdText` redacts the value into the step message when the field `password` flag is set. Keep that property if you add input commands.
 - **Disable** with `VERIKUN_NO_RUN=1` (`beginStep` returns null → `ctx.record` undefined → every `note`/`attachImage` is a no-op).
+
+## Unit tests
+
+`npm test` type-checks and runs the suite via **Node's built-in test runner** (`node:test` + `node:assert`) — no test framework is installed, keeping with the zero-runtime-dependency ethos (the only dev deps remain `typescript` + `@types/node`). Tests live in `tests/*.test.ts` and are compiled by `tsconfig.test.json` (extends the base, `rootDir: "."`, `outDir: ".test-build"`, includes `src` + `tests`) into the gitignored `.test-build/`, which `node --test` then runs. The directory is named `tests/` (plural) on purpose: `node --test`'s default discovery treats every file under a `test/` dir as a test, so `tests/helpers.ts` (shared `makeEl` / `makePng` fixtures) is only picked up under the plural name.
+
+Scope is the **platform-agnostic core** — the layers that never touch `adb`/`xcrun`, so no device is needed: `args.ts`, `ui/selector.ts`, `ui/android-parse.ts`, `ui/format.ts`, `image.ts`, `report.ts`, `errors.ts`, plus pure helpers from `cli.ts`/`run.ts`/`drivers/adb.ts`. A handful of those helpers (`escapeText`, `tokenizeLine`, `evalAssert`, `parseDuration`, `waitWindowMs`, `parsePoint`, `healNote`, `waitNote`, `withBatchGlobals`, `stepName`, `rolloverReason`) are `export`ed **solely so the suite can reach them** — they are otherwise internal; keep them exported. The drivers themselves and the `getElements`→`uiautomator` round-trip are intentionally **not** unit-tested (that is what `vk doctor`/`vk ui` against a real device cover). When you add a pure function to the core, add a `tests/<module>.test.ts` case; when you add a platform method, it stays device-verified.
 
 ## Extending a platform backend
 

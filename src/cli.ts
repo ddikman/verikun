@@ -50,14 +50,14 @@ function buildSelector(raw: string | undefined, flags: Flags): Selector {
   return parseSelector(raw, { contains: flagBool(flags, 'contains'), index: flagNum(flags, 'index') });
 }
 
-function parsePoint(s: string): Point {
+export function parsePoint(s: string): Point {
   const m = /^(-?\d+)\s*,\s*(-?\d+)$/.exec(s.trim());
   if (!m) throw new CliError(`Expected coordinates as x,y but got '${s}'`, 2);
   return { x: +m[1], y: +m[2] };
 }
 
 /** A short note appended to action output when the selector matched non-exactly. */
-function healNote(tier: MatchTier | null): string {
+export function healNote(tier: MatchTier | null): string {
   return tier && tier !== 'exact' ? ` (healed: ${tier} match)` : '';
 }
 
@@ -73,7 +73,7 @@ const DEFAULT_WAIT_MS = 5000;
 const DEFAULT_POLL_MS = 300;
 
 /** Parse a duration: a bare number is milliseconds (CLI convention), or `5s` / `800ms`. */
-function parseDuration(raw: string, flag: string): number {
+export function parseDuration(raw: string, flag: string): number {
   const m = /^(\d+(?:\.\d+)?)\s*(ms|s)?$/.exec(raw.trim());
   if (!m) throw new CliError(`--${flag} must be a duration like 5000, 5s, or 800ms; got '${raw}'`, 2);
   const n = Number(m[1]);
@@ -81,7 +81,7 @@ function parseDuration(raw: string, flag: string): number {
 }
 
 /** Wait window (ms) for selector lookups: `--no-wait`/`--wait 0` → 0; else `--wait <dur>`, else 5s. */
-function waitWindowMs(flags: Flags): number {
+export function waitWindowMs(flags: Flags): number {
   if (flagBool(flags, 'no-wait')) return 0;
   const v = flags['wait'];
   if (v === undefined || v === true) return DEFAULT_WAIT_MS; // absent, or bare `--wait` → default
@@ -89,7 +89,7 @@ function waitWindowMs(flags: Flags): number {
 }
 
 /** A short note appended to a confirmation when the action had to wait for its target. */
-function waitNote(ms: number): string {
+export function waitNote(ms: number): string {
   return ms >= 100 ? ` (waited ${(ms / 1000).toFixed(1)}s)` : '';
 }
 
@@ -475,7 +475,7 @@ async function cmdWait(ctx: Ctx): Promise<number> {
 }
 
 /** Evaluate an assertion against a single captured snapshot. */
-function evalAssert(
+export function evalAssert(
   els: Element[],
   sel: Selector,
   flags: Flags,
@@ -658,7 +658,7 @@ function readBatchSource(flags: Flags): string {
  * can never spawn a host process or expand a variable (the same no-host-shell rule
  * the rest of the CLI follows). Throws on an unterminated quote.
  */
-function tokenizeLine(line: string): string[] {
+export function tokenizeLine(line: string): string[] {
   const tokens: string[] = [];
   let cur = '';
   let started = false; // lets an empty "" / '' still produce a real empty token
@@ -701,7 +701,7 @@ function tokenizeLine(line: string): string[] {
 }
 
 /** Globals on the `batch` call become defaults for each line (the line may override). */
-function withBatchGlobals(lineFlags: Flags, batchFlags: Flags): Flags {
+export function withBatchGlobals(lineFlags: Flags, batchFlags: Flags): Flags {
   const merged: Flags = { ...lineFlags };
   for (const k of BATCH_GLOBALS) {
     if (merged[k] === undefined && batchFlags[k] !== undefined) merged[k] = batchFlags[k];
