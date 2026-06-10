@@ -298,10 +298,18 @@ async function cmdText(ctx: Ctx): Promise<number> {
   });
 
   ctx.driver.tap(target.center.x, target.center.y);
+  // Wait for field to be focused after tap
+  await sleep(100);
   if (flagBool(ctx.flags, 'clear') && target.text) {
     ctx.driver.pressKey('move_end');
     for (let i = 0; i < target.text.length + 2; i++) ctx.driver.pressKey('del');
+    // Wait for field to settle after clearing before typing
+    await sleep(200);
   }
+  // Prime the input method with a space, then delete it, to avoid losing first character
+  // (workaround for adb input text behavior where first char is sometimes lost)
+  ctx.driver.inputText(' ');
+  ctx.driver.pressKey('backspace');
   ctx.driver.inputText(value);
   if (flagBool(ctx.flags, 'enter')) ctx.driver.pressKey('enter');
   out(`typed ${JSON.stringify(value)} into ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}`);
