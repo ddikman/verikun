@@ -124,6 +124,17 @@ export class SimctlDriver implements Driver {
     if (r.code !== 0) throw new CliError(`simctl terminate failed: ${r.stderr.trim()}`, 3);
   }
 
+  clearApp(appId: string): void {
+    // simctl has no per-app data reset. The manual equivalent is to uninstall and
+    // reinstall, which also removes the app itself — so we don't do it implicitly.
+    throw new CliError(
+      `iOS app-data clearing is not supported yet (requested for '${appId}').\n` +
+        'simctl has no per-app data reset; uninstall + reinstall ' +
+        '(`xcrun simctl uninstall <udid> <bundleId>`) is the manual equivalent, but it removes the app too.',
+      3,
+    );
+  }
+
   getElements(): Element[] {
     return notSupported('hierarchy inspection');
   }

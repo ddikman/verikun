@@ -79,7 +79,8 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `swipe <up\|down\|left\|right> [--on <selector>] [--distance f] [--duration ms]` | Directional swipe over the screen (or within an element via `--on`, whose lookup [auto-waits](#auto-wait)). `--distance` is a fraction of the region (default 0.6). |
 | `swipe --from x,y --to x,y [--duration ms]` | Explicit swipe between two points. |
 | `screenshot [--out path] [--more] [--max px] [--full] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. [Downscaled](#screenshots) to a 700px longest edge by default to save tokens; `--more` bumps detail, `--max px` sets an exact cap, `--full` keeps the original. |
-| `launch <app>` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). |
+| `launch <app> [--clear]` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). `--clear` wipes the app's local data (login/session, prefs, cache) before launching, for a fresh-install start. |
+| `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to a just-installed state (Android `pm clear`, which also force-stops the app). iOS not supported yet. |
 
 ### Batch
 | Command | Description |

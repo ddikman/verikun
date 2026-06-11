@@ -92,7 +92,7 @@ const RECORDABLE = new Set([
   'swipe', 'scroll',
   'screenshot', 'shot',
   'wait', 'assert',
-  'launch', 'open', 'stop',
+  'launch', 'open', 'stop', 'clear',
   'log', 'logs',
 ]);
 

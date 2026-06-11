@@ -219,6 +219,19 @@ export class AdbDriver implements Driver {
     this.shell(['am', 'force-stop', appId]);
   }
 
+  clearApp(appId: string): void {
+    // `pm clear` deletes the app's data dirs (shared-prefs, databases, caches) and
+    // force-stops it — resetting it to a just-installed state (logged out, no local
+    // data). It prints "Success", or "Failed" if the package is unknown/protected.
+    const result = this.shell(['pm', 'clear', appId]);
+    if (!/success/i.test(result)) {
+      throw new CliError(
+        `Failed to clear app data for '${appId}': ${result.trim() || 'no output from pm clear'}`,
+        3,
+      );
+    }
+  }
+
   currentApp(): string {
     const resumed = /mResumedActivity[^\n]*?\s([A-Za-z0-9_.]+\/[A-Za-z0-9_.]+)/.exec(
       this.shell(['dumpsys', 'activity', 'activities']),
