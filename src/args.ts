@@ -26,6 +26,7 @@ const ALIASES: Record<string, string> = {
   v: 'version',
   t: 'timeout',
   w: 'wait',
+  n: 'lines',
 };
 
 // Flags that never consume a following value.

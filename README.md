@@ -67,6 +67,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `assert <selector> [--text S] [--gone] [--contains] [--wait <dur>\|--no-wait]` | Assertion for tests. [Auto-waits](#auto-wait) until it passes. Exit 0 pass / 1 fail. |
 | `wait <selector> [--timeout ms] [--interval ms] [--gone]` | Poll the hierarchy until match (or absence). Exit 1 on timeout. (Explicit polling — distinct from the `--wait` flag.) |
 | `current` | Best-effort foreground app/activity. |
+| `log [package] [-n lines] [--since t] [--out path] [--full] [--json]` | Recent device logs (Android `logcat` snapshot — Android only). Prints to stdout; `--out` saves to a file, `--json` is structured. **Inside a run, defaults to logs since the run started** (so pre-session logs are excluded); `-n` caps to the last N lines instead, `--since <MM-DD HH:MM:SS.mmm>` sets an explicit start, `--full` dumps everything. A `package` scopes logs to that app's process, **falling back to system-wide when the app isn't running** (e.g. it crashed) so the crash trace is still captured. Unlike other inspection commands it **is recorded**, so its output lands in the archived report. ⚠️ logs are raw device output and may contain anything the app logged, including secrets. |
 
 ### Act
 | Command | Description |
@@ -105,7 +106,10 @@ vk screenshot                   # -> ./.verikun/screen.png
 Actions are recorded into a **test run** — one auto-starts on the first action
 (set `VERIKUN_NO_RUN=1` to disable). Every command becomes a step with its
 timing, the selector + identifier it resolved through, and pass/fail; a failing
-step also captures a screenshot **and** the UI hierarchy of the page.
+step also captures a screenshot **and** the UI hierarchy of the page. When a
+step fails you can additionally run `vk log <package>` to pull the device logs —
+that step records the logs **into the same run**, so the crash trace shows up in
+the report alongside the failure.
 
 `vk run archive` finalizes the run into `./.verikun/runs/<id>/`:
 
@@ -113,7 +117,8 @@ step also captures a screenshot **and** the UI hierarchy of the page.
   for failed assertions, `<error>` for environment errors, and the resolved
   identifier in `<system-out>`. Drops straight into CI.
 - **`report.html`** — a self-contained report: every step, the identifiers used,
-  any screenshots taken, and the screenshot + hierarchy of any failed page.
+  any screenshots taken, the screenshot + hierarchy of any failed page, and any
+  device logs captured via `vk log`.
 - **`run.json`** — the raw recording.
 
 `vk run archive` exits non-zero when the run contained failures, so the same

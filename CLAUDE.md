@@ -73,7 +73,7 @@ An agent reading a screenshot pays tokens for its pixel **area**, so `cmdScreens
 
 ## Test runs (recording → JUnit/HTML)
 
-Recordable commands (the `RECORDABLE` set in `run.ts` — actions + `wait`/`assert`, **not** inspection like `ui`/`find`/`devices`) are wrapped in `run()`: `Recorder.beginStep(...)` opens a step, the handler runs, then `finish(code)` / `finishError(e)` closes it. Because each `vk` call is its own process, run state is persisted to disk and reloaded per command:
+Recordable commands (the `RECORDABLE` set in `run.ts` — actions + `wait`/`assert`, **not** inspection like `ui`/`find`/`devices`; the one exception is `log`, recorded so its on-demand device-log capture lands in the report) are wrapped in `run()`: `Recorder.beginStep(...)` opens a step, the handler runs, then `finish(code)` / `finishError(e)` closes it. Because each `vk` call is its own process, run state is persisted to disk and reloaded per command:
 
 ```
 ./.verikun/run/            active run (run.json + artifacts/)   — auto-created on first action
@@ -85,10 +85,10 @@ Key behaviours, each load-bearing:
 - **Implicit start.** If no run is active, the first recordable command auto-starts one (`implicit: true`) and prints a one-time note to stderr. `vk run start` makes one explicitly and **refuses to clobber** a non-empty active run without `--force`.
 - **Context rollover.** Before recording a step, `rolloverReason()` checks the active run against the current context; on a mismatch the old run is *sealed* (archived, never discarded) and a fresh one starts. Triggers: device serial change or session change (`VERIKUN_SESSION`/`TERM_SESSION_ID`) for any run; idle beyond `VERIKUN_RUN_IDLE_MIN` (default 30) for *implicit* runs only — a named run is sticky to idle. The serial is resolved in `run()` via `driver.resolvedSerial()` (cached, so no extra device round-trip) and passed into `beginStep`. `Recorder.seal()` is the shared finalize-and-move used by both rollover and `vk run archive`.
 - **Step = testcase.** Each step records timing, exit code, and pass/fail. Handlers enrich it via `ctx.record?.note({ selector, tier, element, message })` — that is how the selector and the **resolved identifier** get into the report (the "which identifier worked" record). Add a `note(...)` when you write a new selector-resolving handler.
-- **Failure evidence.** On a non-zero step, `Recorder.capture(driver)` best-effort grabs a screenshot + the UI hierarchy of the page (swallowing errors — the device may be why it failed). `screenshot` steps attach their PNG via `attachImage`.
+- **Failure evidence.** On a non-zero step, `Recorder.capture(driver)` best-effort grabs a screenshot + the UI hierarchy of the page (swallowing errors — the device may be why it failed). `screenshot` steps attach their PNG via `attachImage`. Device logs are **not** auto-captured here — they are pulled on-demand by `vk log`, which attaches them via `attachLog` (kept tail-first, so a crash trace survives the `LOG_CAP`); since `getLogs` returns raw device output, those logs can carry secrets the app logged — they are not redacted. By default `vk log` scopes to the current session: `beginStep` records a device-clock marker (`RunState.logStart`, via `driver.deviceTime()`) at the run's first step, and `cmdLog` passes it as `getLogs({ since })` (precedence in the pure, tested `chooseLogOpts`: `--since` > `-n` > `--full` > session window > last-N) so logs from before the run are excluded.
 - **Pass/fail mapping.** Returned exit code or thrown `CliError.exitCode`: `0`→passed, `1`→`<failure>` (assertion), `≥2`→`<error>` (env/usage). `vk run archive` itself **exits non-zero when the run had failures**, so the archive command doubles as a CI gate.
 - **Secrets.** Step names never include typed text; `cmdText` redacts the value into the step message when the field `password` flag is set. Keep that property if you add input commands.
-- **Disable** with `VERIKUN_NO_RUN=1` (`beginStep` returns null → `ctx.record` undefined → every `note`/`attachImage` is a no-op).
+- **Disable** with `VERIKUN_NO_RUN=1` (`beginStep` returns null → `ctx.record` undefined → every `note`/`attachImage`/`attachLog` is a no-op).
 
 ## Unit tests
 

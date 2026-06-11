@@ -107,3 +107,27 @@ test('toHtml: surfaces the heal tier for a healed step', () => {
   const html = toHtml(SAMPLE);
   assert.ok(html.includes('healed') && html.includes('>partial<'));
 });
+
+// --- device logs ----------------------------------------------------------
+
+const FATAL = 'E AndroidRuntime: FATAL EXCEPTION: main\n\tat com.app.Main.crash(Main.java:42)';
+
+test('toJUnitXml: a passing log step carries its logs in <system-out>', () => {
+  const xml = toJUnitXml(runWith([step({ command: 'log', name: 'log com.app', status: 'passed', exitCode: 0, logs: FATAL })]));
+  assert.ok(xml.includes('<system-out>'));
+  assert.ok(xml.includes('Device logs:'));
+  assert.ok(xml.includes('FATAL EXCEPTION'));
+});
+
+test('toJUnitXml: a failed step embeds attached device logs in the <failure> body', () => {
+  const xml = toJUnitXml(runWith([
+    step({ command: 'assert', name: 'assert text:Home', status: 'failed', exitCode: 1, message: 'FAIL', logs: FATAL }),
+  ]));
+  assert.ok(xml.includes('Device logs:') && xml.includes('FATAL EXCEPTION'));
+});
+
+test('toHtml: a log step renders its logs in a <details> block', () => {
+  const html = toHtml(runWith([step({ command: 'log', name: 'log com.app', status: 'passed', exitCode: 0, logs: FATAL })]));
+  assert.ok(html.includes('Device logs'));
+  assert.ok(html.includes('FATAL EXCEPTION'));
+});

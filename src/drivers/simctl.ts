@@ -156,4 +156,12 @@ export class SimctlDriver implements Driver {
   currentApp(): string {
     return notSupported('current app');
   }
+  getLogs(): string {
+    // Eventually: `xcrun simctl spawn <udid> log show` (simulators) / devicectl
+    // (physical). Heavier (predicate language, large output) — deferred with WDA.
+    return notSupported('log capture');
+  }
+  deviceTime(): string {
+    return ''; // no log window to anchor while iOS log capture is unsupported
+  }
 }

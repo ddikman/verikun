@@ -52,6 +52,14 @@ resolve the tap point. This is the whole point of the tool.
 - `vk wait <selector> [--gone] [--timeout ms] [--interval ms]` — poll until the
   element appears (or disappears with `--gone`). Essential for async UI.
 - `vk current` — foreground app/activity.
+- `vk log [package] [-n N]` — recent device logs (Android `logcat` snapshot).
+  Reach for this **after a failure** to read the crash/stack trace the screen
+  can't show you. **Inside a run it defaults to logs since the run started**, so
+  you only see this session's output (not stale logs from before); `-n N` gives
+  the last N lines instead, `--since '<MM-DD HH:MM:SS.mmm>'` sets an explicit
+  start, `--full` dumps everything. A `package` scopes to that app (system-wide
+  if it has already crashed). Unlike other inspect commands it is *recorded*, so
+  during a run the logs are pulled **into the archived report** next to the step.
 
 ## Act
 
@@ -178,7 +186,10 @@ fix that selector, and re-run.
 Every action is **recorded into a test run** — one auto-starts on your first
 action, no setup needed. Each command becomes a step with its timing, the
 selector + identifier it resolved through, and pass/fail. When a step fails, `vk`
-automatically captures a screenshot **and** the UI hierarchy of that page.
+automatically captures a screenshot **and** the UI hierarchy of that page. To
+also get the device logs (the crash/stack trace), run `vk log <package>` after
+the failure — that step records the logs into the same run, so they appear in
+the report next to the failure.
 
 - `vk run status` — the current run's steps and outcomes
 - `vk run archive [name]` — finish the run: writes a **JUnit XML** + a
@@ -220,6 +231,12 @@ identifier memory described above. Set `VERIKUN_NO_RUN=1` to disable recording.
   dismiss it before re-inspecting (it can cover elements).
 - **Unicode/emoji** may not type via `adb input text` (an Android limitation);
   ASCII is reliable.
+- **`vk log` is a snapshot, not a stream** — it dumps recent lines and exits.
+  Scoping with a `package` filters to that app's live process; once the app has
+  **crashed** its process is gone, so `vk log <pkg>` falls back to system-wide
+  logs (where the crash trace still is). The logs are **raw device output** and
+  can contain anything the app logged — including secrets — so treat archived
+  reports accordingly (`VERIKUN_NO_RUN=1` disables recording).
 - **Special characters type fine.** Emails and symbols (`@ . + _ - / = : , ; ! # % & …`)
   go in verbatim — `vk` backslash-escapes every device-shell metacharacter before
   `adb input text`, so `vk text @email "bob+tag@mail.com"` lands the whole address,

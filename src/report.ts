@@ -78,14 +78,20 @@ export function toJUnitXml(run: RunState): string {
       if (s.status === 'failed' || s.status === 'error') {
         const tag = s.status === 'failed' ? 'failure' : 'error';
         const type = s.status === 'failed' ? 'AssertionFailure' : 'EnvironmentError';
-        const detail = [s.message ?? s.status, ...lines, s.failHierarchy ? `\nUI hierarchy at failure:\n${s.failHierarchy}` : '']
+        const detail = [
+          s.message ?? s.status,
+          ...lines,
+          s.failHierarchy ? `\nUI hierarchy at failure:\n${s.failHierarchy}` : '',
+          s.logs ? `\nDevice logs:\n${s.logs}` : '',
+        ]
           .filter(Boolean)
           .join('\n');
         body =
           `\n    <${tag} message="${xmlAttr(s.message ?? s.status)}" type="${type}">` +
           `${xmlText(detail)}</${tag}>`;
-      } else if (lines.length) {
-        body = `\n    <system-out>${xmlText(lines.join('\n'))}</system-out>`;
+      } else if (lines.length || s.logs) {
+        const sysOut = [...lines, s.logs ? `Device logs:\n${s.logs}` : ''].filter(Boolean).join('\n');
+        body = `\n    <system-out>${xmlText(sysOut)}</system-out>`;
       }
 
       return `  <testcase ${attrs}>${body}\n  </testcase>`;
@@ -158,6 +164,7 @@ function stepHtml(s: RunStep): string {
   if (s.failImage) parts.push(`<a href="${htmlEsc(s.failImage)}"><img class="shot" src="${htmlEsc(s.failImage)}" alt="screen at failure"></a>`);
   if (s.failHierarchy)
     parts.push(`<details><summary>UI hierarchy at failure</summary><pre>${htmlEsc(s.failHierarchy)}</pre></details>`);
+  if (s.logs) parts.push(`<details><summary>Device logs</summary><pre>${htmlEsc(s.logs)}</pre></details>`);
 
   return `<li class="step ${s.status}">${parts.join('\n    ')}</li>`;
 }
