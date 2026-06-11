@@ -460,6 +460,57 @@ function cmdScreenshot(ctx: Ctx): number {
   return 0;
 }
 
+// --full asks for everything; cap it large-but-finite so output stays under the
+// exec MAX_BUFFER (the driver still does a single bounded dump, never a stream).
+const FULL_LOG_LINES = 100000;
+
+/**
+ * Pick the logcat window for `vk log`. Precedence:
+ *   --since <marker>  >  -n/--lines <count>  >  --full  >  session window  >  last DEFAULT_LOG_LINES
+ * The session window (the run's device-clock start, when recording past the first
+ * step) is the default, so logs from before the run started are excluded.
+ * Exported for unit tests.
+ */
+export function chooseLogOpts(
+  flags: Flags,
+  ctx: { appId?: string; sessionSince?: string },
+): { lines?: number; appId?: string; since?: string } {
+  const appId = ctx.appId;
+  const sinceFlag = flagStr(flags, 'since');
+  if (sinceFlag) return { since: sinceFlag, appId };
+  const explicitLines = flagNum(flags, 'lines');
+  if (explicitLines !== undefined) return { lines: explicitLines, appId };
+  if (flagBool(flags, 'full')) return { lines: FULL_LOG_LINES, appId };
+  if (ctx.sessionSince) return { since: ctx.sessionSince, appId };
+  return { appId };
+}
+
+function cmdLog(ctx: Ctx): number {
+  const opts = chooseLogOpts(ctx.flags, {
+    appId: ctx.positionals[0], // optional package; omitted = system-wide
+    sessionSince: ctx.record?.logWindowStart(),
+  });
+  const logs = ctx.driver.getLogs(opts);
+  // Recorded so the on-demand capture lands in the archived report (when a run is active).
+  ctx.record?.attachLog(logs);
+
+  const lineCount = logs === '' ? 0 : logs.replace(/\n+$/, '').split('\n').length;
+  const outFlag = flagStr(ctx.flags, 'out');
+  if (outFlag) {
+    const path = resolve(process.cwd(), outFlag);
+    writeFileSync(path, logs);
+    if (flagBool(ctx.flags, 'json')) json({ path, bytes: Buffer.byteLength(logs), lines: lineCount });
+    else out(path);
+    return 0;
+  }
+  if (flagBool(ctx.flags, 'json')) {
+    json({ logs, lines: lineCount, ...(opts.appId ? { app: opts.appId } : {}), ...(opts.since ? { since: opts.since } : {}) });
+    return 0;
+  }
+  out(logs);
+  return 0;
+}
+
 async function cmdWait(ctx: Ctx): Promise<number> {
   const sel = buildSelector(ctx.positionals[0], ctx.flags);
   const gone = flagBool(ctx.flags, 'gone');
@@ -812,6 +863,9 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
       return cmdStop(ctx);
     case 'current':
       return cmdCurrent(ctx);
+    case 'log':
+    case 'logs':
+      return cmdLog(ctx);
     default:
       err(`Unknown command '${command}'. Run \`verikun help\`.`);
       return 2;
@@ -862,7 +916,7 @@ async function executeParsed(command: string, positionals: string[], flags: Flag
       } catch {
         /* surfaced by the command handler below */
       }
-      recorder = Recorder.beginStep(command, positionals, flags, platform, device, serial);
+      recorder = Recorder.beginStep(command, positionals, flags, platform, device, serial, driver);
     }
     const ctx: Ctx = { driver, platform, device, positionals, flags, record: recorder ?? undefined };
     const code = await executeCommand(command, ctx);
@@ -901,6 +955,11 @@ INSPECT (semantic hierarchy — the core feature)
   assert <selector> [--text S] [--gone]   Assertion for tests (exit 0 pass / 1 fail)
   wait <selector> [--timeout ms] [--interval ms] [--gone]   Poll until match/absent
   current                             Foreground app/activity
+  log [package] [-n lines] [--since t] [--out path] [--full] [--json]   Device logs (logcat snapshot)
+                                      In a run, defaults to logs since the run started; -n caps lines,
+                                      --since <MM-DD HH:MM:SS.mmm> overrides, --full dumps everything.
+                                      Scopes to a package's process (system-wide if it has crashed);
+                                      recorded into the run so it lands in the report
 
 ACT
   tap <selector|index> | --at x,y     Tap an element (or raw coordinates)

@@ -84,4 +84,18 @@ export interface Driver {
   stop(appId: string): void;
   /** Best-effort current foreground app/activity, for verification. */
   currentApp(): string;
+  /**
+   * Recent device logs as a one-shot snapshot (never a live stream).
+   * @param opts.lines  max trailing log lines (newest); driver default ~200
+   * @param opts.appId  scope to a running app's process; omitted/crashed = system-wide
+   * @param opts.since  only logs at/after this device-clock marker (see deviceTime);
+   *                    takes precedence over lines. Lets a run exclude pre-session logs.
+   */
+  getLogs(opts?: { lines?: number; appId?: string; since?: string }): string;
+  /**
+   * Current device wall-clock in logcat's timestamp format (`MM-DD HH:MM:SS.mmm`),
+   * captured at run start and later passed as `getLogs({ since })`. `''` if
+   * unavailable (or unsupported, e.g. iOS) — callers treat empty as "no marker".
+   */
+  deviceTime(): string;
 }

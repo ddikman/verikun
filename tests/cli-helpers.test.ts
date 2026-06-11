@@ -9,6 +9,7 @@ import {
   withBatchGlobals,
   healNote,
   waitNote,
+  chooseLogOpts,
 } from '../src/cli';
 import { parseSelector } from '../src/ui/selector';
 import { CliError } from '../src/errors';
@@ -160,4 +161,41 @@ test('waitNote: silent under 100ms, otherwise reports seconds to one decimal', (
   assert.equal(waitNote(100), ' (waited 0.1s)');
   assert.equal(waitNote(1234), ' (waited 1.2s)');
   assert.equal(waitNote(5000), ' (waited 5.0s)');
+});
+
+// --- chooseLogOpts --------------------------------------------------------
+
+test('chooseLogOpts: with no flags and no run, falls back to the driver default (last-N)', () => {
+  assert.deepEqual(chooseLogOpts({}, {}), { appId: undefined });
+});
+
+test('chooseLogOpts: in a run, defaults to the session window (since)', () => {
+  assert.deepEqual(chooseLogOpts({}, { sessionSince: '06-11 12:00:00.000' }), {
+    since: '06-11 12:00:00.000',
+    appId: undefined,
+  });
+});
+
+test('chooseLogOpts: an explicit -n/--lines overrides the session window', () => {
+  assert.deepEqual(chooseLogOpts({ lines: '50' }, { sessionSince: '06-11 12:00:00.000' }), {
+    lines: 50,
+    appId: undefined,
+  });
+});
+
+test('chooseLogOpts: --full overrides the session window with a large line count', () => {
+  const r = chooseLogOpts({ full: true }, { sessionSince: '06-11 12:00:00.000' });
+  assert.equal(r.since, undefined);
+  assert.ok(typeof r.lines === 'number' && r.lines > 1000);
+});
+
+test('chooseLogOpts: --since beats -n, --full, and the session window', () => {
+  assert.deepEqual(
+    chooseLogOpts({ since: '06-11 09:00:00.000', lines: '50', full: true }, { sessionSince: '06-11 12:00:00.000', appId: 'com.app' }),
+    { since: '06-11 09:00:00.000', appId: 'com.app' },
+  );
+});
+
+test('chooseLogOpts: the package positional is carried through as appId', () => {
+  assert.deepEqual(chooseLogOpts({}, { appId: 'com.app' }), { appId: 'com.app' });
 });

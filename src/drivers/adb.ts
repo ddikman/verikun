@@ -44,6 +44,8 @@ const KEYCODES: Record<string, number> = {
 
 const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'];
 
+const DEFAULT_LOG_LINES = 200;
+
 /**
  * Escape a string for `adb shell input text <arg>`. The argument is parsed twice
  * before it reaches the field: once by the on-device shell (mksh), then by
@@ -224,5 +226,41 @@ export class AdbDriver implements Driver {
     if (resumed) return resumed[1];
     const focus = /mCurrentFocus[^\n]*?\s([A-Za-z0-9_.]+\/[A-Za-z0-9_.]+)/.exec(this.shell(['dumpsys', 'window']));
     return focus ? focus[1] : '(unknown)';
+  }
+
+  getLogs(opts: { lines?: number; appId?: string; since?: string } = {}): string {
+    // One-shot dump: -d (and -t) make logcat EXIT. NEVER add -f/follow — it would
+    // stream forever and hang until the spawnSync timeout. The default buffers
+    // (main,system,crash) already include crash traces, so no -b needed.
+    const args = ['logcat', '-d'];
+    if (opts.since) {
+      // `-t '<time>'` prints lines at/after that time, then exits. The marker
+      // contains a space and adb concatenates the post-`shell` args into one
+      // device-side command line, so single-quote it for the device shell to
+      // keep it a single token. (The marker is digits/`-`/`:`/`.`/space only.)
+      args.push('-t', `'${opts.since}'`);
+    } else {
+      const n = opts.lines && opts.lines > 0 ? Math.floor(opts.lines) : DEFAULT_LOG_LINES;
+      args.push('-t', String(n));
+    }
+    if (opts.appId) {
+      // Scope to the app's process when it's alive. If pidof is empty the app
+      // isn't running (likely crashed) — fall through to a system-wide dump so
+      // the FATAL EXCEPTION, still in the crash buffer, is not missed.
+      const pid = this.shell(['pidof', opts.appId]).trim().split(/\s+/)[0];
+      if (pid) args.push(`--pid=${pid}`);
+    }
+    return this.shell(args, 15000);
+  }
+
+  deviceTime(): string {
+    // logcat's default timestamp is MM-DD HH:MM:SS.mmm in the device's LOCAL time.
+    // Sample it from the device clock with a space-free format (so no device-shell
+    // quoting is needed), then restore the space to match logcat's `-t` form.
+    try {
+      return this.shell(['date', '+%m-%dT%H:%M:%S.000']).trim().replace('T', ' ');
+    } catch {
+      return '';
+    }
   }
 }

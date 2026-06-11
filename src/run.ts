@@ -49,6 +49,8 @@ export interface RunStep {
   failImage?: string;
   /** UI hierarchy (compact text, capped) captured when this step failed. */
   failHierarchy?: string;
+  /** Device logs (tail, capped) attached by an on-demand `log` step. */
+  logs?: string;
 }
 
 export interface RunState {
@@ -65,6 +67,9 @@ export interface RunState {
   session?: string;
   /** True when auto-started by the first action rather than `vk run start`. */
   implicit: boolean;
+  /** Device-clock marker (logcat `MM-DD HH:MM:SS.mmm`) captured at the session's
+   *  first step, so `vk log` can exclude logs from before the run started. */
+  logStart?: string;
   steps: RunStep[];
 }
 
@@ -77,7 +82,9 @@ interface NoteInfo {
 
 // Commands that become a recorded step (a JUnit testcase). Inspection commands
 // (ui, find, devices, doctor, current) are deliberately excluded — they are how
-// an agent decides what to do, not assertions about the app.
+// an agent decides what to do, not assertions about the app. `log` is the one
+// exception: it inspects, but is recorded so its captured device logs land in
+// the archived report (the agent pulls them on-demand after a failure).
 const RECORDABLE = new Set([
   'tap', 'click',
   'text', 'type',
@@ -86,6 +93,7 @@ const RECORDABLE = new Set([
   'screenshot', 'shot',
   'wait', 'assert',
   'launch', 'open', 'stop',
+  'log', 'logs',
 ]);
 
 export function isRecordable(command: string): boolean {
@@ -93,6 +101,7 @@ export function isRecordable(command: string): boolean {
 }
 
 const HIERARCHY_CAP = 24000; // chars of failure hierarchy kept inline in run.json
+const LOG_CAP = 50000; // chars of device logs kept inline in run.json (tail-kept)
 
 // --- paths & persistence --------------------------------------------------
 
@@ -236,6 +245,7 @@ export class Recorder {
     platform: string,
     deviceReq?: string,
     serial?: string,
+    driver?: Driver,
   ): Recorder | null {
     if (process.env.VERIKUN_NO_RUN) return null;
 
@@ -278,6 +288,18 @@ export class Recorder {
       // Backfill identity once it becomes known (e.g. a run started without a device).
       if (!state.device && (serial || deviceReq)) state.device = serial || deviceReq;
       if (!state.session && session) state.session = session;
+    }
+
+    // Anchor the log window at the session's first step (covers both implicit
+    // creation and an explicit `vk run start`, which records no marker itself).
+    // Best-effort — a missing marker just means `vk log` falls back to last-N.
+    if (driver && !state.logStart) {
+      try {
+        const t = driver.deviceTime();
+        if (t) state.logStart = t;
+      } catch {
+        /* device clock unavailable */
+      }
     }
 
     const step: RunStep = {
@@ -325,6 +347,18 @@ export class Recorder {
     const rel = `artifacts/step-${this.step.index}-screenshot.png`;
     this.writeArtifact(rel, buf);
     this.step.image = rel;
+  }
+
+  /** Store device logs captured by a `log` step. Keeps the TAIL — the newest
+   *  lines, where a crash/stack trace is — unlike failHierarchy which keeps the head. */
+  attachLog(text: string): void {
+    this.step.logs = text.length > LOG_CAP ? '…(truncated)\n' + text.slice(-LOG_CAP) : text;
+  }
+
+  /** The session-start log marker — but only once a prior step exists, so a `log`
+   *  that is itself the first action isn't scoped to an empty (just-now) window. */
+  logWindowStart(): string | undefined {
+    return this.state.steps.length > 0 ? this.state.logStart : undefined;
   }
 
   /** Finalize a step that returned a normal exit code (0 pass, 1 fail, ≥2 error). */
