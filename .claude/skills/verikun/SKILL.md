@@ -70,7 +70,10 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
   screen. It's **downscaled to a 700px longest edge by default** to save tokens
   (text stays legible); add `--more` if a screen reads too coarse, `--max px` for
   an exact cap, or `--full` for the original.
-- `vk launch <pkg>`  ·  `vk stop <pkg>`
+- `vk launch <pkg> [--clear]`  ·  `vk stop <pkg>`  ·  `vk clear <pkg>`
+  `vk clear` (and `vk launch --clear`) wipe the app's local data — login/session,
+  prefs, cache — so a flow starts from a clean, logged-out, fresh-install state.
+  Android only (`pm clear`, which also force-stops the app); iOS not yet supported.
 
 ## Selectors
 

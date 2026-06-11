@@ -85,7 +85,7 @@ const RECORDABLE = new Set([
   'swipe', 'scroll',
   'screenshot', 'shot',
   'wait', 'assert',
-  'launch', 'open', 'stop',
+  'launch', 'open', 'stop', 'clear',
 ]);
 
 export function isRecordable(command: string): boolean {
