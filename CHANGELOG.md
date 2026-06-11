@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **`clear` command and `launch --clear`** to wipe an app's locally stored data —
+  login/session, preferences, caches — resetting it to a just-installed state
+  before a flow. Android via `pm clear` (which also force-stops the app);
+  recorded as a test-run step like other lifecycle actions. iOS is not supported
+  yet (`simctl` has no per-app data reset).
 - **Unit test suite** (`npm test`) for the platform-agnostic core — selector
   matching/auto-healing, the `uiautomator` XML parser, element formatting, the
   PNG downscaler, JUnit/HTML report rendering, argument/duration parsing, and

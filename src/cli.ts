@@ -535,10 +535,15 @@ async function cmdAssert(ctx: Ctx): Promise<number> {
 
 function cmdLaunch(ctx: Ctx): number {
   const appId = ctx.positionals[0];
-  if (!appId) throw new CliError('Usage: verikun launch <package|bundleId>', 2);
+  if (!appId) throw new CliError('Usage: verikun launch <package|bundleId> [--clear]', 2);
+  // --clear wipes locally stored data (login/session, prefs, cache) first, so the
+  // app starts in a fresh-install state. (pm clear also force-stops it before launch.)
+  const cleared = flagBool(ctx.flags, 'clear');
+  if (cleared) ctx.driver.clearApp(appId);
   ctx.driver.launch(appId);
-  ctx.record?.note({ message: `launched ${appId}` });
-  out(`launched ${appId}`);
+  ctx.record?.note({ message: cleared ? `cleared data + launched ${appId}` : `launched ${appId}` });
+  if (flagBool(ctx.flags, 'json')) json({ launched: appId, cleared });
+  else out(cleared ? `cleared + launched ${appId}` : `launched ${appId}`);
   return 0;
 }
 
@@ -548,6 +553,16 @@ function cmdStop(ctx: Ctx): number {
   ctx.driver.stop(appId);
   ctx.record?.note({ message: `stopped ${appId}` });
   out(`stopped ${appId}`);
+  return 0;
+}
+
+function cmdClear(ctx: Ctx): number {
+  const appId = ctx.positionals[0];
+  if (!appId) throw new CliError('Usage: verikun clear <package|bundleId>', 2);
+  ctx.driver.clearApp(appId);
+  ctx.record?.note({ message: `cleared app data for ${appId}` });
+  if (flagBool(ctx.flags, 'json')) json({ cleared: appId });
+  else out(`cleared ${appId}`);
   return 0;
 }
 
@@ -810,6 +825,8 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
       return cmdLaunch(ctx);
     case 'stop':
       return cmdStop(ctx);
+    case 'clear':
+      return cmdClear(ctx);
     case 'current':
       return cmdCurrent(ctx);
     default:
@@ -913,7 +930,8 @@ ACT
                                       Downscaled to <=700px longest edge for token-cheap, legible reads;
                                       --more bumps detail (1400px), --max px sets an exact cap
                                       (VERIKUN_SHOT_MAX_EDGE changes the default), --full keeps original
-  launch <app>   stop <app>           App lifecycle (package id / bundle id)
+  launch <app> [--clear]   stop <app>   App lifecycle (launch --clear wipes app data first)
+  clear <app>                         Wipe app data — login/session, caches (fresh-install state)
 
 BATCH (script many commands in one process)
   batch [--file path] [--quiet]       Run newline-separated commands — from --file,

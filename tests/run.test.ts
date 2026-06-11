@@ -5,7 +5,7 @@ import { isRecordable, stepName, rolloverReason, RunState } from '../src/run';
 // --- isRecordable ---------------------------------------------------------
 
 test('isRecordable: actions and assertions are recorded', () => {
-  for (const c of ['tap', 'text', 'type', 'swipe', 'screenshot', 'wait', 'assert', 'launch', 'back']) {
+  for (const c of ['tap', 'text', 'type', 'swipe', 'screenshot', 'wait', 'assert', 'launch', 'clear', 'back']) {
     assert.equal(isRecordable(c), true, `${c} should be recordable`);
   }
 });

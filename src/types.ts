@@ -82,6 +82,8 @@ export interface Driver {
   pressKey(name: string): void;
   launch(appId: string): void;
   stop(appId: string): void;
+  /** Wipe the app's locally stored data (login/session, prefs, caches) — a fresh-install state. */
+  clearApp(appId: string): void;
   /** Best-effort current foreground app/activity, for verification. */
   currentApp(): string;
 }
