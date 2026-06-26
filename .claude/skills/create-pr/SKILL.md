@@ -33,7 +33,7 @@ Do these as part of the change and commit them **together** with your code:
 
 - **Changelog & version — user-facing changes only** (a new/changed command, flag, selector, or exit code, or a bug a user would notice). Purely internal work — refactors, tests, CI, docs — gets neither; if that's worth stating, put it in the PR's *Out of scope*.
   1. **Pick the SemVer bump** from what changed: `patch` (a fix, no new surface), `minor` (a new command/flag or other back-compatible feature), `major` (a breaking change — pre-1.0 you may fold a break into `minor`; use judgment).
-  2. **Bump the version in all four spots that hold it — they've drifted before:** run `npm version <patch|minor|major> --no-git-tag-version` (updates `package.json` **and** `package-lock.json`, no git tag/commit), then edit the two hand-maintained spots to the same value: the `const VERSION` in `src/cli.ts` (what `vk --version` prints) and the `version` in `.claude-plugin/plugin.json` (the Claude Code plugin manifest). The gate's `npm run build` below recompiles `dist/`.
+  2. **Bump the version — `package.json` is the source of truth; two other spots must match, and one is generated:** run `npm version <patch|minor|major> --no-git-tag-version` (updates `package.json` **and** `package-lock.json`, no git tag/commit), then edit the `version` in `.claude-plugin/plugin.json` (the Claude Code plugin manifest — it has drifted before) to the same value. `src/version.ts`'s `VERSION` (what `vk --version` prints, and the plan-cache compiler fingerprint) is **generated from `package.json`** by the `prebuild` step (`scripts/gen-version.mjs`) — do NOT hand-edit it; the gate's `npm run build` below regenerates it and recompiles `dist/`.
   3. **Cut the changelog entry:** in `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - <today>` (new version + today's date), describe this change under the right `### Added` / `### Fixed` / `### Changed` heading, and add a fresh empty `## [Unreleased]` above it.
 - **Keep the docs contract:** if you changed CLI behaviour (command / flag / selector / exit code), update `README.md` **and** `.claude/skills/verikun/SKILL.md`, and tick the matching box in the PR's *Docs & contracts* section.
 
@@ -138,7 +138,7 @@ If it should be a draft but isn't, `gh pr ready <n> --undo`. Leave it as a draft
 - A side-effect framed as the reason; irrelevant facts.
 - Restating what CI proves ("builds clean", "units pass") — CI runs `npm run build` + `npm run test:ci` on Node 20.x and 22.x.
 - Bumping the version or dating a `CHANGELOG.md` entry for a purely internal change (refactor / CI / tests / docs) — those ship without either.
-- Bumping `package.json` but forgetting one of the other three version spots (`package-lock.json`, `src/cli.ts`'s `VERSION`, or `.claude-plugin/plugin.json`) — they've drifted before; keep all four in lockstep, then `npm run build`.
+- Bumping `package.json` but forgetting `package-lock.json` or `.claude-plugin/plugin.json` — they've drifted before; keep them in lockstep. (`src/version.ts` is regenerated from `package.json` by `npm run build`'s `prebuild`, so never hand-edit it — it follows automatically.)
 - Skipping the testing section — if untested, say why.
 - Claiming testing without showing the result — include the before/after, output, screenshot, or reference.
 - A "Generated with Claude Code" footer; Slack/internal thread URLs in the body.

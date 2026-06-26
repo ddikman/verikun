@@ -78,10 +78,16 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
   screen. It's **downscaled to a 700px longest edge by default** to save tokens
   (text stays legible); add `--more` if a screen reads too coarse, `--max px` for
   an exact cap, or `--full` for the original.
-- `vk launch <pkg> [--clear]`  ·  `vk stop <pkg>`  ·  `vk clear <pkg>`
-  `vk clear` (and `vk launch --clear`) wipe the app's local data — login/session,
-  prefs, cache — so a flow starts from a clean, logged-out, fresh-install state.
-  Android only (`pm clear`, which also force-stops the app); iOS not yet supported.
+- `vk launch <pkg> [--clear] [--no-restart]`  ·  `vk stop <pkg>`  ·  `vk clear <pkg>`
+  `vk launch` **restarts by default**: it force-stops the app first so a rerun starts
+  from a fresh launch instead of landing on whatever screen a still-running instance
+  was left on (re-issuing the launch intent to a live app just resurfaces its current
+  state). force-stop is a no-op if the app isn't running. `--no-restart` skips it (just
+  bring the existing instance forward).
+  `vk clear` (and `vk launch --clear`) additionally wipe the app's local data —
+  login/session, prefs, cache — so a flow starts from a clean, logged-out,
+  fresh-install state. Android only (`pm clear`, which also force-stops the app); iOS
+  not yet supported.
 
 ## Selectors
 
@@ -180,6 +186,36 @@ Reach for it once a flow is *known*; keep using single commands while you're sti
 **discovering** a screen (you need `vk ui` between steps anyway). If a batch halts,
 read its stderr line (`batch stopped at line N (…)`) to see which command failed,
 fix that selector, and re-run.
+
+## Run a natural-language test (vk ai)
+
+`vk ai <file>` is the inverse of driving the device yourself: instead of you
+issuing `tap`/`text`/`assert` and inspecting between them, it hands a plain-English
+test file to a model that **compiles it once into a deterministic plan**, then
+replays that plan with **no model calls on the happy path**. The model is woken only
+to *repair* a step whose selector stops resolving, and a green run caches the repaired
+plan so the next run is free. Reach for it when the task is "run this whole English
+test and give me a report"; keep using single commands while you're still
+*discovering* a screen.
+
+```sh
+vk ai onboarding.md                     # compile (first run) or replay (cached)
+vk ai onboarding.md --show-plan         # print the compiled plan IR, do not run
+vk ai onboarding.md --max-cost-usd 0.50 # bound the spend; aborts if the estimate crosses it
+```
+
+- Needs `ANTHROPIC_API_KEY`. Default model `claude-sonnet-4-6`; `--model` switches it
+  (`claude-haiku-4-5` · `claude-sonnet-4-6` · `claude-opus-4-8` · `claude-fable-5`).
+- The plan expresses **conditions** (`if-present`, for optional interstitials like a
+  permission dialog) and **bounded loops** (`repeat … until`, e.g. scroll-until) —
+  control flow `vk batch` cannot, so a flaky popup or a scroll-to-find no longer breaks
+  the flow.
+- **Progress streams to stderr** (never silent in CI); **stdout is the report path**
+  (`--json` for a structured summary). It records like any flow, so it ends with the
+  same JUnit + HTML report — including the token/cost line and **suggested improvements**
+  you can fold back into the English to stabilize the test and cut future tokens.
+- Exit `0` pass · `1` a step failed (or the budget was hit) · `2` usage · `3` environment
+  (e.g. `ANTHROPIC_API_KEY` unset).
 
 ## Test runs & reports
 

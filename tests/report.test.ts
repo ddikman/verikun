@@ -131,3 +131,35 @@ test('toHtml: a log step renders its logs in a <details> block', () => {
   assert.ok(html.includes('Device logs'));
   assert.ok(html.includes('FATAL EXCEPTION'));
 });
+
+// --- vk ai panel ----------------------------------------------------------
+
+function aiRun(): RunState {
+  return {
+    ...runWith([
+      step({ command: 'tap', name: 'tap @x', status: 'passed', exitCode: 0, healed: true, message: 'healed: miss -> tap @y' }),
+    ]),
+    ai: {
+      ok: true,
+      cost: 'compile=$0.0100 · repairs=$0.0000 · replay=$0 · est $0.0100',
+      modelRepairs: 1,
+      improvements: ['steps[0]: tighten @x'],
+    },
+  };
+}
+
+test('toHtml: renders the vk ai panel (cost, repair count, improvements) and the model-healed step', () => {
+  const html = toHtml(aiRun());
+  assert.ok(html.includes('vk ai'));
+  assert.ok(html.includes('compile=$0.0100'));
+  assert.ok(html.includes('1 model repair(s)'));
+  assert.ok(html.includes('tighten @x'));
+  assert.ok(html.includes('model-healed'));
+});
+
+test('toJUnitXml: carries the vk ai cost line and suggested improvements', () => {
+  const xml = toJUnitXml(aiRun());
+  assert.ok(xml.includes('vk ai:'));
+  assert.ok(xml.includes('compile=$0.0100'));
+  assert.ok(xml.includes('tighten @x'));
+});

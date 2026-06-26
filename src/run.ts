@@ -34,6 +34,9 @@ export interface RunStep {
   selector?: { raw: string; kind: string; value: string; contains?: boolean; index?: number };
   /** Heal tier the selector matched at (`exact` is omitted as the default). */
   tier?: string;
+  /** A failed attempt the `vk ai` engine repaired — downgraded to a pass so a
+   *  self-healed step does not surface as a failure in the report. */
+  healed?: boolean;
   /** Summary of the element the selector resolved to. */
   resolved?: {
     type: string;
@@ -70,6 +73,10 @@ export interface RunState {
   /** Device-clock marker (logcat `MM-DD HH:MM:SS.mmm`) captured at the session's
    *  first step, so `vk log` can exclude logs from before the run started. */
   logStart?: string;
+  /** Set by `vk ai`: the token/cost line, repair count, and the suggested test
+   *  improvements (workarounds the model applied that you can fold back into the
+   *  source to stabilize the test and cut future tokens). */
+  ai?: { ok: boolean; cost: string; modelRepairs: number; improvements: string[] };
   steps: RunStep[];
 }
 
@@ -113,7 +120,10 @@ function loadState(dir: string): RunState | null {
   if (!existsSync(statePath(dir))) return null;
   try {
     return JSON.parse(readFileSync(statePath(dir), 'utf8')) as RunState;
-  } catch {
+  } catch (e) {
+    // The state file exists but won't parse — it's corrupt. Surface it (then treat as no
+    // active run, which the next run start overwrites) instead of swallowing it silently.
+    err(`[verikun] ignoring unreadable run state ${statePath(dir)} (${(e as Error).message})`);
     return null;
   }
 }
@@ -386,14 +396,16 @@ export class Recorder {
     try {
       this.writeArtifact(`artifacts/step-${this.step.index}-fail.png`, driver.screenshot());
       this.step.failImage = `artifacts/step-${this.step.index}-fail.png`;
-    } catch {
-      /* device may be gone */
+    } catch (e) {
+      // Best-effort evidence: the device may be gone (often why the step failed). Surface
+      // it so a screenshot bug isn't hidden, but never let it derail failure recording.
+      err(`[verikun] could not capture failure screenshot (${(e as Error).message})`);
     }
     try {
       const text = formatCompact(driver.getElements({ all: false }));
       this.step.failHierarchy = text.length > HIERARCHY_CAP ? text.slice(0, HIERARCHY_CAP) + '\n…(truncated)' : text;
-    } catch {
-      /* hierarchy unavailable */
+    } catch (e) {
+      err(`[verikun] could not capture failure hierarchy (${(e as Error).message})`);
     }
   }
 
@@ -435,6 +447,32 @@ export class Recorder {
 
   static status(): RunState | null {
     return loadState(activeDir());
+  }
+
+  /** Merge a patch into the active run (used by `vk ai` to attach its summary
+   *  before archiving). No-op if there is no active run. */
+  static annotateRun(patch: Partial<RunState>): void {
+    const dir = activeDir();
+    const state = loadState(dir);
+    if (!state) return;
+    Object.assign(state, patch);
+    saveState(dir, state);
+  }
+
+  /** Downgrade the most-recently-recorded step from a failed attempt to a healed
+   *  pass — the `vk ai` engine calls this after a successful repair so a
+   *  self-healed leaf does not count as a failure (and the run that the engine
+   *  considers green has a clean report). No-op if there is no active run. */
+  static markLastStepHealed(message?: string): void {
+    const dir = activeDir();
+    const state = loadState(dir);
+    if (!state || state.steps.length === 0) return;
+    const last = state.steps[state.steps.length - 1];
+    last.healed = true;
+    last.status = 'passed';
+    last.exitCode = 0;
+    if (message) last.message = message;
+    saveState(dir, state);
   }
 
   static start(name: string | undefined, platform: string, device: string | undefined, force: boolean): RunState {

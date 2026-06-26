@@ -79,13 +79,18 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `swipe <up\|down\|left\|right> [--on <selector>] [--distance f] [--duration ms]` | Directional swipe over the screen (or within an element via `--on`, whose lookup [auto-waits](#auto-wait)). `--distance` is a fraction of the region (default 0.6). |
 | `swipe --from x,y --to x,y [--duration ms]` | Explicit swipe between two points. |
 | `screenshot [--out path] [--more] [--max px] [--full] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. [Downscaled](#screenshots) to a 700px longest edge by default to save tokens; `--more` bumps detail, `--max px` sets an exact cap, `--full` keeps the original. |
-| `launch <app> [--clear]` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). `--clear` wipes the app's local data (login/session, prefs, cache) before launching, for a fresh-install start. |
+| `launch <app> [--clear] [--no-restart]` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). `launch` **restarts by default** — it force-stops the app first (a no-op if it isn't running) so a rerun starts fresh instead of resurfacing a still-running instance's current screen; `--no-restart` skips that. `--clear` also wipes the app's local data (login/session, prefs, cache) for a fresh-install start. |
 | `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to a just-installed state (Android `pm clear`, which also force-stops the app). iOS not supported yet. |
 
 ### Batch
 | Command | Description |
 |---|---|
 | `batch [--file <path>] [--quiet]` | Run newline-separated commands — from `--file`, else piped **stdin** — each exactly as its own command (same auto-wait, recording, exit codes). Streams each result to stdout and **stops on the first non-zero exit**, propagating that code. Blank lines and `#` comments are skipped; `--quiet` hides per-line progress. See [Batch](#batch). |
+
+### AI
+| Command | Description |
+|---|---|
+| `ai <file> [--model m] [--max-cost-usd n] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY`. See [AI](#ai--natural-language-tests). |
 
 ### Environment
 | Command | Description |
@@ -177,6 +182,45 @@ Because each line records like an individual action, ending a batch with
 ```sh
 printf 'launch com.example.app\nassert @home_tab\nrun archive smoke\n' | vk batch
 ```
+
+## AI — natural-language tests
+
+`vk ai <file>` runs a test written in plain English. It treats the model as a
+**compiler, not a runtime**: it compiles the prose into a deterministic plan once
+(paying tokens), caches that plan by the test text + app build, then **replays it
+with no model calls on the happy path**. The model is woken only to *repair* a step
+whose selector stops resolving; a green run persists the repaired plan, so the next
+run is free again. That is what keeps a CI suite's steady-state token cost near zero.
+Needs `ANTHROPIC_API_KEY`.
+
+```sh
+# onboarding.md (plain English):
+#   Launch com.example.app fresh.
+#   If a notifications permission dialog appears, allow it.
+#   Tap "Get started", then assert the home tab is visible.
+
+vk ai onboarding.md                       # first run: compile, then run
+vk ai onboarding.md                       # cached: replays with no model call
+vk ai onboarding.md --show-plan           # print the compiled plan, don't run
+vk ai onboarding.md --max-cost-usd 0.50   # abort if the estimated spend crosses $0.50
+```
+
+The compiled plan supports **conditions** (`if-present`, for optional interstitials
+like permission dialogs) and **bounded loops** (`repeat … until`, e.g. scroll until a
+row appears) — control flow a flat [`batch`](#batch) script can't express. Loops carry
+a hard iteration cap and stop early if the screen stops changing.
+
+- **Progress streams to stderr** (so a CI job never goes silent); **stdout is the
+  report path** (or a JSON summary with `--json`). The compiled plan is logged to the
+  run before it executes, for troubleshooting.
+- **Cost is shown and bounded.** Each run reports `compile / repairs / replay=$0 /
+  est $…`; `--max-cost-usd` aborts the run when the estimate crosses the ceiling.
+  `--cost-override <input/output>` overrides the bundled per-1M price table if it drifts.
+- **`--model`** picks the model (`claude-haiku-4-5` · `claude-sonnet-4-6` (default) ·
+  `claude-opus-4-8` · `claude-fable-5`); **`--recompile`** ignores the cache.
+- An `ai` run records like any other flow, so it produces the same JUnit + HTML report —
+  with the cost line and any **suggested test improvements** (workarounds the model
+  applied, which you can fold back into the prose to stabilize the test and cut tokens).
 
 ## Selectors
 
