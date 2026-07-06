@@ -10,18 +10,51 @@ import {
   healNote,
   waitNote,
   chooseLogOpts,
+  confineToCwd,
+  assertSafeAppId,
 } from '../src/cli';
+import { resolve } from 'node:path';
 import { parseSelector } from '../src/ui/selector';
 import { CliError } from '../src/errors';
 import { makeEl } from './helpers';
 
+// --- confineToCwd (host-write path confinement) ---------------------------
+
+test('confineToCwd: keeps --out inside cwd, rejects traversal/absolute escapes', () => {
+  const cwd = resolve(process.cwd());
+  assert.equal(confineToCwd('shot.png'), resolve(cwd, 'shot.png'));
+  assert.equal(confineToCwd('sub/dir/shot.png'), resolve(cwd, 'sub/dir/shot.png'));
+  for (const bad of ['../escape.png', '../../etc/x.png', '/etc/x.png']) {
+    assert.throws(
+      () => confineToCwd(bad),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2,
+    );
+  }
+});
+
+// --- assertSafeAppId (device-shell injection gate) ------------------------
+
+test('assertSafeAppId: accepts real package/bundle ids, rejects shell metacharacters', () => {
+  for (const ok of ['com.android.camera', 'com.rype.go', 'my-app_1.2']) {
+    assert.equal(assertSafeAppId(ok), ok);
+  }
+  for (const bad of ['com.x; rm -rf /', 'a b', 'a|b', 'a$(x)', 'a`x`', 'a&&b', 'a\nb', '']) {
+    assert.throws(
+      () => assertSafeAppId(bad),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2,
+    );
+  }
+});
+
 // --- parseDuration --------------------------------------------------------
 
-test('parseDuration: a bare number is milliseconds; s/ms suffixes scale', () => {
+test('parseDuration: a bare number is milliseconds; s/ms/m suffixes scale', () => {
   assert.equal(parseDuration('5000', 'wait'), 5000);
   assert.equal(parseDuration('5s', 'wait'), 5000);
   assert.equal(parseDuration('800ms', 'wait'), 800);
   assert.equal(parseDuration('1.5s', 'wait'), 1500);
+  assert.equal(parseDuration('15m', 'wait'), 900000); // minutes
+  assert.equal(parseDuration('2m', 'wait'), 120000);
   assert.equal(parseDuration('0', 'wait'), 0);
   assert.equal(parseDuration(' 250 ', 'wait'), 250); // trimmed
 });

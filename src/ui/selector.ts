@@ -1,5 +1,5 @@
 import { Element } from '../types';
-import { CliError } from '../errors';
+import { CliError, SelectorNotFoundError, AmbiguousSelectorError } from '../errors';
 import { formatInline } from './format';
 
 // Selector grammar (shell-safe, explicit):
@@ -159,16 +159,15 @@ export function resolveOne(
 ): { element: Element; tier: MatchTier } {
   const { matches, tier } = matchElements(elements, sel);
   if (matches.length === 0) {
-    throw new CliError(
+    throw new SelectorNotFoundError(
       `No element matched selector '${sel.raw}'. Run \`verikun ui\` to inspect the current screen.`,
-      1,
     );
   }
   if (matches.length > 1) {
     const list = matches.map((m) => '  ' + formatInline(m)).join('\n');
-    throw new CliError(
+    throw new AmbiguousSelectorError(
       `Selector '${sel.raw}' matched ${matches.length} elements; refine it or add --index N:\n${list}`,
-      2,
+      matches,
     );
   }
   return { element: matches[0], tier: tier as MatchTier };

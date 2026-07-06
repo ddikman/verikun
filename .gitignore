@@ -13,6 +13,10 @@ test-results/
 *.log
 npm-debug.log*
 
+# Local env / secrets (never commit API keys)
+.env
+.env.*
+
 # OS
 .DS_Store
 

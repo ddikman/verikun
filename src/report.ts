@@ -70,6 +70,7 @@ export function toJUnitXml(run: RunState): string {
       const lines: string[] = [];
       if (selectorLabel(s)) lines.push(`selector: ${selectorLabel(s)}`);
       if (s.tier && s.tier !== 'exact') lines.push(`healed: matched via ${s.tier}, not exact`);
+      if (s.healed) lines.push(`model-healed: ${s.message ?? 'repaired'}`);
       if (resolvedLabel(s)) lines.push(`resolved: ${resolvedLabel(s)}`);
       if (s.failImage) lines.push(`screenshot: ${s.failImage}`);
       if (s.image) lines.push(`image: ${s.image}`);
@@ -107,6 +108,13 @@ export function toJUnitXml(run: RunState): string {
     `<testsuites name="verikun" tests="${c.tests}" failures="${c.failures}" errors="${c.errors}" time="${suiteTime}">\n` +
     `<testsuite ${suiteAttrs}>\n` +
     `${cases}\n` +
+    (run.ai
+      ? `  <system-out>${xmlText(
+          'vk ai: ' +
+            run.ai.cost +
+            (run.ai.improvements.length ? '\nSuggested improvements:\n' + run.ai.improvements.join('\n') : ''),
+        )}</system-out>\n`
+      : '') +
     `</testsuite>\n</testsuites>\n`
   );
 }
@@ -143,12 +151,29 @@ const STYLE = `
   details { margin-top:8px; }
   summary { cursor:pointer; color:var(--muted); font-size:13px; }
   pre { background:#0d1117; color:#e6edf3; padding:12px; border-radius:6px; overflow:auto; font-size:12px; line-height:1.45; max-height:360px; }
+  .aibox { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:20px; font-size:13px; }
+  .aibox .cost { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); margin-top:4px; }
+  .aibox ul { margin:8px 0 0; padding-left:18px; }
 `;
+
+function aiPanelHtml(ai: NonNullable<RunState['ai']>): string {
+  const improvements = ai.improvements.length
+    ? `<details open><summary>Suggested test improvements (${ai.improvements.length})</summary><ul>${ai.improvements
+        .map((s) => `<li>${htmlEsc(s)}</li>`)
+        .join('')}</ul></details>`
+    : '';
+  return `<div class="aibox">
+      <div><span class="k">vk ai</span> ${ai.ok ? 'passed' : 'did not pass'}${ai.modelRepairs ? ` &middot; ${ai.modelRepairs} model repair(s)` : ''}</div>
+      <div class="cost">${htmlEsc(ai.cost)}</div>
+      ${improvements}
+    </div>`;
+}
 
 function stepHtml(s: RunStep): string {
   const detail: string[] = [];
   if (selectorLabel(s)) detail.push(`<span class="k">selector</span> <code>${htmlEsc(s.selector!.raw)}</code> <span class="k">(${htmlEsc(s.selector!.kind)})</span>`);
   if (s.tier && s.tier !== 'exact') detail.push(`<span class="k">healed</span> <code>${htmlEsc(s.tier)}</code>`);
+  if (s.healed) detail.push(`<span class="k">model-healed</span>`);
   if (resolvedLabel(s)) detail.push(`<span class="k">resolved</span> <code>${htmlEsc(resolvedLabel(s))}</code>`);
 
   const parts: string[] = [];
@@ -203,6 +228,7 @@ export function toHtml(run: RunState): string {
   <div class="summary">
       ${chips}
   </div>
+  ${run.ai ? aiPanelHtml(run.ai) : ''}
   <ol class="steps">
     ${run.steps.map(stepHtml).join('\n    ')}
   </ol>

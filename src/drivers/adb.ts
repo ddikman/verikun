@@ -211,8 +211,41 @@ export class AdbDriver implements Driver {
   }
 
   launch(appId: string): void {
-    // monkey launches the default LAUNCHER activity without needing its name.
-    this.shell(['monkey', '-p', appId, '-c', 'android.intent.category.LAUNCHER', '1'], 15000);
+    // Resolve the app's default LAUNCHER activity, then start it with `am start -n`.
+    // We deliberately avoid `monkey -c LAUNCHER`: on some OEM skins (MIUI/HyperOS) it
+    // hangs indefinitely rather than returning, tripping the exec timeout.
+    const resolved = this.shell([
+      'cmd',
+      'package',
+      'resolve-activity',
+      '--brief',
+      '-a',
+      'android.intent.action.MAIN',
+      '-c',
+      'android.intent.category.LAUNCHER',
+      appId,
+    ]);
+    // `--brief` may print a header line before the component; the component is the
+    // last non-empty line and looks like `pkg/.Activity`.
+    const component = resolved
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .pop();
+    if (!component || !component.includes('/')) {
+      throw new CliError(`Could not resolve a launcher activity for '${appId}' (is it installed?).`, 3);
+    }
+    // Capture stdout+stderr+exit code: `am start` reports failures via `Error:`/`Error
+    // type` (on EITHER stream) and/or a non-zero exit, but shell() returns only stdout —
+    // so a failed launch would otherwise read as success. The benign `Warning: Activity
+    // not started` (intent delivered to a running instance, e.g. --no-restart) is NOT a
+    // failure.
+    const r = runText(ADB, this.withSerial(['shell', 'am', 'start', '-n', component]));
+    const combined = `${r.stdout}\n${r.stderr}`;
+    const benignWarning = /Warning: Activity not started/.test(combined);
+    if (/^Error\b/im.test(combined) || (r.code !== 0 && !benignWarning)) {
+      throw new CliError(`Failed to launch '${appId}': ${r.stderr.trim() || r.stdout.trim() || `exit code ${r.code}`}`, 3);
+    }
   }
 
   stop(appId: string): void {
@@ -247,6 +280,13 @@ export class AdbDriver implements Driver {
     // (main,system,crash) already include crash traces, so no -b needed.
     const args = ['logcat', '-d'];
     if (opts.since) {
+      // A logcat timestamp is `MM-DD HH:MM:SS.mmm` — digits, space, `-`, `:`, `.` only.
+      // Reject anything else so a caller-supplied `--since` cannot break out of the
+      // device-shell single-quoting below into command injection (device-shell escaping
+      // is the driver's job — see escapeText / CLAUDE.md).
+      if (!/^[0-9 :.\-]+$/.test(opts.since)) {
+        throw new CliError(`Invalid --since '${opts.since}': only a logcat timestamp (digits, space, '-', ':', '.') is allowed.`, 2);
+      }
       // `-t '<time>'` prints lines at/after that time, then exits. The marker
       // contains a space and adb concatenates the post-`shell` args into one
       // device-side command line, so single-quote it for the device shell to

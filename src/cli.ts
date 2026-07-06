@@ -1,17 +1,21 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, basename, sep } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
-import { CliError } from './errors';
+import { CliError, SelectorNotFoundError } from './errors';
 import { runText } from './exec';
 import { getDriver, AdbDriver, SimctlDriver } from './drivers';
 import { Driver, DeviceInfo, Element, Platform, Point } from './types';
 import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
-import { out, err, json, defaultScreenshotPath } from './output';
+import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
 import { Recorder, isRecordable } from './run';
 import { downscalePng } from './image';
-
-const VERSION = '0.3.0';
+import { runPlan, DEFAULT_RUN_TIMEOUT_MS } from './agent/engine';
+import { ClaudeProvider } from './agent/claude';
+import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
+import { resolveModel, parseCostOverride, priceFor, CostTracker, DEFAULT_MAX_COST_USD } from './agent/cost';
+import { Plan } from './agent/ir';
+import { VERSION } from './version';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -74,10 +78,11 @@ const DEFAULT_POLL_MS = 300;
 
 /** Parse a duration: a bare number is milliseconds (CLI convention), or `5s` / `800ms`. */
 export function parseDuration(raw: string, flag: string): number {
-  const m = /^(\d+(?:\.\d+)?)\s*(ms|s)?$/.exec(raw.trim());
-  if (!m) throw new CliError(`--${flag} must be a duration like 5000, 5s, or 800ms; got '${raw}'`, 2);
+  const m = /^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/.exec(raw.trim());
+  if (!m) throw new CliError(`--${flag} must be a duration like 5000, 5s, 800ms, or 15m; got '${raw}'`, 2);
   const n = Number(m[1]);
-  return Math.max(0, Math.round(m[2] === 's' ? n * 1000 : n));
+  const scale = m[2] === 's' ? 1000 : m[2] === 'm' ? 60000 : 1;
+  return Math.max(0, Math.round(n * scale));
 }
 
 /** Wait window (ms) for selector lookups: `--no-wait`/`--wait 0` → 0; else `--wait <dur>`, else 5s. */
@@ -133,9 +138,8 @@ async function resolveOneWaiting(
     }
     if (Date.now() >= deadline) {
       const waited = windowMs > 0 ? ` after ${(windowMs / 1000).toFixed(1)}s` : '';
-      throw new CliError(
+      throw new SelectorNotFoundError(
         `No element matched selector '${sel.raw}'${waited}. Run \`verikun ui\` to inspect the current screen.`,
-        1,
       );
     }
     await sleep(pollStep(ctx.flags, deadline));
@@ -148,11 +152,19 @@ async function resolveOneWaiting(
 
 function cmdDevices(ctx: Ctx): number {
   const allDevices: DeviceInfo[] = [];
-  try { allDevices.push(...new AdbDriver().listDevices()); } catch { /* adb unavailable */ }
+  try {
+    allDevices.push(...new AdbDriver().listDevices());
+  } catch (e) {
+    // adb not on PATH is the common (expected) case, but surface anything else so a real
+    // adb listing failure isn't hidden behind a silently-empty device list.
+    err(`devices: adb backend unavailable (${(e as Error).message})`);
+  }
   try {
     // Only include booted simulators; always include physical devices (they carry a note)
     allDevices.push(...new SimctlDriver().listDevices().filter((d) => d.state === 'booted' || d.note));
-  } catch { /* simctl unavailable */ }
+  } catch (e) {
+    err(`devices: simctl backend unavailable (${(e as Error).message})`);
+  }
 
   if (flagBool(ctx.flags, 'json')) {
     json(allDevices);
@@ -427,6 +439,31 @@ function shotMaxEdge(): number {
   return DEFAULT_SHOT_MAX_EDGE;
 }
 
+/** Resolve an `--out` path and confine it to the working directory. A host-side write
+ *  (a screenshot PNG, captured device logs) must never land outside cwd via a `..`
+ *  traversal or an absolute path — including when driven by `vk ai` model output, whose
+ *  leaf flags `validateNode` does not constrain. Exported for unit tests. */
+export function confineToCwd(outFlag: string): string {
+  const cwd = resolve(process.cwd());
+  const path = resolve(cwd, outFlag);
+  if (path !== cwd && !path.startsWith(cwd + sep)) {
+    throw new CliError(`--out must stay within the current directory; '${outFlag}' resolves outside it.`, 2);
+  }
+  return path;
+}
+
+/** A package / bundle id is handed to `adb shell`, which re-concatenates its args into
+ *  one device-side command line — so a value with shell metacharacters would inject into
+ *  the device shell. Valid Android package / iOS bundle ids are only `[A-Za-z0-9._-]`;
+ *  reject anything else. This is the trust gate for `launch` / `stop` / `clear`, all
+ *  reachable from `vk ai` model output. Exported for unit tests. */
+export function assertSafeAppId(appId: string): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(appId)) {
+    throw new CliError(`Invalid app id '${appId}': only letters, digits, '.', '_' and '-' are allowed.`, 2);
+  }
+  return appId;
+}
+
 function cmdScreenshot(ctx: Ctx): number {
   const raw = ctx.driver.screenshot();
   // Precedence: --full (original) > --max <px> (explicit) > --more (preset) > default.
@@ -435,7 +472,7 @@ function cmdScreenshot(ctx: Ctx): number {
   const buf = res?.scaled ? res.buf : raw;
 
   const outFlag = flagStr(ctx.flags, 'out');
-  const path = outFlag ? resolve(process.cwd(), outFlag) : defaultScreenshotPath();
+  const path = outFlag ? confineToCwd(outFlag) : defaultScreenshotPath();
   writeFileSync(path, buf);
   ctx.record?.attachImage(buf);
   ctx.record?.note({ message: res?.scaled ? `${path} (${res.width}×${res.height})` : path });
@@ -497,7 +534,8 @@ function cmdLog(ctx: Ctx): number {
   const lineCount = logs === '' ? 0 : logs.replace(/\n+$/, '').split('\n').length;
   const outFlag = flagStr(ctx.flags, 'out');
   if (outFlag) {
-    const path = resolve(process.cwd(), outFlag);
+    // Keep --out inside the working directory (device logs can contain secrets).
+    const path = confineToCwd(outFlag);
     writeFileSync(path, logs);
     if (flagBool(ctx.flags, 'json')) json({ path, bytes: Buffer.byteLength(logs), lines: lineCount });
     else out(path);
@@ -586,21 +624,34 @@ async function cmdAssert(ctx: Ctx): Promise<number> {
 
 function cmdLaunch(ctx: Ctx): number {
   const appId = ctx.positionals[0];
-  if (!appId) throw new CliError('Usage: verikun launch <package|bundleId> [--clear]', 2);
-  // --clear wipes locally stored data (login/session, prefs, cache) first, so the
-  // app starts in a fresh-install state. (pm clear also force-stops it before launch.)
+  if (!appId) throw new CliError('Usage: verikun launch <package|bundleId> [--clear] [--no-restart]', 2);
+  assertSafeAppId(appId);
+  // launch RESTARTS by default: if the app is already running/foregrounded, re-issuing
+  // the launch intent just delivers it to the live (possibly mid-flow, stale) instance
+  // instead of giving a fresh start — which makes reruns flaky. So we force-stop first.
+  // force-stop is a no-op when the app isn't running, so no "is it running?" probe is
+  // needed (and none would be portable — the iOS backend has no foreground query).
+  //   --clear     wipes data first via `pm clear` (which already force-stops) → fresh install
+  //   --no-restart opt out of the force-stop (just bring the existing instance forward)
   const cleared = flagBool(ctx.flags, 'clear');
+  const noRestart = flagBool(ctx.flags, 'no-restart');
+  if (cleared && noRestart) {
+    throw new CliError('Cannot combine --clear with --no-restart: --clear wipes data and force-stops (a restart).', 2);
+  }
   if (cleared) ctx.driver.clearApp(appId);
+  else if (!noRestart) ctx.driver.stop(appId);
   ctx.driver.launch(appId);
-  ctx.record?.note({ message: cleared ? `cleared data + launched ${appId}` : `launched ${appId}` });
-  if (flagBool(ctx.flags, 'json')) json({ launched: appId, cleared });
-  else out(cleared ? `cleared + launched ${appId}` : `launched ${appId}`);
+  const how = cleared ? 'cleared data + launched' : noRestart ? 'launched' : 'restarted';
+  ctx.record?.note({ message: `${how} ${appId}` });
+  if (flagBool(ctx.flags, 'json')) json({ launched: appId, cleared, restarted: !cleared && !noRestart });
+  else out(`${how} ${appId}`);
   return 0;
 }
 
 function cmdStop(ctx: Ctx): number {
   const appId = ctx.positionals[0];
   if (!appId) throw new CliError('Usage: verikun stop <package|bundleId>', 2);
+  assertSafeAppId(appId);
   ctx.driver.stop(appId);
   ctx.record?.note({ message: `stopped ${appId}` });
   out(`stopped ${appId}`);
@@ -610,6 +661,7 @@ function cmdStop(ctx: Ctx): number {
 function cmdClear(ctx: Ctx): number {
   const appId = ctx.positionals[0];
   if (!appId) throw new CliError('Usage: verikun clear <package|bundleId>', 2);
+  assertSafeAppId(appId);
   ctx.driver.clearApp(appId);
   ctx.record?.note({ message: `cleared app data for ${appId}` });
   if (flagBool(ctx.flags, 'json')) json({ cleared: appId });
@@ -832,6 +884,196 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
 }
 
 // ---------------------------------------------------------------------------
+// ai — compile a natural-language test to a plan IR, then run it (self-healing)
+// ---------------------------------------------------------------------------
+//
+// `vk ai <file>` reads a plain-English test, compiles it ONCE into a deterministic
+// plan IR via the model (cached by NL + app build), then replays it with NO model
+// calls on the happy path. The model is woken only to repair a step that fails to
+// resolve its selector; a green run persists the (possibly repaired) plan so the
+// next run is free again. Cost is bounded by --max-cost-usd. Progress streams to
+// stderr (CI liveness — it never goes quiet); stdout carries the final result.
+
+async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
+  const file = positionals[0];
+  if (!file) {
+    throw new CliError('Usage: verikun ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--show-plan] [--recompile]', 2);
+  }
+  let nl: string;
+  try {
+    nl = readFileSync(resolve(process.cwd(), file), 'utf8');
+  } catch (e) {
+    throw new CliError(`ai: cannot read '${file}' (${(e as Error).message})`, 2);
+  }
+  if (!nl.trim()) throw new CliError(`ai: '${file}' is empty`, 2);
+
+  const platform = platformFromFlags(flags);
+  const device = deviceFromFlags(flags, platform);
+
+  const model = resolveModel(flagStr(flags, 'model'));
+  const overrideRaw = flagStr(flags, 'cost-override');
+  const override = overrideRaw ? parseCostOverride(overrideRaw) : undefined;
+  const maxCostUsd = flagNum(flags, 'max-cost-usd') ?? DEFAULT_MAX_COST_USD;
+  if (maxCostUsd <= 0) throw new CliError(`--max-cost-usd must be greater than 0 (got ${maxCostUsd}).`, 2);
+  const cost = new CostTracker(priceFor(model, override), maxCostUsd);
+  // Whole-run wall-clock ceiling (default 15m) so a runaway loop/repair can't hang the run.
+  const timeoutFlag = flagStr(flags, 'timeout');
+  const timeoutMs = timeoutFlag ? parseDuration(timeoutFlag, 'timeout') : DEFAULT_RUN_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  const effort = flagStr(flags, 'effort');
+
+  const pkg = flagStr(flags, 'package');
+  const build = flagStr(flags, 'app-build');
+  const key: CacheKeyInput = { nl, pkg, build, platform };
+
+  const recompile = flagBool(flags, 'recompile') || flagBool(flags, 'no-cache');
+  const showPlan = flagBool(flags, 'show-plan');
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const provider = apiKey ? new ClaudeProvider({ model, apiKey, effort }) : null;
+
+  // 1. Obtain the plan: a cache hit (free) or a compile (pays tokens; may seed from
+  //    a prior build's plan to avoid a full recompile).
+  const cached = recompile ? null : readPlan(key);
+  let plan: Plan;
+  if (cached) {
+    plan = cached.plan;
+    err(`[ai] plan cache hit — ${model} not called to compile`);
+  } else {
+    if (!provider) {
+      throw new CliError('ANTHROPIC_API_KEY is not set — `vk ai` needs it to compile the test. Set it and retry.', 3);
+    }
+    const seed = findSeed(key);
+    if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
+    err(`[ai] compiling '${file}' with ${model} (effort ${effort ?? 'default'})…`);
+    const compiled = await provider.compile({ nl, pkg, platform, seed: seed?.plan });
+    cost.add(compiled.usage, 'compile');
+    plan = compiled.plan;
+    err(`[ai] compiled ${plan.steps.length} top-level step(s) · ${cost.summaryLine()}`);
+    // Cache the freshly-compiled plan right away, keyed by the test-text hash, so an
+    // unchanged test is never recompiled — even via --show-plan or after a failed run.
+    // A green run below re-persists the healed plan; a failed run leaves this clean
+    // compile cached (never a half-healed one).
+    try {
+      writePlan(key, plan);
+    } catch (e) {
+      err(`[ai] could not cache compiled plan: ${(e as Error).message}`);
+    }
+  }
+
+  // 2. --show-plan: print the compiled IR and stop (no device run).
+  if (showPlan) {
+    json(plan);
+    return 0;
+  }
+
+  // Running needs the provider for repair-on-failure; a cache hit with no key can't repair.
+  if (!provider) {
+    throw new CliError('ANTHROPIC_API_KEY is not set — `vk ai` needs it to repair a failing step at runtime.', 3);
+  }
+
+  // The budget is a TOTAL-run ceiling: if the compile alone already crossed it, abort
+  // before running. A cache hit spends nothing, so a free replay is still allowed.
+  if (!cached && cost.exceeded()) {
+    err(`[ai] cost ceiling $${maxCostUsd} reached during compile (${cost.summaryLine()}) — not running`);
+    return 1;
+  }
+
+  // 3. One explicit run + one shared driver for the whole flow (so rollover can't
+  //    split the test, and we don't rebuild a driver per step).
+  const existing = Recorder.status();
+  if (existing && existing.steps.length > 0) {
+    // Seal the pre-existing run into the archive instead of letting start(force=true)
+    // discard it — a manual in-progress run should never be silently lost.
+    const sealed = Recorder.archive();
+    err(`[ai] archived the active run ('${existing.name}', ${existing.steps.length} step(s)) → ${sealed.dir}`);
+  }
+  Recorder.start(`ai: ${basename(file)}`, platform, device, true);
+  const driver = getDriver(platform, device);
+
+  // Suppress per-step `out()` so stdout stays the one final result; progress -> stderr.
+  const prevQuiet = setOutputQuiet(true);
+  let result: Awaited<ReturnType<typeof runPlan>>;
+  try {
+    result = await runPlan(plan, {
+      exec: (command, pos, f) => executeOutcome(command, pos, f, driver),
+      getElements: () => driver.getElements(),
+      provider,
+      cost,
+      log: (m) => err(m),
+      markHealed: (m) => Recorder.markLastStepHealed(m),
+      maxRepairs: 3,
+      deadline,
+    });
+  } catch (e) {
+    // An unexpected throw mid-run (e.g. an unrecoverable device error) must still
+    // seal the run so it is not left dangling in .verikun/run/ for the next command
+    // to roll over. Then let the error map to an exit code as usual.
+    Recorder.annotateRun({ ai: { ok: false, cost: cost.summaryLine(), modelRepairs: 0, improvements: [] } });
+    try {
+      Recorder.archive();
+    } catch (sealErr) {
+      // Best-effort seal in an error path; surface a failure (the run state may itself be
+      // unreadable) but still throw the ORIGINAL error below.
+      err(`[ai] could not archive the run after a mid-run error (${(sealErr as Error).message})`);
+    }
+    throw e;
+  } finally {
+    setOutputQuiet(prevQuiet);
+  }
+
+  // 4. Persist the (possibly repaired) plan only on a fully-green run; attach the
+  //    cost + improvements summary to the run; archive into the report.
+  const costLine = cost.summaryLine();
+  if (result.ok) {
+    try {
+      writePlan(key, result.plan);
+      err('[ai] cached the green plan for next run');
+    } catch (e) {
+      err(`[ai] could not cache plan: ${(e as Error).message}`);
+    }
+  }
+  Recorder.annotateRun({
+    ai: { ok: result.ok, cost: costLine, modelRepairs: result.modelRepairs, improvements: result.improvements },
+  });
+  const { dir, xmlPath, htmlPath } = Recorder.archive();
+
+  const status = result.ok
+    ? 'PASS'
+    : result.abortedForBudget
+      ? `ABORTED — cost ceiling $${maxCostUsd} reached`
+      : result.abortedForTimeout
+        ? `ABORTED — run timeout (${Math.round(timeoutMs / 1000)}s) reached`
+        : `FAIL at ${result.failure?.where}: ${result.failure?.reason}`;
+  err(`[ai] ${status} · ${costLine}`);
+  err(`[ai] report: ${htmlPath}`);
+  if (result.improvements.length) {
+    err(`[ai] ${result.improvements.length} suggested improvement(s) (also in the report):`);
+    for (const imp of result.improvements) err('  - ' + imp);
+  }
+  err(`[ai] estimated total cost: $${cost.usd().toFixed(4)}`);
+
+  if (flagBool(flags, 'json')) {
+    json({
+      ok: result.ok,
+      model,
+      cost: costLine,
+      costUsd: Number(cost.usd().toFixed(4)),
+      modelRepairs: result.modelRepairs,
+      improvements: result.improvements,
+      report: htmlPath,
+      junit: xmlPath,
+      runDir: dir,
+      ...(result.failure ? { failure: result.failure } : {}),
+      ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
+      ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
+    });
+  } else {
+    out(htmlPath); // primary machine result: the report path
+  }
+  return result.ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -902,28 +1144,34 @@ function mapError(e: unknown, flags: Flags): number {
 }
 
 /**
- * Run one already-parsed command: resolve the driver, record it if recordable,
- * execute, and map any failure to an exit code. This is the per-command core that
- * both a top-level `run()` and each `batch` line go through, so a batched command
- * behaves identically to a standalone invocation.
+ * Execute one (non-meta) command and return its RAW outcome — the exit code, and
+ * the thrown error if any, WITHOUT mapping it to a printed exit. The agent engine
+ * (`vk ai`) uses this to tell a selector miss / ambiguity (a heal trigger: the error
+ * is a SelectorNotFoundError / AmbiguousSelectorError) apart from an assertion
+ * failure (`assert` *returns* exit 1, never throws — so it must never be healed, or
+ * a real regression would be masked). `executeParsed` wraps it to restore the
+ * print-and-exit behavior the CLI and `batch` rely on.
+ *
+ * An optional `sharedDriver` lets the engine reuse one device handle across many
+ * commands (and its control-flow guards) instead of building a driver per call.
  */
-async function executeParsed(command: string, positionals: string[], flags: Flags): Promise<number> {
+async function executeOutcome(
+  command: string,
+  positionals: string[],
+  flags: Flags,
+  sharedDriver?: Driver,
+): Promise<{ code: number; error?: Error }> {
   const platform = platformFromFlags(flags);
   const device = deviceFromFlags(flags, platform);
-
-  // Meta-commands manage local state / orchestrate other commands. They build no
-  // driver of their own and are dispatched before the recording machinery.
-  if (command === 'run') return cmdRun(positionals, flags, platform, device);
-  if (command === 'batch') return cmdBatch(positionals, flags);
 
   // Recordable commands open a step (auto-starting an implicit run if needed);
   // the step is finalized with the outcome — and, on failure, screenshot + UI
   // hierarchy of the page are captured — whether the command returns or throws.
   const recordable = isRecordable(command);
-  let driver: Driver | undefined;
+  let driver: Driver | undefined = sharedDriver;
   let recorder: Recorder | null = null;
   try {
-    driver = getDriver(platform, device);
+    if (!driver) driver = getDriver(platform, device);
     if (recordable) {
       // Resolve the serial up front (cheap; the driver caches it) so the run can
       // detect a device change. Tolerate failure — the handler raises the real error.
@@ -938,11 +1186,40 @@ async function executeParsed(command: string, positionals: string[], flags: Flag
     const ctx: Ctx = { driver, platform, device, positionals, flags, record: recorder ?? undefined };
     const code = await executeCommand(command, ctx);
     recorder?.finish(code, driver);
-    return code;
+    return { code };
   } catch (e) {
     recorder?.finishError(e as Error, driver);
-    return mapError(e, flags);
+    return { code: e instanceof CliError ? e.exitCode : 3, error: e as Error };
   }
+}
+
+/**
+ * Run one already-parsed command for the CLI / `batch`: dispatch meta-commands,
+ * else execute it and map any failure to a printed exit code. This is the shared
+ * per-command entry both a top-level `run()` and each `batch` line go through, so a
+ * batched command behaves identically to a standalone invocation.
+ */
+async function executeParsed(command: string, positionals: string[], flags: Flags): Promise<number> {
+  const platform = platformFromFlags(flags);
+  const device = deviceFromFlags(flags, platform);
+
+  // Meta-commands manage local state / orchestrate other commands. They build no
+  // driver of their own and are dispatched before the recording machinery.
+  if (command === 'run') return cmdRun(positionals, flags, platform, device);
+  if (command === 'batch') return cmdBatch(positionals, flags);
+  // `ai` orchestrates its own steps; map its thrown CliErrors to exit codes here
+  // (usage 2 / env 3 / …) so they honor the exit-code contract instead of escaping
+  // to the top-level "Fatal" handler (which would force exit 3).
+  if (command === 'ai') {
+    try {
+      return await cmdAi(positionals, flags);
+    } catch (e) {
+      return mapError(e, flags);
+    }
+  }
+
+  const { code, error } = await executeOutcome(command, positionals, flags);
+  return error ? mapError(error, flags) : code;
 }
 
 export async function run(argv: string[]): Promise<number> {
@@ -989,7 +1266,8 @@ ACT
                                       Downscaled to <=700px longest edge for token-cheap, legible reads;
                                       --more bumps detail (1400px), --max px sets an exact cap
                                       (VERIKUN_SHOT_MAX_EDGE changes the default), --full keeps original
-  launch <app> [--clear]   stop <app>   App lifecycle (launch --clear wipes app data first)
+  launch <app> [--clear] [--no-restart]   stop <app>   App lifecycle (launch restarts by
+                                        default — force-stops first; --clear also wipes app data)
   clear <app>                         Wipe app data — login/session, caches (fresh-install state)
 
 BATCH (script many commands in one process)
@@ -998,6 +1276,21 @@ BATCH (script many commands in one process)
                                       command. Streams each result to stdout; stops
                                       and propagates the exit code on the first
                                       failure. Blank lines and # comments are skipped.
+
+AI (run a natural-language test — compile once, replay model-free, self-heal)
+  ai <file> [--model m] [--max-cost-usd n] [--cost-override in/out] [--effort e]
+            [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]
+                                      Compile a plain-English test (<file>) into a
+                                      deterministic plan, cached by NL + app build,
+                                      then replay it with NO model calls on the happy
+                                      path. The model is woken only to repair a step
+                                      that fails to resolve; a green run persists the
+                                      (repaired) plan so the next run is free. Needs
+                                      ANTHROPIC_API_KEY. Progress -> stderr; the report
+                                      path -> stdout. --show-plan prints the compiled
+                                      IR without running; --recompile ignores the cache.
+                                      Models: claude-haiku-4-5 | claude-sonnet-4-6
+                                      (default) | claude-opus-4-8 | claude-fable-5.
 
 ENVIRONMENT
   devices [--json]                    List attached devices/simulators
