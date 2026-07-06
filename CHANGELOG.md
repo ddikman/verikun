@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-09
+
+### Added
+- **iOS simulator + device support at parity with Android**, via Facebook's
+  [`idb`](https://github.com/facebook/idb). `vk --ios` now drives the full loop —
+  `ui`/`find`, `tap`, `text`/`type`, `swipe`, `key`, `assert`, `wait`, plus the
+  existing `screenshot`/`launch`/`stop`, and therefore `vk batch`, `vk ai`, and
+  the JUnit/HTML test-run reports. The hierarchy comes from `idb ui describe-all`
+  (parsed by the new `ui/ios-parse.ts` into the same `Element` model as Android);
+  interaction, keys, and screen size use `idb ui …`; simulator
+  screenshots/launch/stop/logs stay on `xcrun simctl` (no idb needed for those).
+  Install idb with `brew install idb-companion` + `pip install fb-idb`;
+  `vk doctor --ios` verifies it. The old `SimctlDriver` is replaced by `IdbDriver`.
+  Documented caveats: `clear` is unsupported (iOS has no per-app data reset),
+  `current` returns `(unknown)`, `swipe` duration is not honored, and `log`
+  capture is simulator-only.
+- **iOS `vk ai` example** (`example/example-test-ios.md`) — a plain-English Settings
+  navigate-and-search smoke test, the iOS counterpart to the Android camera example.
+
 ## [0.4.1] - 2026-07-07
 
 ### Added
