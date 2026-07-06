@@ -65,6 +65,31 @@ test('runPlan: a clean plan passes with zero model calls', async () => {
   assert.equal(calls.length, 2);
 });
 
+test('runPlan: a repair that returns a control node (not a leaf command) is rejected', async () => {
+  const { fn } = execFrom([{ code: 1, error: new SelectorNotFoundError('miss') }, { code: 0 }]);
+  const controlProvider: AgentProvider = {
+    async compile() {
+      throw new Error('compile not used in these tests');
+    },
+    // Structurally valid per validateNode, but NOT a leaf command — must be rejected
+    // by the engine's `node.type !== 'command'` guard, never spliced into the plan.
+    async repair() {
+      return { replaceStep: { type: 'if-present', selector: 'text:x', body: [] } as unknown as LeafStep, usage: {} };
+    },
+  };
+  const r = await runPlan(plan(leaf('tap', ['@x'])), deps({ exec: fn, provider: controlProvider }));
+  assert.equal(r.ok, false);
+  assert.match(r.failure?.reason ?? '', /repair failed/);
+});
+
+test('runPlan: aborts when the run deadline has already passed', async () => {
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  const r = await runPlan(plan(leaf('tap', ['@a'])), deps({ exec: fn, deadline: Date.now() - 1 }));
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForTimeout, true);
+  assert.equal(calls.length, 0); // deadline is checked before the first step runs
+});
+
 test('runPlan: a selector MISS heals via the model, then succeeds', async () => {
   const { fn } = execFrom([{ code: 1, error: new SelectorNotFoundError('miss') }, { code: 0 }]);
   const counter = { n: 0 };

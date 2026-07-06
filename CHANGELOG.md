@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-07-03
+## [0.4.0] - 2026-07-06
 
 ### Added
 - **`clear` command and `launch --clear`** to wipe an app's locally stored data —
@@ -24,7 +24,9 @@ All notable changes to this project are documented here. The format is based on
   `.test-build/`, and need no connected device.
 - **`vk ai <file>`** — run a natural-language test: compiled once to a deterministic
   plan IR, replayed model-free, with the model woken only to repair a drifted selector
-  (`src/agent/`). Spend is reported and bounded by `--max-cost-usd`.
+  (`src/agent/`). Every run is bounded by default — spend by `--max-cost-usd` (default
+  $3) and wall-clock by `--timeout` (default 15m, e.g. `--timeout 5m`) — so a runaway
+  compile/repair loop can't spend or hang without limit.
 - **`launch`/`open` `--no-restart`** to bring an app forward without restarting it.
 - **`example/`** — a natural-language `vk ai` example test and README.
 
@@ -43,6 +45,16 @@ All notable changes to this project are documented here. The format is based on
   element onto a drifted screen and passing falsely.
 - `vk log` hardened: `--since` is validated against the logcat timestamp charset (no
   device-shell injection) and `--out` is confined to the working directory.
+- The `vk ai` trust boundary is tightened to every model-reachable sink, not just `vk
+  log`: `screenshot --out` is confined to the working directory (was unguarded), and the
+  `launch`/`stop`/`clear` package id is validated against a safe charset so model output
+  can't inject into the device shell.
+- `vk ai` rejects an empty compiled/cached plan instead of reporting a green pass for a
+  test that ran no steps.
+- `launch --no-restart` is parsed as a boolean, so it works before the package argument
+  (`vk launch --no-restart <pkg>`) instead of swallowing it.
+- A model-healed step no longer shows the failed attempt's screenshot/hierarchy in the
+  report (it is a pass, not a failure).
 
 ## [0.3.0] - 2026-06-07
 

@@ -228,6 +228,9 @@ export function parsePlan(raw: unknown): Plan {
   if (p.version !== 1) throw new InvalidPlanError(`plan: unsupported version ${JSON.stringify(p.version)} (expected 1)`);
   if (!Array.isArray(p.steps)) throw new InvalidPlanError('plan: steps must be an array');
   const steps = p.steps.map((s, i) => validateNode(s, `steps[${i}]`));
+  // A plan with zero steps would "pass" green having done nothing — reject it so a
+  // compiler misfire, prompt injection, or truncated cache entry can't be a false green.
+  if (steps.length === 0) throw new InvalidPlanError('plan: has no steps (a test must have at least one step)');
   return {
     version: 1,
     package: typeof p.package === 'string' ? p.package : undefined,

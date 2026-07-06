@@ -201,7 +201,8 @@ test and give me a report"; keep using single commands while you're still
 ```sh
 vk ai onboarding.md                     # compile (first run) or replay (cached)
 vk ai onboarding.md --show-plan         # print the compiled plan IR, do not run
-vk ai onboarding.md --max-cost-usd 0.50 # bound the spend; aborts if the estimate crosses it
+vk ai onboarding.md --max-cost-usd 0.50 # tighten the spend cap (default $3)
+vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
 ```
 
 - Needs `ANTHROPIC_API_KEY`. Default model `claude-sonnet-4-6`; `--model` switches it
@@ -214,7 +215,10 @@ vk ai onboarding.md --max-cost-usd 0.50 # bound the spend; aborts if the estimat
   (`--json` for a structured summary). It records like any flow, so it ends with the
   same JUnit + HTML report — including the token/cost line and **suggested improvements**
   you can fold back into the English to stabilize the test and cut future tokens.
-- Exit `0` pass · `1` a step failed (or the budget was hit) · `2` usage · `3` environment
+- **Bounded by default:** the run aborts if the estimated spend crosses **$3**
+  (`--max-cost-usd`) or the wall-clock passes **15m** (`--timeout`), so a runaway
+  compile/repair loop can't spend or hang without limit.
+- Exit `0` pass · `1` a step failed (or the budget/timeout was hit) · `2` usage · `3` environment
   (e.g. `ANTHROPIC_API_KEY` unset).
 
 ## Test runs & reports

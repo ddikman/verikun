@@ -471,6 +471,10 @@ export class Recorder {
     last.healed = true;
     last.status = 'passed';
     last.exitCode = 0;
+    // The attempt that just failed had failure evidence captured (screenshot +
+    // hierarchy); drop it so a now-green healed step doesn't render as a failure.
+    delete last.failImage;
+    delete last.failHierarchy;
     if (message) last.message = message;
     saveState(dir, state);
   }

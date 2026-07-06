@@ -50,6 +50,7 @@ const BOOLEAN = new Set([
   'show-plan',
   'recompile',
   'no-cache',
+  'no-restart',
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {

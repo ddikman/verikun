@@ -90,7 +90,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 ### AI
 | Command | Description |
 |---|---|
-| `ai <file> [--model m] [--max-cost-usd n] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY`. See [AI](#ai--natural-language-tests). |
+| `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY`. See [AI](#ai--natural-language-tests). |
 
 ### Environment
 | Command | Description |
@@ -202,7 +202,8 @@ Needs `ANTHROPIC_API_KEY`.
 vk ai onboarding.md                       # first run: compile, then run
 vk ai onboarding.md                       # cached: replays with no model call
 vk ai onboarding.md --show-plan           # print the compiled plan, don't run
-vk ai onboarding.md --max-cost-usd 0.50   # abort if the estimated spend crosses $0.50
+vk ai onboarding.md --max-cost-usd 0.50   # tighten the spend cap (default $3)
+vk ai onboarding.md --timeout 5m          # tighten the run timeout (default 15m)
 ```
 
 The compiled plan supports **conditions** (`if-present`, for optional interstitials
@@ -213,9 +214,11 @@ a hard iteration cap and stop early if the screen stops changing.
 - **Progress streams to stderr** (so a CI job never goes silent); **stdout is the
   report path** (or a JSON summary with `--json`). The compiled plan is logged to the
   run before it executes, for troubleshooting.
-- **Cost is shown and bounded.** Each run reports `compile / repairs / replay=$0 /
-  est $…`; `--max-cost-usd` aborts the run when the estimate crosses the ceiling.
-  `--cost-override <input/output>` overrides the bundled per-1M price table if it drifts.
+- **Cost and time are bounded by default.** Each run reports `compile / repairs /
+  replay=$0 / est $…` and aborts if the estimate crosses **`--max-cost-usd` (default
+  $3)** or the wall-clock passes **`--timeout` (default 15m)** — so a runaway loop or
+  repair can't spend or hang without limit. `--cost-override <input/output>` overrides
+  the bundled per-1M price table if it drifts.
 - **`--model`** picks the model (`claude-haiku-4-5` · `claude-sonnet-4-6` (default) ·
   `claude-opus-4-8` · `claude-fable-5`); **`--recompile`** ignores the cache.
 - An `ai` run records like any other flow, so it produces the same JUnit + HTML report —

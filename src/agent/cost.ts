@@ -34,6 +34,10 @@ export const MODEL_PRICES: Record<string, Price> = {
 export const ALLOWED_MODELS: readonly string[] = Object.keys(MODEL_PRICES);
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
+/** Default total-run cost ceiling for `vk ai` when --max-cost-usd is not given, so a
+ *  runaway compile/repair loop can't spend unbounded tokens. */
+export const DEFAULT_MAX_COST_USD = 3;
+
 /** Validate a --model against the allowlist (unknown -> exit 2, not a raw 404). */
 export function resolveModel(model: string | undefined): string {
   if (!model) return DEFAULT_MODEL;

@@ -146,6 +146,7 @@ export function findSeed(input: CacheKeyInput): CacheEntry | null {
       const entry = JSON.parse(readFileSync(join(dir, file), 'utf8')) as CacheEntry;
       if (entry.nlHash !== wantNl) continue;
       if ((entry.pkg ?? '') !== (input.pkg ?? '')) continue;
+      if (entry.platform !== input.platform) continue; // never seed across platforms
       entry.plan = parsePlan(entry.plan); // skip if it doesn't validate
       if (!best || entry.savedAt > best.savedAt) best = entry;
     } catch (e) {

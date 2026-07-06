@@ -10,10 +10,10 @@ import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/forma
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
 import { Recorder, isRecordable } from './run';
 import { downscalePng } from './image';
-import { runPlan } from './agent/engine';
+import { runPlan, DEFAULT_RUN_TIMEOUT_MS } from './agent/engine';
 import { ClaudeProvider } from './agent/claude';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
-import { resolveModel, parseCostOverride, priceFor, CostTracker } from './agent/cost';
+import { resolveModel, parseCostOverride, priceFor, CostTracker, DEFAULT_MAX_COST_USD } from './agent/cost';
 import { Plan } from './agent/ir';
 import { VERSION } from './version';
 
@@ -78,10 +78,11 @@ const DEFAULT_POLL_MS = 300;
 
 /** Parse a duration: a bare number is milliseconds (CLI convention), or `5s` / `800ms`. */
 export function parseDuration(raw: string, flag: string): number {
-  const m = /^(\d+(?:\.\d+)?)\s*(ms|s)?$/.exec(raw.trim());
-  if (!m) throw new CliError(`--${flag} must be a duration like 5000, 5s, or 800ms; got '${raw}'`, 2);
+  const m = /^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/.exec(raw.trim());
+  if (!m) throw new CliError(`--${flag} must be a duration like 5000, 5s, 800ms, or 15m; got '${raw}'`, 2);
   const n = Number(m[1]);
-  return Math.max(0, Math.round(m[2] === 's' ? n * 1000 : n));
+  const scale = m[2] === 's' ? 1000 : m[2] === 'm' ? 60000 : 1;
+  return Math.max(0, Math.round(n * scale));
 }
 
 /** Wait window (ms) for selector lookups: `--no-wait`/`--wait 0` → 0; else `--wait <dur>`, else 5s. */
@@ -438,6 +439,31 @@ function shotMaxEdge(): number {
   return DEFAULT_SHOT_MAX_EDGE;
 }
 
+/** Resolve an `--out` path and confine it to the working directory. A host-side write
+ *  (a screenshot PNG, captured device logs) must never land outside cwd via a `..`
+ *  traversal or an absolute path — including when driven by `vk ai` model output, whose
+ *  leaf flags `validateNode` does not constrain. Exported for unit tests. */
+export function confineToCwd(outFlag: string): string {
+  const cwd = resolve(process.cwd());
+  const path = resolve(cwd, outFlag);
+  if (path !== cwd && !path.startsWith(cwd + sep)) {
+    throw new CliError(`--out must stay within the current directory; '${outFlag}' resolves outside it.`, 2);
+  }
+  return path;
+}
+
+/** A package / bundle id is handed to `adb shell`, which re-concatenates its args into
+ *  one device-side command line — so a value with shell metacharacters would inject into
+ *  the device shell. Valid Android package / iOS bundle ids are only `[A-Za-z0-9._-]`;
+ *  reject anything else. This is the trust gate for `launch` / `stop` / `clear`, all
+ *  reachable from `vk ai` model output. Exported for unit tests. */
+export function assertSafeAppId(appId: string): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(appId)) {
+    throw new CliError(`Invalid app id '${appId}': only letters, digits, '.', '_' and '-' are allowed.`, 2);
+  }
+  return appId;
+}
+
 function cmdScreenshot(ctx: Ctx): number {
   const raw = ctx.driver.screenshot();
   // Precedence: --full (original) > --max <px> (explicit) > --more (preset) > default.
@@ -446,7 +472,7 @@ function cmdScreenshot(ctx: Ctx): number {
   const buf = res?.scaled ? res.buf : raw;
 
   const outFlag = flagStr(ctx.flags, 'out');
-  const path = outFlag ? resolve(process.cwd(), outFlag) : defaultScreenshotPath();
+  const path = outFlag ? confineToCwd(outFlag) : defaultScreenshotPath();
   writeFileSync(path, buf);
   ctx.record?.attachImage(buf);
   ctx.record?.note({ message: res?.scaled ? `${path} (${res.width}×${res.height})` : path });
@@ -508,13 +534,8 @@ function cmdLog(ctx: Ctx): number {
   const lineCount = logs === '' ? 0 : logs.replace(/\n+$/, '').split('\n').length;
   const outFlag = flagStr(ctx.flags, 'out');
   if (outFlag) {
-    const cwd = resolve(process.cwd());
-    const path = resolve(cwd, outFlag);
-    // Keep --out inside the working directory: never let a traversal/absolute path write
-    // device logs (which can contain secrets) elsewhere on the host.
-    if (path !== cwd && !path.startsWith(cwd + sep)) {
-      throw new CliError(`--out must stay within the current directory; '${outFlag}' resolves outside it.`, 2);
-    }
+    // Keep --out inside the working directory (device logs can contain secrets).
+    const path = confineToCwd(outFlag);
     writeFileSync(path, logs);
     if (flagBool(ctx.flags, 'json')) json({ path, bytes: Buffer.byteLength(logs), lines: lineCount });
     else out(path);
@@ -604,6 +625,7 @@ async function cmdAssert(ctx: Ctx): Promise<number> {
 function cmdLaunch(ctx: Ctx): number {
   const appId = ctx.positionals[0];
   if (!appId) throw new CliError('Usage: verikun launch <package|bundleId> [--clear] [--no-restart]', 2);
+  assertSafeAppId(appId);
   // launch RESTARTS by default: if the app is already running/foregrounded, re-issuing
   // the launch intent just delivers it to the live (possibly mid-flow, stale) instance
   // instead of giving a fresh start — which makes reruns flaky. So we force-stop first.
@@ -629,6 +651,7 @@ function cmdLaunch(ctx: Ctx): number {
 function cmdStop(ctx: Ctx): number {
   const appId = ctx.positionals[0];
   if (!appId) throw new CliError('Usage: verikun stop <package|bundleId>', 2);
+  assertSafeAppId(appId);
   ctx.driver.stop(appId);
   ctx.record?.note({ message: `stopped ${appId}` });
   out(`stopped ${appId}`);
@@ -638,6 +661,7 @@ function cmdStop(ctx: Ctx): number {
 function cmdClear(ctx: Ctx): number {
   const appId = ctx.positionals[0];
   if (!appId) throw new CliError('Usage: verikun clear <package|bundleId>', 2);
+  assertSafeAppId(appId);
   ctx.driver.clearApp(appId);
   ctx.record?.note({ message: `cleared app data for ${appId}` });
   if (flagBool(ctx.flags, 'json')) json({ cleared: appId });
@@ -873,7 +897,7 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
 async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   const file = positionals[0];
   if (!file) {
-    throw new CliError('Usage: verikun ai <file> [--model m] [--max-cost-usd n] [--show-plan] [--recompile]', 2);
+    throw new CliError('Usage: verikun ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--show-plan] [--recompile]', 2);
   }
   let nl: string;
   try {
@@ -889,8 +913,13 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   const model = resolveModel(flagStr(flags, 'model'));
   const overrideRaw = flagStr(flags, 'cost-override');
   const override = overrideRaw ? parseCostOverride(overrideRaw) : undefined;
-  const maxCostUsd = flagNum(flags, 'max-cost-usd');
+  const maxCostUsd = flagNum(flags, 'max-cost-usd') ?? DEFAULT_MAX_COST_USD;
+  if (maxCostUsd <= 0) throw new CliError(`--max-cost-usd must be greater than 0 (got ${maxCostUsd}).`, 2);
   const cost = new CostTracker(priceFor(model, override), maxCostUsd);
+  // Whole-run wall-clock ceiling (default 15m) so a runaway loop/repair can't hang the run.
+  const timeoutFlag = flagStr(flags, 'timeout');
+  const timeoutMs = timeoutFlag ? parseDuration(timeoutFlag, 'timeout') : DEFAULT_RUN_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   const effort = flagStr(flags, 'effort');
 
   const pkg = flagStr(flags, 'package');
@@ -931,8 +960,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     }
   }
 
-  // 2. --show-plan: print the IR and stop (no device run). Always log the plan to
-  //    the run artifacts when we do run (below) — visibility is on by default.
+  // 2. --show-plan: print the compiled IR and stop (no device run).
   if (showPlan) {
     json(plan);
     return 0;
@@ -974,6 +1002,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
       log: (m) => err(m),
       markHealed: (m) => Recorder.markLastStepHealed(m),
       maxRepairs: 3,
+      deadline,
     });
   } catch (e) {
     // An unexpected throw mid-run (e.g. an unrecoverable device error) must still
@@ -1012,7 +1041,9 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     ? 'PASS'
     : result.abortedForBudget
       ? `ABORTED — cost ceiling $${maxCostUsd} reached`
-      : `FAIL at ${result.failure?.where}: ${result.failure?.reason}`;
+      : result.abortedForTimeout
+        ? `ABORTED — run timeout (${Math.round(timeoutMs / 1000)}s) reached`
+        : `FAIL at ${result.failure?.where}: ${result.failure?.reason}`;
   err(`[ai] ${status} · ${costLine}`);
   err(`[ai] report: ${htmlPath}`);
   if (result.improvements.length) {
@@ -1034,6 +1065,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
       runDir: dir,
       ...(result.failure ? { failure: result.failure } : {}),
       ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
+      ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
     });
   } else {
     out(htmlPath); // primary machine result: the report path

@@ -23,6 +23,10 @@ test('parsePlan: rejects an unsupported version', () => {
   assert.throws(() => parsePlan({ version: 2, steps: [] }), InvalidPlanError);
 });
 
+test('parsePlan: rejects an empty plan (zero steps) so it cannot pass green having done nothing', () => {
+  assert.throws(() => parsePlan({ version: 1, steps: [] }), InvalidPlanError);
+});
+
 test('validateNode: rejects malformed control nodes and unknown types', () => {
   assert.throws(() => validateNode({ type: 'if-present', selector: '', body: [] }, 'x'), InvalidPlanError);
   assert.throws(() => validateNode({ type: 'repeat', selector: 'r', body: {} }, 'x'), InvalidPlanError);

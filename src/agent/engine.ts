@@ -44,6 +44,9 @@ export interface EngineDeps {
   markHealed?: (message?: string) => void;
   /** Max model repairs per failing step before giving up. Default 3. */
   maxRepairs?: number;
+  /** Epoch-ms wall-clock deadline for the whole run; once passed, the engine aborts
+   *  between steps, loop iterations, and repairs (bounds a runaway plan). */
+  deadline?: number;
 }
 
 export interface EngineResult {
@@ -55,9 +58,14 @@ export interface EngineResult {
   improvements: string[];
   failure?: { where: string; reason: string };
   abortedForBudget?: boolean;
+  abortedForTimeout?: boolean;
 }
 
-type StepResult = { status: 'ok' } | { status: 'fail'; reason: string; where: string } | { status: 'budget' };
+type StepResult =
+  | { status: 'ok' }
+  | { status: 'fail'; reason: string; where: string }
+  | { status: 'budget' }
+  | { status: 'timeout' };
 
 const describe = (leaf: LeafStep): string =>
   [leaf.command, ...leaf.positionals, ...leaf.flags.map((f) => (f.value === 'true' ? `--${f.name}` : `--${f.name} ${f.value}`))]
@@ -81,8 +89,12 @@ function isHealable(outcome: ExecOutcome): boolean {
   );
 }
 
+/** Default wall-clock ceiling for a whole `vk ai` run (overridable via --timeout). */
+export const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000;
+
 export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResult> {
   const maxRepairs = deps.maxRepairs ?? 3;
+  const overDeadline = (): boolean => deps.deadline !== undefined && Date.now() >= deps.deadline;
   const improvements: string[] = [];
   let modelRepairs = 0;
 
@@ -136,6 +148,10 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
       if (deps.cost.exceeded()) {
         deps.log(`[ai] budget ceiling reached ($${deps.cost.budgetUsd}) — aborting before another repair`);
         return { status: 'budget' };
+      }
+      if (overDeadline()) {
+        deps.log(`[ai] run timeout reached — aborting before another repair`);
+        return { status: 'timeout' };
       }
       attempts++;
       const reason = outcome.error!.message.split('\n')[0];
@@ -219,6 +235,10 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
       case 'repeat': {
         let prevHash = '';
         for (let i = 0; i < node.cap; i++) {
+          if (overDeadline()) {
+            deps.log(`[ai] ${where}: run timeout reached — stopping repeat after ${i} iteration(s)`);
+            return { status: 'timeout' };
+          }
           if (present(node.selector)) {
             deps.log(`[ai] ${where}: repeat reached '${node.selector}' after ${i} iteration(s)`);
             return { status: 'ok' };
@@ -240,9 +260,16 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
   }
 
   for (let i = 0; i < plan.steps.length; i++) {
+    if (overDeadline()) {
+      deps.log(`[ai] run timeout reached before steps[${i}] — aborting`);
+      return { ok: false, plan, modelRepairs, improvements, abortedForTimeout: true };
+    }
     const res = await walkNode(plan.steps[i], `steps[${i}]`, (l) => (plan.steps[i] = l));
     if (res.status === 'budget') {
       return { ok: false, plan, modelRepairs, improvements, abortedForBudget: true };
+    }
+    if (res.status === 'timeout') {
+      return { ok: false, plan, modelRepairs, improvements, abortedForTimeout: true };
     }
     if (res.status === 'fail') {
       deps.log(`[ai] FAILED at ${res.where}: ${res.reason}`);

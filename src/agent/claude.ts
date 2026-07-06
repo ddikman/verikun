@@ -12,6 +12,9 @@ import { GRAMMAR, REPAIR_GRAMMAR } from './grammar';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
+// Per-request wall-clock cap so a stalled connection can't hang the run past its
+// --timeout deadline (the engine checks the deadline only between calls, not during one).
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 
 // effort (output_config.effort) is rejected by Haiku 4.5; only send it for models
 // that accept it.
@@ -23,6 +26,8 @@ export interface ClaudeProviderOpts {
   /** low | medium | high | xhigh | max — sent only for models that accept it. */
   effort?: string;
   maxRetries?: number;
+  /** Per-request wall-clock timeout in ms (default 120s); a stalled call is aborted and retried. */
+  requestTimeoutMs?: number;
 }
 
 interface MessagesResponse {
@@ -117,8 +122,13 @@ export class ClaudeProvider implements AgentProvider {
 
   private async fetchWithRetry(body: unknown): Promise<MessagesResponse> {
     const maxRetries = this.opts.maxRetries ?? 4;
+    const timeoutMs = this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     let attempt = 0;
     for (;;) {
+      // Abort a stalled request after timeoutMs so it can't hang forever; the abort is
+      // caught below and retried like any other network error (bounded by maxRetries).
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       let res: Response;
       try {
         res = await fetch(API_URL, {
@@ -129,11 +139,14 @@ export class ClaudeProvider implements AgentProvider {
             'anthropic-version': ANTHROPIC_VERSION,
           },
           body: JSON.stringify(body),
+          signal: controller.signal,
         });
       } catch (e) {
         if (attempt++ >= maxRetries) throw new CliError(`Anthropic API request failed: ${(e as Error).message}`, 3);
         await sleep(backoffMs(attempt));
         continue;
+      } finally {
+        clearTimeout(timer);
       }
       if (res.ok) return (await res.json()) as MessagesResponse;
       // Retry 429 + 5xx with backoff, honoring Retry-After (no SDK to do it for us).
