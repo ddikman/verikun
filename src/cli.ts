@@ -190,8 +190,11 @@ function cmdDoctor(ctx: Ctx): number {
       const r = runText('xcrun', ['simctl', 'list', 'devices', 'booted']);
       out('xcrun: present');
       out(r.stdout.trim() || '(no booted simulators)');
-    } catch {
-      err('xcrun: NOT FOUND — install Xcode command-line tools (`xcode-select --install`)');
+    } catch (e) {
+      // Not necessarily missing: runText also throws on a spawn timeout or other exec
+      // failure, so surface the real reason rather than always claiming "NOT FOUND".
+      err(`xcrun: ${(e as Error).message}`);
+      err('  (if the Xcode command-line tools are not installed: `xcode-select --install`)');
       return 3;
     }
 
@@ -201,16 +204,17 @@ function cmdDoctor(ctx: Ctx): number {
     try {
       runText(idb, ['--help']); // idb has no --version; --help confirms the binary runs
       out('idb: present');
-    } catch {
-      err('idb: NOT FOUND on PATH — needed for ui/tap/text/swipe/key/logs.');
-      err('  install: `brew install idb-companion` then `pip install fb-idb`');
+    } catch (e) {
+      err(`idb: ${(e as Error).message}`);
+      err('  needed for ui/tap/text/swipe/key/logs — install: `brew install idb-companion` then `pip install fb-idb`');
       idbOk = false;
     }
     try {
       runText('idb_companion', ['--help']);
       out('idb_companion: present');
-    } catch {
-      err('idb_companion: NOT FOUND — `brew install idb-companion`');
+    } catch (e) {
+      err(`idb_companion: ${(e as Error).message}`);
+      err('  install: `brew install idb-companion`');
       idbOk = false;
     }
     out('note: simulator screenshots + launch/stop work via simctl; ui/tap/text/swipe/key/logs use idb.');
