@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-07
+
+### Added
+- **Published to npm** — install the CLI with `npm install -g verikun` (ships the
+  compiled `dist/`, so no build-from-source needed). Added a root MIT `LICENSE`
+  file and npm package metadata (`repository`, `homepage`, `bugs`, `keywords`,
+  `author`, `publishConfig`).
+
+### Changed
+- **Build runs on the `prepare` lifecycle hook** (was `prepublishOnly`), so
+  `npm publish`, `npm pack`, and install-from-git all compile `dist/` first —
+  fixing an `npm pack` that previously produced a `dist`-less tarball.
+- **`scripts/gen-version.mjs` now also stamps `.claude-plugin/plugin.json`'s
+  `version`** from `package.json` (previously a manual sync), guarded by a new
+  `tests/plugin-version.test.ts` drift check.
+
 ## [0.4.0] - 2026-07-06
 
 ### Added

@@ -24,8 +24,9 @@ description: >-
 structured, **semantic** elements, so you can act and then *verify* — like
 Puppeteer for native apps. Prefer it over raw `adb`.
 
-The command is `vk` (after `npm link`) or, if not linked, `node dist/bin/verikun.js`
-from the repo root. All examples below use `vk`.
+The command is `vk` (after `npm install -g verikun`, or `npm link` from a source
+clone) or, if not linked, `node dist/bin/verikun.js` from the repo root. All
+examples below use `vk`.
 
 ## The loop: act → inspect → assert
 

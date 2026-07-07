@@ -21,3 +21,17 @@ if (current !== contents) {
   writeFileSync(target, contents);
   console.error(`[gen-version] src/version.ts -> VERSION=${version}`);
 }
+
+// Keep the Claude Code plugin manifest's "version" in lockstep with package.json.
+// It isn't shipped to npm (so this is orthogonal to the tarball) — it just removes a
+// manual sync step. Targeted replace of only the "version" value leaves the file's
+// formatting untouched; no-op if the manifest is absent or already current.
+const pluginManifest = join(root, '.claude-plugin', 'plugin.json');
+if (existsSync(pluginManifest)) {
+  const raw = readFileSync(pluginManifest, 'utf8');
+  const next = raw.replace(/("version"\s*:\s*)"[^"]*"/, `$1"${version}"`);
+  if (next !== raw) {
+    writeFileSync(pluginManifest, next);
+    console.error(`[gen-version] .claude-plugin/plugin.json -> version=${version}`);
+  }
+}
