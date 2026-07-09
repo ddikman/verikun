@@ -27,12 +27,10 @@ tapped [3] Button "Sign in" @sign_in_btn (540,1020) tap
 Requires Node ≥ 18 and the Android platform-tools (`adb`) on your `PATH`.
 
 ```sh
-npm install      # dev deps (typescript, @types/node) only
-npm run build    # compile src/ -> dist/
-npm link         # optional: put `verikun` and `vk` on your PATH
+npm install -g verikun    # installs the `verikun` and `vk` commands globally
 ```
 
-Without `npm link`, run it as `node dist/bin/verikun.js <command>`.
+Then run `vk doctor` to check your setup. Re-run the same command to upgrade later.
 
 ### Install as a Claude Code plugin
 
@@ -43,7 +41,7 @@ This repo doubles as a Claude Code [plugin marketplace](https://code.claude.com/
 /plugin install verikun@verikun           # install the plugin (ships the skill)
 ```
 
-The plugin ships the **skill**; the `vk` **CLI** is a separate Node package — build and link it from a clone (see [Install](#install) above) so `vk` lands on your `PATH`. The compiled `dist/` is gitignored, so it isn't bundled into the installed plugin.
+The plugin ships the **skill**; the `vk` **CLI** is a separate Node package — install it with `npm install -g verikun` (see [Install](#install) above) so `vk` lands on your `PATH`. The compiled `dist/` is gitignored, so it isn't bundled into the installed plugin.
 
 ## Quick start
 
@@ -400,6 +398,18 @@ vk tap @tap_to_continue_label_id
 
 **Cost:** $0.45 · **Wall time:** ~4 min · **Model:** Claude Sonnet 4.6 with
 prompt-cache hits (1 M cache-read tokens kept cost low on a long conversation).
+
+## Build from source
+
+For local development, or to run an unreleased version, build from a clone:
+
+```sh
+git clone https://github.com/ddikman/verikun && cd verikun
+npm install      # installs dev deps (typescript, @types/node) and builds dist/ via the prepare hook
+npm link         # optional: put `verikun` and `vk` on your PATH
+```
+
+Without `npm link`, run it as `node dist/bin/verikun.js <command>`. See [Development](#development) below for the watch/test loop.
 
 ## Development
 
