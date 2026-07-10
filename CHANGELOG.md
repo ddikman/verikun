@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-07-09
+## [0.5.0] - 2026-07-10
 
 ### Added
 - **iOS simulator + device support at parity with Android**, via Facebook's
