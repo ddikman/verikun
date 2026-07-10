@@ -12,8 +12,9 @@ import { Recorder, isRecordable } from './run';
 import { downscalePng } from './image';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS } from './agent/engine';
 import { ClaudeProvider } from './agent/claude';
+import { OpenAiProvider } from './agent/openai';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
-import { resolveModel, parseCostOverride, priceFor, CostTracker, DEFAULT_MAX_COST_USD } from './agent/cost';
+import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD } from './agent/cost';
 import { Plan } from './agent/ir';
 import { VERSION } from './version';
 
@@ -958,8 +959,16 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
 
   const recompile = flagBool(flags, 'recompile') || flagBool(flags, 'no-cache');
   const showPlan = flagBool(flags, 'show-plan');
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  const provider = apiKey ? new ClaudeProvider({ model, apiKey, effort }) : null;
+  // Route the model to its backend; each provider reads its own key. A missing key means
+  // no provider (compile/repair unavailable) — the same graceful degradation as before.
+  const providerId = providerFor(model);
+  const keyEnv = providerId === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+  const apiKey = process.env[keyEnv];
+  const provider = !apiKey
+    ? null
+    : providerId === 'openai'
+      ? new OpenAiProvider({ model, apiKey, effort })
+      : new ClaudeProvider({ model, apiKey, effort });
 
   // 1. Obtain the plan: a cache hit (free) or a compile (pays tokens; may seed from
   //    a prior build's plan to avoid a full recompile).
@@ -970,7 +979,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     err(`[ai] plan cache hit — ${model} not called to compile`);
   } else {
     if (!provider) {
-      throw new CliError('ANTHROPIC_API_KEY is not set — `vk ai` needs it to compile the test. Set it and retry.', 3);
+      throw new CliError(`${keyEnv} is not set — \`vk ai\` needs it to compile the test (model ${model}). Set it and retry.`, 3);
     }
     const seed = findSeed(key);
     if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
@@ -998,7 +1007,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
 
   // Running needs the provider for repair-on-failure; a cache hit with no key can't repair.
   if (!provider) {
-    throw new CliError('ANTHROPIC_API_KEY is not set — `vk ai` needs it to repair a failing step at runtime.', 3);
+    throw new CliError(`${keyEnv} is not set — \`vk ai\` needs it to repair a failing step at runtime (model ${model}).`, 3);
   }
 
   // The budget is a TOTAL-run ceiling: if the compile alone already crossed it, abort
@@ -1316,11 +1325,13 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       path. The model is woken only to repair a step
                                       that fails to resolve; a green run persists the
                                       (repaired) plan so the next run is free. Needs
-                                      ANTHROPIC_API_KEY. Progress -> stderr; the report
-                                      path -> stdout. --show-plan prints the compiled
-                                      IR without running; --recompile ignores the cache.
+                                      ANTHROPIC_API_KEY (Claude) or OPENAI_API_KEY
+                                      (gpt-5.x). Progress -> stderr; the report path ->
+                                      stdout. --show-plan prints the compiled IR without
+                                      running; --recompile ignores the cache.
                                       Models: claude-haiku-4-5 | claude-sonnet-4-6
-                                      (default) | claude-opus-4-8 | claude-fable-5.
+                                      (default) | claude-opus-4-8 | claude-fable-5 |
+                                      gpt-5.4-mini | gpt-5.4 | gpt-5.5.
 
 ENVIRONMENT
   devices [--json]                    List attached devices/simulators

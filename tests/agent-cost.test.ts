@@ -6,10 +6,23 @@ import {
   CostTracker,
   resolveModel,
   priceFor,
+  providerFor,
   MODEL_PRICES,
+  ALLOWED_MODELS,
   DEFAULT_MODEL,
 } from '../src/agent/cost';
 import { CliError } from '../src/errors';
+
+test('providerFor: routes known models to their backend, unknown falls back to anthropic', () => {
+  assert.equal(providerFor('gpt-5.4'), 'openai');
+  assert.equal(providerFor('gpt-5.4-mini'), 'openai');
+  assert.equal(providerFor('claude-opus-4-8'), 'anthropic');
+  assert.equal(providerFor('nonexistent-model'), 'anthropic');
+});
+
+test('registry: every allowed model has a price', () => {
+  for (const m of ALLOWED_MODELS) assert.ok(MODEL_PRICES[m], `${m} must be priced`);
+});
 
 test('parseCostOverride: parses <input/output>', () => {
   assert.deepEqual(parseCostOverride('3/15'), { input: 3, output: 15 });
