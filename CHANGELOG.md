@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-10
+
+### Added
+- **OpenAI models for `vk ai`.** `--model` now switches provider as well as model:
+  alongside the Claude models it accepts `gpt-5.4-mini`, `gpt-5.4`, and `gpt-5.5`, served
+  by a new `OpenAiProvider` (`src/agent/openai.ts`) that calls OpenAI's Chat Completions
+  API over Node's built-in `fetch` — no SDK, so the zero-runtime-dependency rule still
+  holds. OpenAI models read `OPENAI_API_KEY`; Claude models continue to read
+  `ANTHROPIC_API_KEY`. The compile-once / replay-model-free engine, plan cache, and cost
+  budget are unchanged — the provider is chosen behind the existing `AgentProvider` seam.
+  Because the endpoint is the de-facto OpenAI-compatible shape, the same provider can
+  later target Groq/xAI/Together/etc. by base URL.
+
 ## [0.5.0] - 2026-07-10
 
 ### Added

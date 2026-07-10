@@ -89,7 +89,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 ### AI
 | Command | Description |
 |---|---|
-| `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY`. See [AI](#ai--natural-language-tests). |
+| `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (per model). See [AI](#ai--natural-language-tests). |
 
 ### Environment
 | Command | Description |
@@ -190,7 +190,7 @@ printf 'launch com.example.app\nassert @home_tab\nrun archive smoke\n' | vk batc
 with no model calls on the happy path**. The model is woken only to *repair* a step
 whose selector stops resolving; a green run persists the repaired plan, so the next
 run is free again. That is what keeps a CI suite's steady-state token cost near zero.
-Needs `ANTHROPIC_API_KEY`.
+Needs `ANTHROPIC_API_KEY` (Claude models) or `OPENAI_API_KEY` (OpenAI models).
 
 ```sh
 # onboarding.md (plain English):
@@ -218,8 +218,10 @@ a hard iteration cap and stop early if the screen stops changing.
   $3)** or the wall-clock passes **`--timeout` (default 15m)** — so a runaway loop or
   repair can't spend or hang without limit. `--cost-override <input/output>` overrides
   the bundled per-1M price table if it drifts.
-- **`--model`** picks the model (`claude-haiku-4-5` · `claude-sonnet-4-6` (default) ·
-  `claude-opus-4-8` · `claude-fable-5`); **`--recompile`** ignores the cache.
+- **`--model`** picks the model and its provider — Anthropic (`claude-haiku-4-5` ·
+  `claude-sonnet-4-6` (default) · `claude-opus-4-8` · `claude-fable-5`) or OpenAI
+  (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5`), each read from its own key
+  (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`); **`--recompile`** ignores the cache.
 - An `ai` run records like any other flow, so it produces the same JUnit + HTML report —
   with the cost line and any **suggested test improvements** (workarounds the model
   applied, which you can fold back into the prose to stabilize the test and cut tokens).

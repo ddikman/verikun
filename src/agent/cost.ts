@@ -5,7 +5,9 @@ import { CliError } from '../errors';
 // on compile + repair (never replay), so this tracks the spend of those calls and
 // aborts the run the moment the estimate crosses --max-cost-usd.
 
-/** The Anthropic Messages API `usage` block (the fields we price). */
+/** Normalized token-usage block (the fields we price). Anthropic's Messages API
+ *  `usage` maps onto it directly; the OpenAI provider maps its `usage` into this same
+ *  shape (uncached prompt → input_tokens, cached → cache_read_input_tokens). */
 export interface Usage {
   input_tokens?: number;
   output_tokens?: number;
@@ -20,19 +22,40 @@ export interface Price {
   output: number;
 }
 
-// Per-1M-token prices (Anthropic, cached 2026-05-26). This table WILL drift as
-// pricing changes between releases — `--cost-override <input/output>` is the escape
-// hatch, and is authoritative when supplied. The --model allowlist is exactly the
-// keys of this table, so the two can never disagree.
-export const MODEL_PRICES: Record<string, Price> = {
-  'claude-haiku-4-5': { input: 1, output: 5 },
-  'claude-sonnet-4-6': { input: 3, output: 15 },
-  'claude-opus-4-8': { input: 5, output: 25 },
-  'claude-fable-5': { input: 10, output: 50 },
+/** Which backend serves a --model. The one v1 seam has two implementations —
+ *  ClaudeProvider (claude.ts) and OpenAiProvider (openai.ts); cmdAi routes on this. */
+export type ProviderId = 'anthropic' | 'openai';
+
+interface ModelSpec extends Price {
+  provider: ProviderId;
+}
+
+// Per-1M-token prices + owning provider — the SINGLE source of truth. MODEL_PRICES,
+// ALLOWED_MODELS and providerFor all derive from this, so the --model allowlist, its
+// price and its backend can never disagree. Prices WILL drift between releases
+// (Anthropic cached 2026-05-26; OpenAI 2026-07-02) — `--cost-override <input/output>`
+// is the escape hatch and is authoritative when supplied. Every model here bills cached
+// input at ~0.1x (Anthropic + OpenAI gpt-5.x alike), matching CACHE_READ_MULT below.
+const MODELS: Record<string, ModelSpec> = {
+  'claude-haiku-4-5': { input: 1, output: 5, provider: 'anthropic' },
+  'claude-sonnet-4-6': { input: 3, output: 15, provider: 'anthropic' },
+  'claude-opus-4-8': { input: 5, output: 25, provider: 'anthropic' },
+  'claude-fable-5': { input: 10, output: 50, provider: 'anthropic' },
+  'gpt-5.4-mini': { input: 0.75, output: 4.5, provider: 'openai' },
+  'gpt-5.4': { input: 2.5, output: 15, provider: 'openai' },
+  'gpt-5.5': { input: 5, output: 30, provider: 'openai' },
 };
 
-export const ALLOWED_MODELS: readonly string[] = Object.keys(MODEL_PRICES);
+export const MODEL_PRICES: Record<string, Price> = Object.fromEntries(
+  Object.entries(MODELS).map(([m, s]) => [m, { input: s.input, output: s.output }]),
+);
+export const ALLOWED_MODELS: readonly string[] = Object.keys(MODELS);
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
+
+/** Resolve which provider backend serves a model (unknown → anthropic, the default). */
+export function providerFor(model: string): ProviderId {
+  return MODELS[model]?.provider ?? 'anthropic';
+}
 
 /** Default total-run cost ceiling for `vk ai` when --max-cost-usd is not given, so a
  *  runaway compile/repair loop can't spend unbounded tokens. */
