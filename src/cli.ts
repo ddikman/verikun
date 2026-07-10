@@ -224,8 +224,10 @@ function cmdDoctor(ctx: Ctx): number {
   const adb = process.env.ADB || 'adb';
   try {
     out('adb: ' + runText(adb, ['version']).stdout.split('\n')[0]);
-  } catch {
-    err('adb: NOT FOUND on PATH');
+  } catch (e) {
+    // Not necessarily missing: runText also throws on a spawn timeout or other exec
+    // failure — surface the real reason rather than always claiming "NOT FOUND".
+    err(`adb: ${(e as Error).message}`);
     return 3;
   }
 
