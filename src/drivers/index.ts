@@ -1,10 +1,10 @@
 import { Driver, Platform } from '../types';
 import { AdbDriver } from './adb';
-import { SimctlDriver } from './simctl';
+import { IdbDriver } from './ios';
 
 export { AdbDriver } from './adb';
-export { SimctlDriver } from './simctl';
+export { IdbDriver } from './ios';
 
 export function getDriver(platform: Platform, device?: string): Driver {
-  return platform === 'ios' ? new SimctlDriver(device) : new AdbDriver(device);
+  return platform === 'ios' ? new IdbDriver(device) : new AdbDriver(device);
 }

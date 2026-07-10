@@ -1,7 +1,7 @@
 {
   "name": "verikun",
-  "version": "0.4.1",
-  "description": "Drive Android emulators/devices (and later iOS simulators) for AI agents: tap, type, swipe, screenshot, and inspect the UI hierarchy by semantic identifiers — like Puppeteer for native apps.",
+  "version": "0.5.0",
+  "description": "Drive Android emulators/devices and iOS simulators for AI agents: tap, type, swipe, screenshot, and inspect the UI hierarchy by semantic identifiers — like Puppeteer for native apps.",
   "keywords": [
     "android",
     "adb",

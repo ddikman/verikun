@@ -3,7 +3,7 @@ import { resolve, basename, sep } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, SelectorNotFoundError } from './errors';
 import { runText } from './exec';
-import { getDriver, AdbDriver, SimctlDriver } from './drivers';
+import { getDriver, AdbDriver, IdbDriver } from './drivers';
 import { Driver, DeviceInfo, Element, Platform, Point } from './types';
 import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
@@ -161,9 +161,9 @@ function cmdDevices(ctx: Ctx): number {
   }
   try {
     // Only include booted simulators; always include physical devices (they carry a note)
-    allDevices.push(...new SimctlDriver().listDevices().filter((d) => d.state === 'booted' || d.note));
+    allDevices.push(...new IdbDriver().listDevices().filter((d) => d.state === 'booted' || d.note));
   } catch (e) {
-    err(`devices: simctl backend unavailable (${(e as Error).message})`);
+    err(`devices: iOS backend unavailable (${(e as Error).message})`);
   }
 
   if (flagBool(ctx.flags, 'json')) {
@@ -186,18 +186,48 @@ function cmdDevices(ctx: Ctx): number {
 
 function cmdDoctor(ctx: Ctx): number {
   if (ctx.platform === 'ios') {
-    const r = runText('xcrun', ['simctl', 'list', 'devices', 'booted']);
-    out('xcrun: present');
-    out(r.stdout.trim() || '(no booted simulators)');
-    out('note: iOS screenshots + launch/stop work via simctl; tap/text/swipe/hierarchy need idb.');
-    return 0;
+    try {
+      const r = runText('xcrun', ['simctl', 'list', 'devices', 'booted']);
+      out('xcrun: present');
+      out(r.stdout.trim() || '(no booted simulators)');
+    } catch (e) {
+      // Not necessarily missing: runText also throws on a spawn timeout or other exec
+      // failure, so surface the real reason rather than always claiming "NOT FOUND".
+      err(`xcrun: ${(e as Error).message}`);
+      err('  (if the Xcode command-line tools are not installed: `xcode-select --install`)');
+      return 3;
+    }
+
+    // idb (+ its companion) powers everything interactive: ui/tap/text/swipe/key/logs.
+    const idb = process.env.IDB || 'idb';
+    let idbOk = true;
+    try {
+      runText(idb, ['--help']); // idb has no --version; --help confirms the binary runs
+      out('idb: present');
+    } catch (e) {
+      err(`idb: ${(e as Error).message}`);
+      err('  needed for ui/tap/text/swipe/key/logs — install: `brew install idb-companion` then `pip install fb-idb`');
+      idbOk = false;
+    }
+    try {
+      runText('idb_companion', ['--help']);
+      out('idb_companion: present');
+    } catch (e) {
+      err(`idb_companion: ${(e as Error).message}`);
+      err('  install: `brew install idb-companion`');
+      idbOk = false;
+    }
+    out('note: simulator screenshots + launch/stop work via simctl; ui/tap/text/swipe/key/logs use idb.');
+    return idbOk ? 0 : 3;
   }
 
   const adb = process.env.ADB || 'adb';
   try {
     out('adb: ' + runText(adb, ['version']).stdout.split('\n')[0]);
-  } catch {
-    err('adb: NOT FOUND on PATH');
+  } catch (e) {
+    // Not necessarily missing: runText also throws on a spawn timeout or other exec
+    // failure — surface the real reason rather than always claiming "NOT FOUND".
+    err(`adb: ${(e as Error).message}`);
     return 3;
   }
 
@@ -1331,5 +1361,7 @@ GLOBAL FLAGS
 EXIT CODES
   0 success · 1 not found / assertion failed / timeout · 2 usage or ambiguous selector · 3 environment error
 
-iOS: screenshots + launch/stop work today via simctl; tap/text/swipe/hierarchy need idb (planned).`;
+iOS (--ios): full parity via idb — ui/tap/text/swipe/key + screenshot/launch/stop.
+  Needs idb (\`brew install idb-companion\` + \`pip install fb-idb\`); see \`vk doctor --ios\`.
+  Caveats: no \`clear\` (no per-app reset), \`current\` is (unknown), device logs are simulator-only.`;
 }

@@ -1,13 +1,14 @@
 # verikun
 
-Drive a connected Android device/emulator (and, later, iOS simulators) the way
+Drive a connected Android device/emulator or iOS simulator the way
 Puppeteer drives a browser — **tap, type, swipe, screenshot**, and most
 importantly **inspect the UI hierarchy by semantic identifiers** so an AI agent
 can act and then *verify* what happened.
 
-It is a thin, deterministic, zero-runtime-dependency wrapper over `adb` (and
-`xcrun simctl` for iOS) that turns the raw `uiautomator` dump into a compact,
-token-efficient list of meaningful elements addressable by `resource-id`,
+It is a thin, deterministic, zero-runtime-dependency wrapper over `adb` (Android)
+and `idb` + `xcrun simctl` (iOS) that turns the raw `uiautomator` dump (Android)
+or `idb ui describe-all` accessibility tree (iOS) into a compact, token-efficient
+list of meaningful elements addressable by `resource-id` / accessibility id,
 visible text, accessibility label, or class.
 
 ```
@@ -78,7 +79,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `swipe --from x,y --to x,y [--duration ms]` | Explicit swipe between two points. |
 | `screenshot [--out path] [--more] [--max px] [--full] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. [Downscaled](#screenshots) to a 700px longest edge by default to save tokens; `--more` bumps detail, `--max px` sets an exact cap, `--full` keeps the original. |
 | `launch <app> [--clear] [--no-restart]` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). `launch` **restarts by default** — it force-stops the app first (a no-op if it isn't running) so a rerun starts fresh instead of resurfacing a still-running instance's current screen; `--no-restart` skips that. `--clear` also wipes the app's local data (login/session, prefs, cache) for a fresh-install start. |
-| `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to a just-installed state (Android `pm clear`, which also force-stops the app). iOS not supported yet. |
+| `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to a just-installed state (Android `pm clear`, which also force-stops the app). iOS unsupported: there is no per-app data reset. |
 
 ### Batch
 | Command | Description |
@@ -319,9 +320,10 @@ Failure-evidence captures in test-run reports stay full-resolution for debugging
 ## How it works
 
 ```
-cli.ts ──> drivers/ ──> adb / xcrun        (platform I/O)
+cli.ts ──> drivers/ ──> adb (Android) / idb + simctl (iOS)   (platform I/O)
    │           └─ produces normalized Element[]
    ├─ ui/android-parse.ts   uiautomator XML -> Element[]
+   ├─ ui/ios-parse.ts       idb describe-all JSON -> Element[]
    ├─ ui/selector.ts        @id / text: / desc: / class: matching
    └─ ui/format.ts          compact / tree / json rendering
 ```
@@ -332,30 +334,39 @@ selector, formatting, and command layers operate only on the normalized
 
 - **Android** (`drivers/adb.ts`): `uiautomator dump` for the hierarchy,
   `screencap -p` for screenshots, `input tap/text/swipe/keyevent`, `wm size`.
-- **iOS** (`drivers/simctl.ts`): `screenshot`, `launch`, `stop` work today via
-  `xcrun simctl`. Full interaction and hierarchy inspection are planned via
-  WebDriverAgent — see [iOS roadmap](#ios-roadmap) below.
+- **iOS** (`drivers/ios.ts`): `idb ui describe-all` for the hierarchy,
+  `idb ui tap/text/swipe/key/button` for interaction, `idb describe` for screen
+  size; simulator `screenshot`/`launch`/`stop`/`log` stay on `xcrun simctl` (no
+  idb needed for those). See [iOS setup](#ios-setup) below.
 
 Run artifacts (screenshots, dumps) are written under `./.verikun/` (gitignored).
 
-## iOS roadmap
+## iOS setup
 
-Today `vk --ios` supports **screenshots, launch, and stop** via `xcrun simctl`.
-Tapping, swiping, typing, and `vk ui` hierarchy inspection are not yet wired up.
+`vk --ios` reaches feature parity with Android — `ui`/`find`, `tap`, `text`/`type`,
+`swipe`, `key`, `assert`, `wait`, `screenshot`, `launch`/`stop`, plus `vk batch`,
+`vk ai`, and the JUnit/HTML reports — on both simulators and physical devices.
 
-The planned backend is **[WebDriverAgent](https://github.com/appium/WebDriverAgent)**
-(WDA) — an open-source XCTest HTTP server maintained by the Appium team. It
-requires no Python and works on both simulators and physical devices. Once WDA
-is running, `vk` will drive it over HTTP and the command layer stays unchanged.
+Everything interactive is powered by **[`idb`](https://github.com/facebook/idb)**
+(Facebook's iOS Development Bridge), a CLI shelled one-shot exactly like `adb`, so
+verikun stays zero-runtime-dependency and one-process-per-command. Install it once:
 
-**One-time setup (when this lands):**
-1. Clone WebDriverAgent and open it in Xcode
-2. Set your Apple developer signing team
-3. Build & run on the target device or simulator
-4. `vk --ios tap`, `vk --ios ui`, etc. will work automatically
+```sh
+brew tap facebook/fb && brew install idb-companion   # the companion daemon
+pip install fb-idb                                    # the idb CLI (needs Python 3.6+)
+```
 
-Until then, running any unsupported iOS command prints an explanation and exits
-with code 3.
+Then boot a simulator (Simulator.app, or `xcrun simctl boot <name>`) and check
+your setup with `vk doctor --ios`. `vk --ios tap`, `vk --ios ui`, etc. then work.
+
+**Caveats (documented limitations, not bugs):**
+- `clear` is unsupported — iOS has no per-app data reset (uninstall + reinstall is
+  the manual equivalent, but it removes the app too). Exits 3 with an explanation.
+- `current` returns `(unknown)` — iOS exposes no reliable foreground-app query.
+- `swipe` duration is not honored (idb has no millisecond duration knob).
+- `log` capture is simulator-only (via `log show`); for a physical device use
+  Console.app or `idb log` directly.
+- `--tree` renders flat — idb's accessibility list has no nesting depth.
 
 ## Using it from an AI agent
 

@@ -14,8 +14,8 @@ description: >-
   test run you can archive to a JUnit + HTML report (`vk run archive`) — use when
   asked to "test", "verify the flow", or "produce a report". Run a whole known
   flow in one call with `vk batch` (commands piped on stdin or via --file). iOS (--ios):
-  screenshots + launch/stop work today via simctl; tap/type/swipe/hierarchy need
-  idb (planned).
+  full parity via idb (tap/type/swipe/`ui` + screenshot/launch/stop), on simulators
+  and devices; install idb and see `vk doctor --ios`.
 ---
 
 # verikun — drive & verify mobile apps
@@ -88,7 +88,7 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
   `vk clear` (and `vk launch --clear`) additionally wipe the app's local data —
   login/session, prefs, cache — so a flow starts from a clean, logged-out,
   fresh-install state. Android only (`pm clear`, which also force-stops the app); iOS
-  not yet supported.
+  has no per-app data reset, so `clear` exits 3 there.
 
 ## Selectors
 
@@ -284,8 +284,14 @@ identifier memory described above. Set `VERIKUN_NO_RUN=1` to disable recording.
   not just `bob`. **Quote the value** when you build the command in a shell (or feed
   it via `vk batch`/stdin, which uses no host shell) so your *own* shell can't split
   or drop the `@`/`#`/`&` before `vk` sees it.
-- **iOS** (`--ios`): `screenshot`, `launch`, `stop` work via simctl; everything
-  interactive (tap/type/swipe/`ui`) needs `idb` and is not wired yet.
+- **iOS** (`--ios`): full parity with Android — `ui`/`find`, `tap`, `text`/`type`,
+  `swipe`, `key`, `assert`, `screenshot`, `launch`/`stop` — on simulators and
+  physical devices. Interaction + hierarchy come from `idb` (`brew install
+  idb-companion` + `pip install fb-idb`); simulator screenshots/launch/stop/logs
+  use `xcrun simctl`. Run `vk doctor --ios` to check the toolchain. Caveats: `clear`
+  is unsupported (no per-app reset), `current` is `(unknown)`, and device logs are
+  simulator-only. iOS accessibility ids are often unset, so prefer `text:`/`desc:`
+  selectors there.
 
 ## Worked example — verify a login flow
 
