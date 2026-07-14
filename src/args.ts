@@ -51,6 +51,8 @@ const BOOLEAN = new Set([
   'recompile',
   'no-cache',
   'no-restart',
+  'allow-install',
+  'allow-unsafe-anonymous',
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {

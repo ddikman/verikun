@@ -248,6 +248,19 @@ export class AdbDriver implements Driver {
     }
   }
 
+  install(appPath: string): void {
+    // `-r` reinstalls over an existing package keeping its data (the common
+    // update-the-build-under-test case). A large APK can legitimately take
+    // minutes to stream + install, so the timeout is far above the 30s default.
+    // adb reports failures both as a non-zero exit AND as a `Failure [REASON]`
+    // line on stdout with exit 0 (varies by adb version) — check both.
+    const r = runText(ADB, this.withSerial(['install', '-r', appPath]), { timeout: 10 * 60 * 1000 });
+    const combined = `${r.stdout}\n${r.stderr}`;
+    if (r.code !== 0 || /^Failure\b/im.test(combined) || !/^Success\b/im.test(combined)) {
+      throw new CliError(`Failed to install '${appPath}': ${combined.replace(/\s+/g, ' ').trim() || `exit code ${r.code}`}`, 3);
+    }
+  }
+
   stop(appId: string): void {
     this.shell(['am', 'force-stop', appId]);
   }

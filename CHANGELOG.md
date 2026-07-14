@@ -6,6 +6,49 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-14
+
+### Added
+- **`vk suite <dir>`** — run a directory of natural-language tests (`*.md`,
+  lexicographic order, `README.md` skipped) as one sequential suite: app data is
+  reset between tests when `--app <id>` is given (iOS degrades to a force-stop),
+  each test runs through the `vk ai` engine against one shared backend, and the
+  suite writes an overview to `./.verikun/suites/<id>/` — `index.json` (a stable,
+  `schemaVersion`ed manifest with per-test pass/fail, steps, repairs, cost, and
+  duration) plus `index.html` linking every test's archived report. Exits 1 when
+  any test failed, so the command doubles as the CI gate. Reporting providers
+  compose over the manifest as CI steps (upload-artifact, rclone, `aws s3`) —
+  no in-core upload plugins.
+- **`vk server`** — expose the locally-connected device/simulator to remote
+  verikun clients over HTTP+JSON (Node built-ins only). Only verikun's validated
+  action grammar is executable (every `/v1/exec` request passes the same
+  `validateNode` gate that guards `vk ai` model repairs — never `ui`/`log`, never
+  a shell), the device/platform are fixed at startup (client flags can't repoint
+  them), and auth is mandatory: a bearer key via `--auth-key` /
+  `VERIKUN_SERVER_AUTH_KEY` (auto-generated and printed if omitted), compared with
+  `crypto.timingSafeEqual`; `--allow-unsafe-anonymous` opts out loudly for
+  networks that are themselves the boundary (e.g. Tailscale). Binds `127.0.0.1`
+  by default (`--bind`/`--port` to expose); one run-token holds the device lock
+  at a time (409 otherwise, idle locks are taken over); `--allow-install` enables
+  the build-upload endpoint.
+- **`--server <url>` remote mode for `vk ai` / `vk suite` / `vk install`** (or
+  `VERIKUN_SERVER`, with `--auth-key` / `VERIKUN_SERVER_AUTH_KEY`): the whole
+  engine — compile, plan cache, repair, run recording, reports, cost budget —
+  runs on the caller (e.g. a disposable CI runner with the Anthropic key), while
+  only validated leaf commands cross the network, one round-trip per command
+  (auto-wait polling stays server-side). Each step's detail (selector, heal tier,
+  resolved element, failure screenshot + hierarchy) is spliced back into the
+  local run, so a remote run's report is identical to a local one's.
+- **`vk install <app.apk|.ipa>`** — install a build on the device (`adb install
+  -r` / `idb install`). With `--server`, the file is streamed to the server
+  (which must run `--allow-install`) with sha256 integrity verification; the
+  remote path accepts single-file `.apk`/`.ipa` only.
+- **`.github/workflows/suite.yml`** — a reference GitHub Actions recipe: a
+  throwaway `ubuntu-latest` runner builds verikun, installs the app build on the
+  remote device via `vk install --server`, runs `vk suite --server` against it,
+  uploads `.verikun/suites` + `.verikun/runs` as artifacts (with commented rclone
+  / S3 provider examples over the manifest), and fails the job on any failed test.
+
 ## [0.6.0] - 2026-07-10
 
 ### Added

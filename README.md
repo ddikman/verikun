@@ -80,6 +80,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `screenshot [--out path] [--more] [--max px] [--full] [--json]` | Save a PNG (default `./.verikun/screen.png`); prints the path. [Downscaled](#screenshots) to a 700px longest edge by default to save tokens; `--more` bumps detail, `--max px` sets an exact cap, `--full` keeps the original. |
 | `launch <app> [--clear] [--no-restart]` / `stop <app>` | App lifecycle by package id (Android) / bundle id (iOS). `launch` **restarts by default** — it force-stops the app first (a no-op if it isn't running) so a rerun starts fresh instead of resurfacing a still-running instance's current screen; `--no-restart` skips that. `--clear` also wipes the app's local data (login/session, prefs, cache) for a fresh-install start. |
 | `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to a just-installed state (Android `pm clear`, which also force-stops the app). iOS unsupported: there is no per-app data reset. |
+| `install <app.apk\|.ipa> [--server url]` | Install a build on the device (`adb install -r` / `idb install`). With `--server`, the file is uploaded to a remote [`vk server`](#remote-devices--vk-server) started with `--allow-install` (single-file `.apk`/`.ipa`, sha256-verified). |
 
 ### Batch
 | Command | Description |
@@ -89,7 +90,13 @@ vk screenshot                   # -> ./.verikun/screen.png
 ### AI
 | Command | Description |
 |---|---|
-| `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (per model). See [AI](#ai--natural-language-tests). |
+| `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--server url] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (per model). See [AI](#ai--natural-language-tests). |
+| `suite <dir> [--app <id>] [--name n] [--server url] [--json]` (+ all `ai` flags) | Run every `*.md` in `<dir>` as one sequential suite with an overview report and a non-zero exit on failure — the CI gate. See [Suites](#suites--run-a-directory-of-tests). |
+
+### Remote
+| Command | Description |
+|---|---|
+| `server [--bind addr] [--port n] [--auth-key k] [--allow-install] [--allow-unsafe-anonymous]` | Expose this machine's connected device to remote verikun clients (`ai`/`suite`/`install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. See [Remote devices](#remote-devices--vk-server). |
 
 ### Environment
 | Command | Description |
@@ -226,6 +233,102 @@ a hard iteration cap and stop early if the screen stops changing.
   with the cost line and any **suggested test improvements** (workarounds the model
   applied, which you can fold back into the prose to stabilize the test and cut tokens).
 
+## Suites — run a directory of tests
+
+`vk suite <dir>` runs every `*.md` in a directory through the [`vk ai`](#ai--natural-language-tests)
+engine, sequentially, against one shared device (local or [remote](#remote-devices--vk-server)):
+
+```sh
+vk suite tests/ --app com.example.app          # local device
+vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote device
+```
+
+- **Ordering is lexicographic** — prefix files `01-…`, `02-…` to sequence them.
+  `README.md` is skipped (it documents the suite, it isn't a test).
+- **Isolation between tests:** with `--app <id>`, the app's data is cleared before
+  each test (`pm clear`; iOS degrades to a force-stop since it has no per-app
+  reset). Without `--app`, make each test self-isolating (start with
+  `launch <pkg> --clear` in the prose).
+- **Each test is a full `vk ai` run** — plan cache, self-healing, cost budget, and
+  its own archived JUnit + HTML report under `./.verikun/runs/<id>/`. A test that
+  fails (or errors) doesn't stop the suite; the rest still run.
+- **The suite writes an overview** to `./.verikun/suites/<id>/`:
+  - **`index.json`** — a stable, `schemaVersion`ed manifest: per-test pass/fail,
+    steps, model repairs, cost, duration, and the run id, plus suite totals. This
+    is the **output contract for reporting** — upload/publish steps compose over
+    it (see the [CI recipe](#ci-recipe)) instead of verikun growing upload plugins.
+  - **`index.html`** — a summary page linking every test's `report.html`.
+- **Exit code is the CI gate:** `1` if any test failed, `0` all green, `2` bad/empty
+  directory. All `ai` flags (`--model`, `--max-cost-usd`, `--timeout`, …) apply to
+  every test; the model's key (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is checked
+  up front.
+
+## Remote devices — `vk server`
+
+CI runners don't have your phone plugged into them. `vk server` exposes a
+locally-connected device to remote verikun clients so a **disposable CI runner**
+can drive it — without a self-hosted runner executing arbitrary PR code on the
+machine that owns the device:
+
+```sh
+# On the machine with the device attached:
+export VERIKUN_SERVER_AUTH_KEY=$(openssl rand -base64 32)   # or let vk generate one
+vk server --allow-install                    # 127.0.0.1:8391 by default
+vk server --bind 100.64.0.7 --allow-install  # expose on a tailnet IP
+
+# From anywhere that can reach it:
+export VERIKUN_SERVER=http://100.64.0.7:8391
+export VERIKUN_SERVER_AUTH_KEY=<the same key>
+vk install ./app-debug.apk --server "$VERIKUN_SERVER"
+vk ai onboarding.md --server "$VERIKUN_SERVER"
+vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
+```
+
+**Split execution.** The client runs the whole `vk ai` engine — compile, plan
+cache, repairs, the Anthropic key, run recording, suite aggregation — and only
+**validated device commands** cross the network, one HTTP round-trip per command
+(selector auto-wait polls on the server, next to the device). Each step's detail
+(selector, heal tier, resolved element, failure screenshot + hierarchy) returns
+with the response and is spliced into the client's run, so the archived report is
+identical to a local run's.
+
+**Security model** (the server is the boundary, not the transport):
+
+- **Auth is mandatory.** Pass a key via `--auth-key` / `VERIKUN_SERVER_AUTH_KEY`
+  (the env var keeps it out of `ps`), or one is generated and printed at startup.
+  Clients send it as a bearer token; comparison is constant-time.
+  `--allow-unsafe-anonymous` disables auth loudly — only for networks that are
+  themselves the boundary (e.g. a private tailnet), and it cannot be combined
+  with a key.
+- **Only the validated grammar runs.** Every `/v1/exec` request passes the same
+  `validateNode` gate that guards `vk ai` model repairs: action verbs only
+  (`tap`/`text`/`assert`/`launch`/…), never `ui`/`log`, never a shell. The
+  device and platform are fixed when the server starts — client flags cannot
+  repoint them.
+- **Installs are opt-in.** `POST /v1/install` requires `--allow-install` (a
+  read-only server refuses builds), accepts only single-file `.apk`/`.ipa`
+  uploads to a server-generated temp path (never a client path), and verifies a
+  sha256 of the body.
+- **One run at a time.** A run-token holds the device lock; a second concurrent
+  caller gets `409`. The lock is released when the command finishes (so
+  `vk install` then `vk suite` chain seamlessly), and an idle lock (5 min
+  silent) is taken over, so a crashed CI job can't wedge the device.
+- **Bind is loopback by default.** `--bind <addr>` opts into exposure. For a
+  NAT'd box, [Tailscale](https://tailscale.com) is the recommended transport; for
+  a public host, terminate TLS in front (the server itself speaks plain HTTP).
+- Failure evidence (screenshots, UI hierarchies) crosses the authenticated
+  channel like the rest — same caveat as `vk log`: device output is not redacted.
+
+### CI recipe
+
+[`.github/workflows/suite.yml`](.github/workflows/suite.yml) is a working
+reference: a plain `ubuntu-latest` job builds verikun, installs the app build on
+the remote device (`vk install --server`), runs `vk suite --server`, uploads
+`.verikun/suites` + `.verikun/runs` as artifacts, and **fails the job when any
+test fails** (the suite's exit code). Publishing anywhere else is a composable
+step over the `index.json` manifest — the workflow includes commented `rclone`
+(Google Drive) and `aws s3 cp` examples.
+
 ## Selectors
 
 ```
@@ -283,6 +386,8 @@ condition as a step in its own right.
 | `-d, --device <serial>` | Target a specific device (or `VERIKUN_DEVICE` / `ANDROID_SERIAL`). |
 | `-p, --platform <android\|ios>` | Platform (default `android`). `--ios` / `--android` are shortcuts. |
 | `-j, --json` | Machine-readable output (also serializes errors). |
+| `--server <url>` | For `ai`/`suite`/`install`: run against a remote [`vk server`](#remote-devices--vk-server) (or `VERIKUN_SERVER`). The server's device/platform apply. |
+| `--auth-key <k>` | Key for `--server` (or `VERIKUN_SERVER_AUTH_KEY`, which keeps it out of `ps`). |
 | `--` | End flag parsing, so text/arguments may start with `-`. |
 
 ## Exit codes

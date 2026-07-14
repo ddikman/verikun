@@ -32,8 +32,10 @@ export type ExecFn = (
 export interface EngineDeps {
   /** Run one leaf command, returning its raw outcome (verikun's executeOutcome). */
   exec: ExecFn;
-  /** Live UI hierarchy from the shared driver — used for control-flow guards and repair context. */
-  getElements: () => Element[];
+  /** Live UI hierarchy — used for control-flow guards and repair context. May be
+   *  async: the remote backend (vk ai --server) fetches it over HTTP. The local
+   *  path stays a sync fn (awaiting a sync value is a no-op). */
+  getElements: () => Element[] | Promise<Element[]>;
   provider: AgentProvider;
   cost: CostTracker;
   /** Continuous progress to stderr (CI liveness — never goes quiet). */
@@ -101,15 +103,15 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
   // A UI dump can fail transiently on a real device (uiautomator throws). Treat
   // that as "empty screen" rather than letting it abort the whole run — the rest
   // of the codebase treats dumps as recoverable (resolveOneWaiting re-polls).
-  const safeElements = (): Element[] => {
+  const safeElements = async (): Promise<Element[]> => {
     try {
-      return deps.getElements();
+      return await deps.getElements();
     } catch {
       return [];
     }
   };
 
-  const present = (selector: string): boolean => {
+  const present = async (selector: string): Promise<boolean> => {
     // Re-fetch on a dump FAILURE (uiautomator can throw transiently) so a flaky dump at
     // a guard check doesn't silently read as "absent" and skip a body that should run.
     // Once a dump SUCCEEDS (even if empty) we trust it — no slow re-poll, so a genuinely
@@ -117,7 +119,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     let els: Element[] | undefined;
     for (let i = 0; i < 2 && els === undefined; i++) {
       try {
-        els = deps.getElements();
+        els = await deps.getElements();
       } catch {
         /* transient dump failure — retry once before concluding "absent" */
       }
@@ -164,7 +166,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
           failedStep: current,
           reason,
           candidates,
-          hierarchy: safeElements(),
+          hierarchy: await safeElements(),
         });
         deps.cost.add(usage, 'repair');
         // The model may DECLINE (null) when the current screen has no element serving
@@ -224,7 +226,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
         return execLeaf(node, where, replace);
 
       case 'if-present': {
-        if (present(node.selector)) {
+        if (await present(node.selector)) {
           deps.log(`[ai] ${where}: if-present '${node.selector}' → present, running ${node.body.length} step(s)`);
           return walkBody(node.body, where);
         }
@@ -239,11 +241,11 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
             deps.log(`[ai] ${where}: run timeout reached — stopping repeat after ${i} iteration(s)`);
             return { status: 'timeout' };
           }
-          if (present(node.selector)) {
+          if (await present(node.selector)) {
             deps.log(`[ai] ${where}: repeat reached '${node.selector}' after ${i} iteration(s)`);
             return { status: 'ok' };
           }
-          const hash = structuralHash(safeElements());
+          const hash = structuralHash(await safeElements());
           if (i > 0 && hash === prevHash) {
             deps.log(`[ai] ${where}: repeat made no progress (screen unchanged) — stopping after ${i} iteration(s)`);
             return { status: 'ok' };
