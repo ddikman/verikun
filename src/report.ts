@@ -1,7 +1,8 @@
-// Pure report rendering: a finished RunState in -> a JUnit XML / HTML string out.
+// Pure report rendering: a finished RunState in -> a JUnit XML / HTML string out,
+// and a finished SuiteRun in -> the suite index.json / index.html out.
 // No fs, no device, no side effects — so it is trivially testable and the run
-// recorder (run.ts) owns all the I/O. The data model lives in run.ts; we import
-// the types only.
+// recorder (run.ts) / suite runner (suite.ts) own all the I/O. The RunState data
+// model lives in run.ts; we import the types only.
 
 import type { RunState, RunStep } from './run';
 
@@ -192,6 +193,148 @@ function stepHtml(s: RunStep): string {
   if (s.logs) parts.push(`<details><summary>Device logs</summary><pre>${htmlEsc(s.logs)}</pre></details>`);
 
   return `<li class="step ${s.status}">${parts.join('\n    ')}</li>`;
+}
+
+// --- suite (vk suite) -------------------------------------------------------
+//
+// The suite manifest (index.json) is the STABLE OUTPUT CONTRACT for reporting
+// providers: CI steps (upload-artifact, rclone, aws s3) compose over these files
+// rather than verikun growing in-core upload plugins. Bump schemaVersion on any
+// breaking change to the shape.
+
+export interface SuiteTestResult {
+  /** Archived run id — the directory name under .verikun/runs/. */
+  id: string;
+  /** Test source file as the suite enumerated it (relative path). */
+  file: string;
+  /** Display name (file basename without extension). */
+  name: string;
+  ok: boolean;
+  durationMs: number;
+  /** Model spend for this test (compile + repairs); 0 on a full cache-hit replay. */
+  costUsd: number;
+  steps: number;
+  passedSteps: number;
+  failedSteps: number;
+  modelRepairs: number;
+  /** Terminal failure summary when not ok (assert failure, drift, budget/timeout abort). */
+  failure?: string;
+}
+
+export interface SuiteRun {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  startedAt: string;
+  finishedAt: string;
+  platform: string;
+  device?: string;
+  /** verikun version that produced this suite. */
+  verikun: string;
+  totals: SuiteTotals;
+  tests: SuiteTestResult[];
+}
+
+export interface SuiteTotals {
+  tests: number;
+  passed: number;
+  failed: number;
+  steps: number;
+  costUsd: number;
+  durationMs: number;
+}
+
+/** Tally a suite's tests into its totals (pure; used by suite.ts and tests). */
+export function suiteTotals(tests: SuiteTestResult[]): SuiteTotals {
+  const round = (n: number) => Number(n.toFixed(4));
+  return {
+    tests: tests.length,
+    passed: tests.filter((t) => t.ok).length,
+    failed: tests.filter((t) => !t.ok).length,
+    steps: tests.reduce((a, t) => a + t.steps, 0),
+    costUsd: round(tests.reduce((a, t) => a + t.costUsd, 0)),
+    durationMs: tests.reduce((a, t) => a + t.durationMs, 0),
+  };
+}
+
+export function toSuiteIndexJson(suite: SuiteRun): string {
+  return JSON.stringify(suite, null, 2) + '\n';
+}
+
+const SUITE_STYLE = `
+  table.tests { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  table.tests th, table.tests td { text-align:left; padding:10px 12px; border-top:1px solid var(--line); font-size:13px; }
+  table.tests th { background:#eaeef2; color:var(--muted); border-top:none; font-size:12px; letter-spacing:.03em; text-transform:uppercase; }
+  table.tests td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  table.tests a { color:inherit; }
+  .fail-reason { color:var(--fail); font-size:12px; margin-top:2px; }
+`;
+
+function suiteTestRow(t: SuiteTestResult, linkBase: string): string {
+  // A test that errored before its run started (id '') has no report to link.
+  const label = t.id
+    ? `<a href="${htmlEsc(`${linkBase}runs/${encodeURIComponent(t.id)}/report.html`)}">${htmlEsc(t.name)}</a>`
+    : htmlEsc(t.name);
+  const failure = t.failure ? `<div class="fail-reason">${htmlEsc(t.failure)}</div>` : '';
+  return `  <tr>
+    <td><span class="st ${t.ok ? 'passed' : 'failed'}">${t.ok ? 'PASS' : 'FAIL'}</span></td>
+    <td>${label}${failure}</td>
+    <td class="num">${t.passedSteps}/${t.steps}${t.failedSteps ? ` (${t.failedSteps} failed)` : ''}</td>
+    <td class="num">${t.modelRepairs || ''}</td>
+    <td class="num">$${t.costUsd.toFixed(4)}</td>
+    <td class="num">${fmtDuration(t.durationMs)}</td>
+  </tr>`;
+}
+
+/**
+ * The suite overview page. `linkBase` is the relative path from index.html to the
+ * directory holding `runs/<id>/report.html` — '../../' when the suite lives at
+ * .verikun/suites/<id>/ and runs at .verikun/runs/<id>/ (the default layout).
+ */
+export function toSuiteHtml(suite: SuiteRun, opts: { linkBase?: string } = {}): string {
+  const linkBase = opts.linkBase ?? '../../';
+  const t = suite.totals;
+  const chips = [
+    `<span class="chip pass">${t.passed} passed</span>`,
+    t.failed ? `<span class="chip fail">${t.failed} failed</span>` : '',
+    `<span class="chip muted">${t.tests} tests &middot; ${t.steps} steps &middot; ${fmtDuration(t.durationMs)} &middot; $${t.costUsd.toFixed(4)}</span>`,
+  ]
+    .filter(Boolean)
+    .join('\n      ');
+
+  const metaBits = [
+    `<code>${htmlEsc(suite.id)}</code>`,
+    htmlEsc(suite.platform) + (suite.device ? ` · ${htmlEsc(suite.device)}` : ''),
+    `started ${htmlEsc(suite.startedAt)}`,
+    `finished ${htmlEsc(suite.finishedAt)}`,
+    `verikun ${htmlEsc(suite.verikun)}`,
+  ].filter(Boolean);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>verikun suite — ${htmlEsc(suite.name)}</title>
+<style>${STYLE}${SUITE_STYLE}</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>verikun test suite — ${htmlEsc(suite.name)}</h1>
+  <div class="meta">${metaBits.join(' &middot; ')}</div>
+  <div class="summary">
+      ${chips}
+  </div>
+  <table class="tests">
+    <thead><tr><th></th><th>Test</th><th>Steps</th><th>Repairs</th><th>Cost</th><th>Duration</th></tr></thead>
+    <tbody>
+${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}
+    </tbody>
+  </table>
+</div>
+</body>
+</html>
+`;
 }
 
 export function toHtml(run: RunState): string {

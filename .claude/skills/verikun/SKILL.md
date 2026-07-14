@@ -13,9 +13,13 @@ description: >-
   out). Recorded actions form a
   test run you can archive to a JUnit + HTML report (`vk run archive`) — use when
   asked to "test", "verify the flow", or "produce a report". Run a whole known
-  flow in one call with `vk batch` (commands piped on stdin or via --file). iOS (--ios):
-  full parity via idb (tap/type/swipe/`ui` + screenshot/launch/stop), on simulators
-  and devices; install idb and see `vk doctor --ios`.
+  flow in one call with `vk batch` (commands piped on stdin or via --file); run a
+  directory of natural-language tests as a gated suite with `vk suite <dir>`
+  (overview report + non-zero exit on failure — the CI gate). A remote device is
+  reachable via `--server <url>` (ai/suite/install) against a `vk server` running
+  next to it. iOS (--ios): full parity via idb (tap/type/swipe/`ui` +
+  screenshot/launch/stop), on simulators and devices; install idb and see
+  `vk doctor --ios`.
 ---
 
 # verikun — drive & verify mobile apps
@@ -223,6 +227,40 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   compile/repair loop can't spend or hang without limit.
 - Exit `0` pass · `1` a step failed (or the budget/timeout was hit) · `2` usage · `3` environment
   (e.g. the model's API key — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — unset).
+
+## Run a suite of tests (vk suite)
+
+When the task is "run all the tests" / "run the test directory", use
+`vk suite <dir>` instead of looping `vk ai` yourself:
+
+```sh
+vk suite tests/ --app com.example.app        # reset app data between tests
+```
+
+- Runs every `*.md` in the directory (lexicographic — `01-…`, `02-…` sequences
+  them; `README.md` is skipped) through the `vk ai` engine; all `ai` flags apply.
+- `--app <id>` clears the app's data before each test (iOS: force-stop only).
+  Without it, each test must self-isolate (e.g. start with `launch <pkg> --clear`).
+- A failing test doesn't stop the suite. stdout is the suite directory
+  (`./.verikun/suites/<id>/` with `index.json` + `index.html` linking every
+  test's report); **exit 1 if any test failed** — so it gates CI directly.
+
+## Drive a remote device (--server)
+
+If the device is attached to another machine running `vk server`, point
+`vk ai` / `vk suite` / `vk install` at it — everything else works identically
+(same reports, same exit codes; the server's device/platform apply):
+
+```sh
+export VERIKUN_SERVER=http://100.64.0.7:8391
+export VERIKUN_SERVER_AUTH_KEY=<key printed/configured by the server>
+vk install ./app-debug.apk --server "$VERIKUN_SERVER"   # server needs --allow-install
+vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
+```
+
+A wrong URL/key fails fast with exit 3; `409` means another run holds the
+device. To expose a device from THIS machine: `vk server --allow-install`
+(add `--bind <addr>` to leave loopback; auth key auto-generates if unset).
 
 ## Test runs & reports
 

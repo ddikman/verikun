@@ -292,6 +292,14 @@ export class IdbDriver implements Driver {
     }
   }
 
+  install(appPath: string): void {
+    // idb install handles both simulators and physical devices, and both .ipa
+    // archives and .app bundles locally. (The REMOTE install path accepts only
+    // single-file .ipa uploads in v1 — a .app is a directory, which the streamed
+    // upload can't carry; see server.ts.) Installs can take minutes.
+    this.idbText(['install', appPath], { timeout: 10 * 60 * 1000 });
+  }
+
   stop(appId: string): void {
     // Best-effort force-stop. `terminate` reports a non-zero exit when the app simply
     // wasn't running; that's a no-op success for us (parity with adb `am force-stop`,

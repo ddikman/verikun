@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, SelectorNotFoundError } from './errors';
@@ -8,14 +8,18 @@ import { Driver, DeviceInfo, Element, Platform, Point } from './types';
 import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
-import { Recorder, isRecordable } from './run';
+import { Recorder, isRecordable, RunStep } from './run';
 import { downscalePng } from './image';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS } from './agent/engine';
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
+import { AgentProvider } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
-import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD } from './agent/cost';
+import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price } from './agent/cost';
 import { Plan } from './agent/ir';
+import { ExecBackend } from './rpc';
+import { createRemoteBackend, pingServer, RemoteOpts } from './agent/remote';
+import { cmdSuite, AiRunResult } from './suite';
 import { VERSION } from './version';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -30,7 +34,8 @@ interface Ctx {
   record?: Recorder;
 }
 
-function platformFromFlags(flags: Flags): Platform {
+// Exported for src/server.ts (which resolves its own platform/device at startup).
+export function platformFromFlags(flags: Flags): Platform {
   if (flagBool(flags, 'ios')) return 'ios';
   if (flagBool(flags, 'android')) return 'android';
   const p = flagStr(flags, 'platform');
@@ -39,7 +44,7 @@ function platformFromFlags(flags: Flags): Platform {
   return 'android';
 }
 
-function deviceFromFlags(flags: Flags, platform: Platform): string | undefined {
+export function deviceFromFlags(flags: Flags, platform: Platform): string | undefined {
   return (
     flagStr(flags, 'device') ||
     process.env.VERIKUN_DEVICE ||
@@ -925,11 +930,40 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
 // next run is free again. Cost is bounded by --max-cost-usd. Progress streams to
 // stderr (CI liveness — it never goes quiet); stdout carries the final result.
 
-async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
-  const file = positionals[0];
-  if (!file) {
-    throw new CliError('Usage: verikun ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--show-plan] [--recompile]', 2);
-  }
+/** The parsed `vk ai` knobs, shared verbatim by every test in a `vk suite` run. */
+interface AiOptions {
+  model: string;
+  price: Price;
+  maxCostUsd: number;
+  timeoutMs: number;
+  effort?: string;
+  pkg?: string;
+  build?: string;
+  recompile: boolean;
+}
+
+function parseAiOptions(flags: Flags): AiOptions {
+  const model = resolveModel(flagStr(flags, 'model'));
+  const overrideRaw = flagStr(flags, 'cost-override');
+  const override = overrideRaw ? parseCostOverride(overrideRaw) : undefined;
+  const maxCostUsd = flagNum(flags, 'max-cost-usd') ?? DEFAULT_MAX_COST_USD;
+  if (maxCostUsd <= 0) throw new CliError(`--max-cost-usd must be greater than 0 (got ${maxCostUsd}).`, 2);
+  // Whole-run wall-clock ceiling (default 15m) so a runaway loop/repair can't hang the run.
+  const timeoutFlag = flagStr(flags, 'timeout');
+  const timeoutMs = timeoutFlag ? parseDuration(timeoutFlag, 'timeout') : DEFAULT_RUN_TIMEOUT_MS;
+  return {
+    model,
+    price: priceFor(model, override),
+    maxCostUsd,
+    timeoutMs,
+    effort: flagStr(flags, 'effort'),
+    pkg: flagStr(flags, 'package'),
+    build: flagStr(flags, 'app-build'),
+    recompile: flagBool(flags, 'recompile') || flagBool(flags, 'no-cache'),
+  };
+}
+
+function readAiTest(file: string): string {
   let nl: string;
   try {
     nl = readFileSync(resolve(process.cwd(), file), 'utf8');
@@ -937,88 +971,160 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     throw new CliError(`ai: cannot read '${file}' (${(e as Error).message})`, 2);
   }
   if (!nl.trim()) throw new CliError(`ai: '${file}' is empty`, 2);
+  return nl;
+}
 
-  const platform = platformFromFlags(flags);
-  const device = deviceFromFlags(flags, platform);
+/** The env var carrying the API key for a model's provider (per-provider keys). */
+function keyEnvFor(model: string): string {
+  return providerFor(model) === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+}
 
-  const model = resolveModel(flagStr(flags, 'model'));
-  const overrideRaw = flagStr(flags, 'cost-override');
-  const override = overrideRaw ? parseCostOverride(overrideRaw) : undefined;
-  const maxCostUsd = flagNum(flags, 'max-cost-usd') ?? DEFAULT_MAX_COST_USD;
-  if (maxCostUsd <= 0) throw new CliError(`--max-cost-usd must be greater than 0 (got ${maxCostUsd}).`, 2);
-  const cost = new CostTracker(priceFor(model, override), maxCostUsd);
-  // Whole-run wall-clock ceiling (default 15m) so a runaway loop/repair can't hang the run.
-  const timeoutFlag = flagStr(flags, 'timeout');
-  const timeoutMs = timeoutFlag ? parseDuration(timeoutFlag, 'timeout') : DEFAULT_RUN_TIMEOUT_MS;
-  const deadline = Date.now() + timeoutMs;
-  const effort = flagStr(flags, 'effort');
+/** Route the model to its backend; each provider reads its own key. A missing key
+ *  means no provider (compile/repair unavailable) — the same graceful degradation
+ *  as before. */
+function makeProvider(opts: AiOptions): AgentProvider | null {
+  const apiKey = process.env[keyEnvFor(opts.model)];
+  if (!apiKey) return null;
+  return providerFor(opts.model) === 'openai'
+    ? new OpenAiProvider({ model: opts.model, apiKey, effort: opts.effort })
+    : new ClaudeProvider({ model: opts.model, apiKey, effort: opts.effort });
+}
 
-  const pkg = flagStr(flags, 'package');
-  const build = flagStr(flags, 'app-build');
-  const key: CacheKeyInput = { nl, pkg, build, platform };
-
-  const recompile = flagBool(flags, 'recompile') || flagBool(flags, 'no-cache');
-  const showPlan = flagBool(flags, 'show-plan');
-  // Route the model to its backend; each provider reads its own key. A missing key means
-  // no provider (compile/repair unavailable) — the same graceful degradation as before.
-  const providerId = providerFor(model);
-  const keyEnv = providerId === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
-  const apiKey = process.env[keyEnv];
-  const provider = !apiKey
-    ? null
-    : providerId === 'openai'
-      ? new OpenAiProvider({ model, apiKey, effort })
-      : new ClaudeProvider({ model, apiKey, effort });
-
-  // 1. Obtain the plan: a cache hit (free) or a compile (pays tokens; may seed from
-  //    a prior build's plan to avoid a full recompile).
-  const cached = recompile ? null : readPlan(key);
-  let plan: Plan;
+/** Obtain the plan: a cache hit (free) or a compile (pays tokens; may seed from a
+ *  prior build's plan to avoid a full recompile). The fresh compile is cached right
+ *  away, so an unchanged test is never recompiled — even via --show-plan or after a
+ *  failed run. A green run later re-persists the healed plan (never a half-healed one). */
+async function obtainPlan(
+  key: CacheKeyInput,
+  file: string,
+  opts: AiOptions,
+  cost: CostTracker,
+  provider: AgentProvider | null,
+): Promise<{ plan: Plan; cached: boolean }> {
+  const cached = opts.recompile ? null : readPlan(key);
   if (cached) {
-    plan = cached.plan;
-    err(`[ai] plan cache hit — ${model} not called to compile`);
-  } else {
-    if (!provider) {
-      throw new CliError(`${keyEnv} is not set — \`vk ai\` needs it to compile the test (model ${model}). Set it and retry.`, 3);
-    }
-    const seed = findSeed(key);
-    if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
-    err(`[ai] compiling '${file}' with ${model} (effort ${effort ?? 'default'})…`);
-    const compiled = await provider.compile({ nl, pkg, platform, seed: seed?.plan });
-    cost.add(compiled.usage, 'compile');
-    plan = compiled.plan;
-    err(`[ai] compiled ${plan.steps.length} top-level step(s) · ${cost.summaryLine()}`);
-    // Cache the freshly-compiled plan right away, keyed by the test-text hash, so an
-    // unchanged test is never recompiled — even via --show-plan or after a failed run.
-    // A green run below re-persists the healed plan; a failed run leaves this clean
-    // compile cached (never a half-healed one).
-    try {
-      writePlan(key, plan);
-    } catch (e) {
-      err(`[ai] could not cache compiled plan: ${(e as Error).message}`);
-    }
+    err(`[ai] plan cache hit — ${opts.model} not called to compile`);
+    return { plan: cached.plan, cached: true };
+  }
+  if (!provider) {
+    throw new CliError(`${keyEnvFor(opts.model)} is not set — \`vk ai\` needs it to compile the test (model ${opts.model}). Set it and retry.`, 3);
+  }
+  const seed = findSeed(key);
+  if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
+  err(`[ai] compiling '${file}' with ${opts.model} (effort ${opts.effort ?? 'default'})…`);
+  const compiled = await provider.compile({ nl: key.nl, pkg: key.pkg, platform: key.platform, seed: seed?.plan });
+  cost.add(compiled.usage, 'compile');
+  err(`[ai] compiled ${compiled.plan.steps.length} top-level step(s) · ${cost.summaryLine()}`);
+  try {
+    writePlan(key, compiled.plan);
+  } catch (e) {
+    err(`[ai] could not cache compiled plan: ${(e as Error).message}`);
+  }
+  return { plan: compiled.plan, cached: false };
+}
+
+// --- execution backend (local driver vs remote `vk server`) -----------------
+//
+// `vk ai`, `vk suite`, and `vk install` run their device work through an
+// ExecBackend. Local wraps one shared Driver; remote speaks HTTP to a `vk server`
+// beside the device (--server / VERIKUN_SERVER), where each validated leaf is ONE
+// round-trip (the auto-wait loop stays server-side). In remote mode the server
+// owns the device: its /v1/health platform+serial supersede the client's
+// --platform/--device, and no local driver is ever built.
+
+interface ResolvedBackend {
+  backend: ExecBackend;
+  platform: Platform;
+  device?: string;
+  /** Set when the backend is a remote `vk server`. */
+  remote?: { url: string; version: string };
+}
+
+async function resolveBackend(platform: Platform, device: string | undefined, flags: Flags): Promise<ResolvedBackend> {
+  const server = flagStr(flags, 'server') || process.env.VERIKUN_SERVER || undefined;
+  if (!server) {
+    const driver = getDriver(platform, device);
+    return {
+      backend: {
+        exec: (command, positionals, f) => executeOutcome(command, positionals, f, driver),
+        getElements: () => driver.getElements(),
+        install: (appPath) => driver.install(appPath),
+        reset: (appId) => {
+          assertSafeAppId(appId);
+          // iOS has no per-app data reset — degrade honestly to a force-stop.
+          if (platform === 'ios') driver.stop(appId);
+          else driver.clearApp(appId);
+        },
+      },
+      platform,
+      device,
+    };
   }
 
-  // 2. --show-plan: print the compiled IR and stop (no device run).
-  if (showPlan) {
-    json(plan);
-    return 0;
-  }
+  let runCtx: { platform: string; device?: string } = { platform, device };
+  const opts: RemoteOpts = {
+    url: server,
+    authKey: flagStr(flags, 'auth-key') || process.env.VERIKUN_SERVER_AUTH_KEY || undefined,
+    // Each remote step is spliced into the local active run so the archived report
+    // is identical to a local run's.
+    onStep: (step, artifacts) => Recorder.appendForeignStep(step, artifacts, runCtx),
+  };
+  const health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
+  runCtx = { platform: health.platform, device: health.serial };
+  err(`[verikun] server ${server}: ${health.platform} · device ${health.serial} · verikun ${health.version}`);
+  return {
+    backend: createRemoteBackend(opts, health),
+    platform: health.platform,
+    device: health.serial,
+    remote: { url: server, version: health.version },
+  };
+}
+
+/**
+ * Run one natural-language test through a backend and return DATA — no stdout
+ * writes (stdout stays the caller's one result; progress streams to stderr).
+ * `vk ai` wraps it with its --json/report output; `vk suite` calls it per test.
+ */
+async function runAiTest(
+  file: string,
+  opts: AiOptions,
+  backend: ExecBackend,
+  platform: Platform,
+  device: string | undefined,
+): Promise<AiRunResult> {
+  const nl = readAiTest(file);
+  const key: CacheKeyInput = { nl, pkg: opts.pkg, build: opts.build, platform };
+  const cost = new CostTracker(opts.price, opts.maxCostUsd);
+  const deadline = Date.now() + opts.timeoutMs;
+  const provider = makeProvider(opts);
+
+  const { plan, cached } = await obtainPlan(key, file, opts, cost, provider);
 
   // Running needs the provider for repair-on-failure; a cache hit with no key can't repair.
   if (!provider) {
-    throw new CliError(`${keyEnv} is not set — \`vk ai\` needs it to repair a failing step at runtime (model ${model}).`, 3);
+    throw new CliError(`${keyEnvFor(opts.model)} is not set — \`vk ai\` needs it to repair a failing step at runtime (model ${opts.model}).`, 3);
   }
 
   // The budget is a TOTAL-run ceiling: if the compile alone already crossed it, abort
   // before running. A cache hit spends nothing, so a free replay is still allowed.
   if (!cached && cost.exceeded()) {
-    err(`[ai] cost ceiling $${maxCostUsd} reached during compile (${cost.summaryLine()}) — not running`);
-    return 1;
+    err(`[ai] cost ceiling $${opts.maxCostUsd} reached during compile (${cost.summaryLine()}) — not running`);
+    return {
+      ok: false,
+      costUsd: Number(cost.usd().toFixed(4)),
+      costLine: cost.summaryLine(),
+      modelRepairs: 0,
+      improvements: [],
+      runDir: '',
+      reportHtml: '',
+      junitXml: '',
+      state: null,
+      abortedForBudget: true,
+      failure: { where: 'compile', reason: `cost ceiling $${opts.maxCostUsd} reached during compile` },
+    };
   }
 
-  // 3. One explicit run + one shared driver for the whole flow (so rollover can't
-  //    split the test, and we don't rebuild a driver per step).
+  // One explicit run for the whole flow (so rollover can't split the test).
   const existing = Recorder.status();
   if (existing && existing.steps.length > 0) {
     // Seal the pre-existing run into the archive instead of letting start(force=true)
@@ -1027,15 +1133,14 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     err(`[ai] archived the active run ('${existing.name}', ${existing.steps.length} step(s)) → ${sealed.dir}`);
   }
   Recorder.start(`ai: ${basename(file)}`, platform, device, true);
-  const driver = getDriver(platform, device);
 
   // Suppress per-step `out()` so stdout stays the one final result; progress -> stderr.
   const prevQuiet = setOutputQuiet(true);
   let result: Awaited<ReturnType<typeof runPlan>>;
   try {
     result = await runPlan(plan, {
-      exec: (command, pos, f) => executeOutcome(command, pos, f, driver),
-      getElements: () => driver.getElements(),
+      exec: (command, pos, f) => backend.exec(command, pos, f),
+      getElements: () => backend.getElements(),
       provider,
       cost,
       log: (m) => err(m),
@@ -1060,8 +1165,8 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     setOutputQuiet(prevQuiet);
   }
 
-  // 4. Persist the (possibly repaired) plan only on a fully-green run; attach the
-  //    cost + improvements summary to the run; archive into the report.
+  // Persist the (possibly repaired) plan only on a fully-green run; attach the
+  // cost + improvements summary to the run; archive into the report.
   const costLine = cost.summaryLine();
   if (result.ok) {
     try {
@@ -1074,14 +1179,14 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   Recorder.annotateRun({
     ai: { ok: result.ok, cost: costLine, modelRepairs: result.modelRepairs, improvements: result.improvements },
   });
-  const { dir, xmlPath, htmlPath } = Recorder.archive();
+  const { dir, xmlPath, htmlPath, state } = Recorder.archive();
 
   const status = result.ok
     ? 'PASS'
     : result.abortedForBudget
-      ? `ABORTED — cost ceiling $${maxCostUsd} reached`
+      ? `ABORTED — cost ceiling $${opts.maxCostUsd} reached`
       : result.abortedForTimeout
-        ? `ABORTED — run timeout (${Math.round(timeoutMs / 1000)}s) reached`
+        ? `ABORTED — run timeout (${Math.round(opts.timeoutMs / 1000)}s) reached`
         : `FAIL at ${result.failure?.where}: ${result.failure?.reason}`;
   err(`[ai] ${status} · ${costLine}`);
   err(`[ai] report: ${htmlPath}`);
@@ -1091,25 +1196,120 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   }
   err(`[ai] estimated total cost: $${cost.usd().toFixed(4)}`);
 
+  return {
+    ok: result.ok,
+    costUsd: Number(cost.usd().toFixed(4)),
+    costLine,
+    modelRepairs: result.modelRepairs,
+    improvements: result.improvements,
+    runDir: dir,
+    reportHtml: htmlPath,
+    junitXml: xmlPath,
+    state,
+    ...(result.failure ? { failure: result.failure } : {}),
+    ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
+    ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
+  };
+}
+
+async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
+  const file = positionals[0];
+  if (!file) {
+    throw new CliError('Usage: verikun ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--server url] [--show-plan] [--recompile]', 2);
+  }
+  const opts = parseAiOptions(flags);
+
+  // --show-plan: compile (or cache-hit) and print the IR — no device, no backend.
+  if (flagBool(flags, 'show-plan')) {
+    const nl = readAiTest(file);
+    const key: CacheKeyInput = { nl, pkg: opts.pkg, build: opts.build, platform: platformFromFlags(flags) };
+    const cost = new CostTracker(opts.price, opts.maxCostUsd);
+    const { plan } = await obtainPlan(key, file, opts, cost, makeProvider(opts));
+    json(plan);
+    return 0;
+  }
+
+  const reqPlatform = platformFromFlags(flags);
+  const { backend, platform, device } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  let result: AiRunResult;
+  try {
+    result = await runAiTest(file, opts, backend, platform, device);
+  } finally {
+    await backend.close?.(); // frees a remote server's device lock for the next command
+  }
+
   if (flagBool(flags, 'json')) {
     json({
       ok: result.ok,
-      model,
-      cost: costLine,
-      costUsd: Number(cost.usd().toFixed(4)),
+      model: opts.model,
+      cost: result.costLine,
+      costUsd: result.costUsd,
       modelRepairs: result.modelRepairs,
       improvements: result.improvements,
-      report: htmlPath,
-      junit: xmlPath,
-      runDir: dir,
+      report: result.reportHtml,
+      junit: result.junitXml,
+      runDir: result.runDir,
       ...(result.failure ? { failure: result.failure } : {}),
       ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
       ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
     });
-  } else {
-    out(htmlPath); // primary machine result: the report path
+  } else if (result.reportHtml) {
+    out(result.reportHtml); // primary machine result: the report path
   }
   return result.ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// install — put an app build on the device (local driver or remote vk server)
+// ---------------------------------------------------------------------------
+
+async function cmdInstall(positionals: string[], flags: Flags): Promise<number> {
+  const appPath = positionals[0];
+  if (!appPath) throw new CliError('Usage: verikun install <app.apk|app.ipa> [--server url]', 2);
+  const path = resolve(process.cwd(), appPath);
+  if (!existsSync(path)) throw new CliError(`install: '${appPath}' does not exist`, 2);
+  const platform = platformFromFlags(flags);
+  const { backend, remote } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
+  err(`[verikun] installing ${appPath}${remote ? ` via ${remote.url}` : ''}…`);
+  try {
+    await backend.install(path);
+  } finally {
+    await backend.close?.();
+  }
+  if (flagBool(flags, 'json')) json({ installed: appPath, ...(remote ? { server: remote.url } : {}) });
+  else out(`installed ${appPath}`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// suite — run a directory of natural-language tests as one gated suite
+// ---------------------------------------------------------------------------
+
+async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<number> {
+  const dirArg = positionals[0];
+  if (!dirArg) throw new CliError('Usage: verikun suite <dir> [--app <id>] [--server url] [--name n] [--json]', 2);
+  const opts = parseAiOptions(flags);
+  // Pre-flight the model key BEFORE touching any device/server: every test needs it
+  // to compile (on a cache miss) or to repair at runtime.
+  if (!process.env[keyEnvFor(opts.model)]) {
+    throw new CliError(`${keyEnvFor(opts.model)} is not set — \`vk suite\` needs it to compile/repair tests (model ${opts.model}).`, 3);
+  }
+  const reqPlatform = platformFromFlags(flags);
+  const { backend, platform, device } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  const app = flagStr(flags, 'app');
+  if (app) assertSafeAppId(app);
+  try {
+    return await cmdSuite(dirArg, flags, {
+      platform,
+      device,
+      runTest: (file) => runAiTest(file, opts, backend, platform, device),
+      // Reset app state between tests only when the app id is known; without --app,
+      // each test is responsible for its own isolation (e.g. `launch --clear`).
+      reset: app ? () => backend.reset(app) : undefined,
+    });
+  } finally {
+    await backend.close?.();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,7 +1422,24 @@ async function executeOutcome(
       }
       recorder = Recorder.beginStep(command, positionals, flags, platform, device, serial, driver);
     }
-    const ctx: Ctx = { driver, platform, device, positionals, flags, record: recorder ?? undefined };
+  } catch (e) {
+    return { code: e instanceof CliError ? e.exitCode : 3, error: e as Error };
+  }
+  const d = driver!; // assigned in the try above, or we already returned
+  const ctx: Ctx = { driver: d, platform, device, positionals, flags, record: recorder ?? undefined };
+  return runRecorded(command, ctx, recorder, d);
+}
+
+/** The shared middle of executeOutcome / executeForServer: run the handler, close
+ *  the step (with failure evidence) whether it returned or threw, map to a raw
+ *  outcome (the error NOT printed — callers decide). */
+async function runRecorded(
+  command: string,
+  ctx: Ctx,
+  recorder: Recorder | null,
+  driver: Driver,
+): Promise<{ code: number; error?: Error }> {
+  try {
     const code = await executeCommand(command, ctx);
     recorder?.finish(code, driver);
     return { code };
@@ -1230,6 +1447,34 @@ async function executeOutcome(
     recorder?.finishError(e as Error, driver);
     return { code: e instanceof CliError ? e.exitCode : 3, error: e as Error };
   }
+}
+
+/**
+ * `vk server`'s per-request executor: run one already-validated leaf against the
+ * server's fixed driver/platform (a client can never repoint the device via flags),
+ * recording into an EPHEMERAL single-step recorder instead of the local run store.
+ * Returns the raw outcome plus the finished step + artifact buffers, which travel
+ * back over the wire and are spliced into the CALLER's run — so `resolved`/`tier`/
+ * failure evidence survive remoting with zero handler changes.
+ */
+export async function executeForServer(
+  command: string,
+  positionals: string[],
+  flags: Flags,
+  driver: Driver,
+  platform: Platform,
+): Promise<{ code: number; error?: Error; step?: RunStep; artifacts?: Record<string, Buffer> }> {
+  let serial: string | undefined;
+  try {
+    serial = driver.resolvedSerial();
+  } catch {
+    /* surfaced by the command handler below */
+  }
+  const recorder = Recorder.beginEphemeralStep(command, positionals, flags, platform, serial);
+  const ctx: Ctx = { driver, platform, device: serial, positionals, flags, record: recorder };
+  const outcome = await runRecorded(command, ctx, recorder, driver);
+  const { step, artifacts } = recorder.takeEphemeral();
+  return { ...outcome, step, artifacts };
 }
 
 /**
@@ -1246,12 +1491,36 @@ async function executeParsed(command: string, positionals: string[], flags: Flag
   // driver of their own and are dispatched before the recording machinery.
   if (command === 'run') return cmdRun(positionals, flags, platform, device);
   if (command === 'batch') return cmdBatch(positionals, flags);
-  // `ai` orchestrates its own steps; map its thrown CliErrors to exit codes here
-  // (usage 2 / env 3 / …) so they honor the exit-code contract instead of escaping
-  // to the top-level "Fatal" handler (which would force exit 3).
+  // `ai`/`suite`/`install`/`server` orchestrate their own steps; map their thrown
+  // CliErrors to exit codes here (usage 2 / env 3 / …) so they honor the exit-code
+  // contract instead of escaping to the top-level "Fatal" handler (exit 3).
   if (command === 'ai') {
     try {
       return await cmdAi(positionals, flags);
+    } catch (e) {
+      return mapError(e, flags);
+    }
+  }
+  if (command === 'suite') {
+    try {
+      return await cmdSuiteEntry(positionals, flags);
+    } catch (e) {
+      return mapError(e, flags);
+    }
+  }
+  if (command === 'install') {
+    try {
+      return await cmdInstall(positionals, flags);
+    } catch (e) {
+      return mapError(e, flags);
+    }
+  }
+  if (command === 'server') {
+    // Dynamic import: keeps node:http off the default load path and avoids a
+    // static cli↔server cycle (server.ts imports executeForServer from here).
+    try {
+      const { cmdServer } = await import('./server');
+      return await cmdServer(positionals, flags);
     } catch (e) {
       return mapError(e, flags);
     }
@@ -1308,6 +1577,9 @@ ACT
   launch <app> [--clear] [--no-restart]   stop <app>   App lifecycle (launch restarts by
                                         default — force-stops first; --clear also wipes app data)
   clear <app>                         Wipe app data — login/session, caches (fresh-install state)
+  install <app.apk|.ipa> [--server url]   Install a build on the device (adb install -r /
+                                      idb install). With --server, uploads the file to a
+                                      remote vk server (which must run --allow-install)
 
 BATCH (script many commands in one process)
   batch [--file path] [--quiet]       Run newline-separated commands — from --file,
@@ -1332,6 +1604,30 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       Models: claude-haiku-4-5 | claude-sonnet-4-6
                                       (default) | claude-opus-4-8 | claude-fable-5 |
                                       gpt-5.4-mini | gpt-5.4 | gpt-5.5.
+
+SUITE (run a directory of natural-language tests as one gated suite)
+  suite <dir> [--app <id>] [--name n] [--json]  (+ all \`ai\` flags, incl. --server)
+                                      Run every *.md in <dir> (lexicographic order —
+                                      prefix 01-, 02- to sequence; README.md skipped)
+                                      through \`vk ai\`. With --app, app data is reset
+                                      between tests (iOS: force-stop). Writes a suite
+                                      overview to ./.verikun/suites/<id>/{index.json,
+                                      index.html} linking each test's report. Exits 1
+                                      if any test failed — the CI gate.
+
+SERVER (expose a locally-connected device to remote verikun clients)
+  server [--bind addr] [--port n] [--auth-key k] [--allow-install]
+         [--allow-unsafe-anonymous]  Serve THIS machine's device over HTTP+JSON for
+                                      \`vk ai/suite/install --server <url>\`. Only
+                                      verikun's validated action grammar is runnable
+                                      (never a shell); auth is required (a key is
+                                      generated if none given; --allow-unsafe-anonymous
+                                      opts out for trusted networks e.g. Tailscale);
+                                      binds 127.0.0.1 by default (--bind to expose);
+                                      one run at a time holds the device lock.
+                                      Env: VERIKUN_SERVER_AUTH_KEY (keeps it off argv).
+  Clients: pass --server <url> (or VERIKUN_SERVER) + --auth-key (or
+  VERIKUN_SERVER_AUTH_KEY) to ai/suite/install. The server's device+platform apply.
 
 ENVIRONMENT
   devices [--json]                    List attached devices/simulators

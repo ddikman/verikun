@@ -1,0 +1,111 @@
+name: Device test suite
+
+# Run the natural-language test suite against a REMOTE device via `vk server`.
+#
+# Split-execution design: this job runs on a throwaway ubuntu-latest runner and
+# holds the Anthropic key, the vk ai engine, run recording, and result upload;
+# the machine that owns the device runs only the stateless `vk server`, which
+# executes nothing but verikun's validated command grammar. Only device I/O
+# crosses the network — so no self-hosted runner (and no arbitrary fork code)
+# ever executes on the device box.
+#
+# On the device machine (once, e.g. inside a tailnet):
+#   export VERIKUN_SERVER_AUTH_KEY=<key>
+#   vk server --bind <tailnet-ip> --allow-install
+#
+# Repo secrets this workflow expects:
+#   ANTHROPIC_API_KEY          the model key for compile/repair (vk ai)
+#   VERIKUN_SERVER             e.g. http://100.x.y.z:8391 (the server's address)
+#   VERIKUN_SERVER_AUTH_KEY    the server's auth key
+#
+# The runner must be able to reach the server — for a NAT'd device box the
+# recommended transport is Tailscale (add e.g. tailscale/github-action before
+# the suite step); any routable address works.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tests_dir:
+        description: Directory of *.md tests to run
+        default: example
+      app_id:
+        description: App package/bundle id to reset between tests (optional)
+        default: ''
+  # Enable when the device server is reachable from PR builds:
+  # pull_request:
+  #   branches: [main]
+
+concurrency:
+  group: device-suite # one suite at a time — the server holds a single device lock
+  cancel-in-progress: false
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Build verikun
+        run: |
+          npm ci
+          npm run build
+          npm link
+
+      # Install the app build under test on the remote device. Produce or fetch
+      # the build in an earlier step (build job artifact, release download, …);
+      # skipped when no build is present so a plain suite re-run still works.
+      - name: Install app build on the remote device
+        run: |
+          if compgen -G "*.apk" > /dev/null; then
+            vk install ./*.apk --server "$VERIKUN_SERVER"
+          else
+            echo "no .apk in the workspace — skipping install"
+          fi
+        env:
+          VERIKUN_SERVER: ${{ secrets.VERIKUN_SERVER }}
+          VERIKUN_SERVER_AUTH_KEY: ${{ secrets.VERIKUN_SERVER_AUTH_KEY }}
+
+      # The suite exits non-zero when any test fails, which fails this step and
+      # therefore the job — the CI gate needs no extra plumbing.
+      - name: Run the test suite
+        run: |
+          APP_FLAG=""
+          if [ -n "${{ inputs.app_id }}" ]; then APP_FLAG="--app ${{ inputs.app_id }}"; fi
+          vk suite "${{ inputs.tests_dir }}" --server "$VERIKUN_SERVER" $APP_FLAG
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VERIKUN_SERVER: ${{ secrets.VERIKUN_SERVER }}
+          VERIKUN_SERVER_AUTH_KEY: ${{ secrets.VERIKUN_SERVER_AUTH_KEY }}
+
+      # The suite overview (index.json manifest + index.html) plus every test's
+      # archived run (report.html, report.xml, screenshots). `always()` so the
+      # evidence uploads exactly when it matters — on a failed suite.
+      - name: Upload suite reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verikun-suite
+          path: |
+            .verikun/suites
+            .verikun/runs
+          if-no-files-found: warn
+
+      # Reporting providers are composable CI steps over the stable index.json
+      # manifest — not verikun plugins. Two examples:
+      #
+      # - name: Publish to Google Drive (rclone)
+      #   if: always()
+      #   run: rclone copy .verikun/suites "gdrive:ci-reports/${{ github.run_id }}"
+      #
+      # - name: Publish to S3
+      #   if: always()
+      #   run: aws s3 cp .verikun/suites "s3://my-reports/${{ github.run_id }}/" --recursive

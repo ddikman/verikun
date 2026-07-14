@@ -81,6 +81,9 @@ export interface Driver {
   inputText(text: string): void;
   pressKey(name: string): void;
   launch(appId: string): void;
+  /** Install an app build from a host-side file (`.apk` / `.ipa`; `-r` semantics —
+   *  reinstall keeps data where the platform supports it). */
+  install(appPath: string): void;
   stop(appId: string): void;
   /** Wipe the app's locally stored data (login/session, prefs, caches) — a fresh-install state. */
   clearApp(appId: string): void;

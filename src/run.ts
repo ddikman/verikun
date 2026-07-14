@@ -137,13 +137,15 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function runId(): string {
+/** Timestamp id used for runs — exported so `vk suite` mints suite ids the same way. */
+export function runId(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-function uniqueDir(base: string): string {
+/** First non-existing `<base>`, `<base>-2`, `<base>-3`, … — exported for `vk suite`. */
+export function uniqueDir(base: string): string {
   if (!existsSync(base)) return base;
   for (let i = 2; ; i++) {
     const candidate = `${base}-${i}`;
@@ -242,6 +244,10 @@ export class Recorder {
     private readonly dir: string,
     private readonly step: RunStep,
     private readonly startMs: number,
+    /** Ephemeral mode (vk server): artifacts land here instead of on disk, and
+     *  commit() never touches ./.verikun — the step is returned to the caller
+     *  via takeEphemeral() and spliced into the CALLER's run instead. */
+    private readonly sink?: Record<string, Buffer>,
   ) {}
 
   /**
@@ -323,6 +329,51 @@ export class Recorder {
     };
 
     return new Recorder(state, dir, step, Date.now());
+  }
+
+  /**
+   * Open a single-step recorder that never touches disk — the `vk server` path.
+   * The step (and any artifacts, e.g. failure screenshots) accumulate in memory
+   * and are handed back by takeEphemeral() for the wire; the CALLING verikun
+   * splices them into its own on-disk run via appendForeignStep. Deliberately
+   * ignores VERIKUN_NO_RUN: this is how step detail reaches the remote caller,
+   * not a local test run.
+   */
+  static beginEphemeralStep(
+    command: string,
+    positionals: string[],
+    flags: Record<string, string | boolean>,
+    platform: string,
+    serial?: string,
+  ): Recorder {
+    const state: RunState = {
+      id: 'ephemeral',
+      name: 'ephemeral',
+      startedAt: nowIso(),
+      updatedAt: nowIso(),
+      platform,
+      device: serial,
+      implicit: true,
+      steps: [],
+    };
+    const step: RunStep = {
+      index: 0,
+      command,
+      name: stepName(command, positionals, flags),
+      startedAt: nowIso(),
+      durationMs: 0,
+      status: 'passed',
+      exitCode: 0,
+    };
+    // No dir: ephemeral recording never touches disk (activeDir() would mkdir
+    // ./.verikun as a side effect), and writeArtifact/commit divert to the sink.
+    return new Recorder(state, '', step, Date.now(), {});
+  }
+
+  /** The finished ephemeral step + its in-memory artifacts. Only meaningful after
+   *  finish()/finishError() on a beginEphemeralStep recorder. */
+  takeEphemeral(): { step: RunStep; artifacts: Record<string, Buffer> } {
+    return { step: this.step, artifacts: this.sink ?? {} };
   }
 
   /** Attach selector / heal-tier / resolved-element / message detail to the current step. */
@@ -410,12 +461,17 @@ export class Recorder {
   }
 
   private writeArtifact(rel: string, buf: Buffer): void {
+    if (this.sink) {
+      this.sink[rel] = buf;
+      return;
+    }
     mkdirSync(join(this.dir, 'artifacts'), { recursive: true });
     writeFileSync(join(this.dir, rel), buf);
   }
 
   private commit(): void {
     this.step.durationMs = Date.now() - this.startMs;
+    if (this.sink) return; // ephemeral: the step goes to the wire, not to disk
     this.state.steps.push(this.step);
     this.state.updatedAt = nowIso();
     saveState(this.dir, this.state);
@@ -456,6 +512,56 @@ export class Recorder {
     const state = loadState(dir);
     if (!state) return;
     Object.assign(state, patch);
+    saveState(dir, state);
+  }
+
+  /**
+   * Splice a step another verikun produced (a `vk server`'s ephemeral step) into
+   * the ACTIVE local run, so a remote `vk ai` run archives a report identical to
+   * a local one. Re-indexes the step, writes its artifact buffers under the new
+   * index, and rewrites the step's artifact references to match. Creates an
+   * implicit run first if none is active (parity with beginStep's auto-start).
+   */
+  static appendForeignStep(
+    step: RunStep,
+    artifacts: Record<string, Buffer> = {},
+    ctx: { platform?: string; device?: string } = {},
+  ): void {
+    if (process.env.VERIKUN_NO_RUN) return;
+    const dir = activeDir();
+    let state = loadState(dir);
+    if (!state) {
+      state = {
+        id: runId(),
+        name: 'run',
+        startedAt: nowIso(),
+        updatedAt: nowIso(),
+        platform: ctx.platform ?? 'android',
+        device: ctx.device,
+        session: currentSession(),
+        implicit: true,
+        steps: [],
+      };
+      err('[verikun] recording test run (implicit) — archive: `vk run archive` · discard: `vk run clear`');
+    }
+
+    const index = state.steps.length;
+    const spliced: RunStep = { ...step, index };
+    for (const [rel, buf] of Object.entries(artifacts)) {
+      // The rel path comes from the (authenticated) server's response; still, never
+      // let it steer the write outside the run's artifacts/ directory.
+      if (!/^artifacts\/[A-Za-z0-9._-]+$/.test(rel)) {
+        err(`[verikun] skipping remote artifact with unexpected path '${rel}'`);
+        continue;
+      }
+      const newRel = rel.replace(/\bstep-\d+-/, `step-${index}-`);
+      mkdirSync(join(dir, 'artifacts'), { recursive: true });
+      writeFileSync(join(dir, newRel), buf);
+      if (spliced.image === rel) spliced.image = newRel;
+      if (spliced.failImage === rel) spliced.failImage = newRel;
+    }
+    state.steps.push(spliced);
+    state.updatedAt = nowIso();
     saveState(dir, state);
   }
 
