@@ -74,6 +74,12 @@ const describe = (leaf: LeafStep): string =>
     .join(' ')
     .trim();
 
+/** A screenshot leaf is best-effort review evidence, not a gate. The `vk ai`
+ *  grammar has the model sprinkle them around transitions, so a capture that
+ *  fails (a device hiccup on screencap) must never turn a green run red — see
+ *  the guard in execLeaf. */
+const isScreenshotLeaf = (leaf: LeafStep): boolean => leaf.command === 'screenshot' || leaf.command === 'shot';
+
 /** A structural fingerprint of the screen: sorted id+text+type set. Used for the
  *  loop no-progress check — deliberately NOT the raw hierarchy (its node ordering
  *  is nondeterministic between identical states, which would false-trip). */
@@ -204,6 +210,19 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     }
 
     if (outcome.code === 0) return { status: 'ok' };
+    // A review screenshot is best-effort evidence, never a gate. The grammar has the
+    // model insert them liberally around transitions, so a capture that fails (a
+    // device hiccup on screencap) must not fail an otherwise-green run. Log it,
+    // downgrade the just-recorded failed step to a clean pass (markLastStepHealed
+    // sets status=passed/exitCode=0 and drops the failure evidence) so the report and
+    // JUnit stay consistent with the green run, then continue. Scoped to screenshot/
+    // shot — every other command's failure stays terminal.
+    if (isScreenshotLeaf(current)) {
+      const why = outcome.error ? outcome.error.message.split('\n')[0] : `exited ${outcome.code}`;
+      deps.log(`[ai] ${where}: screenshot capture failed (${why}) — continuing (best-effort review screenshot)`);
+      deps.markHealed?.(`screenshot capture failed (${why}) — skipped (best-effort)`);
+      return { status: 'ok' };
+    }
     if (isHealable(outcome)) {
       return { status: 'fail', where, reason: `unresolved after ${maxRepairs} repair attempt(s): ${outcome.error!.message.split('\n')[0]}` };
     }

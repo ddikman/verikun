@@ -232,6 +232,11 @@ a hard iteration cap and stop early if the screen stops changing.
 - An `ai` run records like any other flow, so it produces the same JUnit + HTML report —
   with the cost line and any **suggested test improvements** (workarounds the model
   applied, which you can fold back into the prose to stabilize the test and cut tokens).
+- **Review screenshots are inserted automatically.** The compiler adds `screenshot` steps
+  around transitions and inside loops, so the report carries a before/after visual trail
+  for post-run review. They are dumped for humans, never read back by the model (no token
+  cost on replay), and never gate the test — a capture that hiccups is logged and skipped,
+  not a failure.
 
 ## Suites — run a directory of tests
 
@@ -423,6 +428,13 @@ Resizing is a dependency-free, pure-Node PNG resample (box filter). PNGs it can'
 safely resample (palette, 16-bit, interlaced) are written through untouched, so a
 screenshot is never corrupted — only sometimes left full-size (noted on stderr).
 Failure-evidence captures in test-run reports stay full-resolution for debugging.
+
+**Read-back vs evidence.** The downscaling above matters when an agent *reads a
+screenshot back into its context* to decide the next action — that is the token cost to
+manage. A screenshot taken purely as **report evidence and never read back** costs nothing
+at runtime, so driving a flow to a report should capture liberally around transitions.
+`vk ai` does this automatically (see [AI](#ai--natural-language-tests)); when driving by
+hand, `vk screenshot` around each screen change and leave the PNG in the report.
 
 ## How it works
 
