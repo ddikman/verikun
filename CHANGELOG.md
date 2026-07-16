@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-15
+
+### Added
+- **Automatic review screenshots in `vk ai` / `vk suite`.** The compiler now inserts
+  `screenshot` steps around screen transitions and inside `if-present`/`repeat` bodies,
+  so the archived HTML/JUnit report carries a before/after visual trail for post-run
+  review. They are dumped for humans, never read back by the model (no token cost on
+  replay), and are best-effort — a capture that fails is logged and skipped, never a
+  test failure. Guidance for driving `vk` by hand is in SKILL.md / README (a screenshot
+  taken as report evidence and never read back is free — only *reading* an image into an
+  agent's context costs tokens).
+
+### Changed
+- `vk ai` / `vk suite` reports and JUnit now contain more `<testcase>` steps per run
+  (the auto-inserted screenshots), so step/testcase counts are higher than in 0.7.0.
+- The `vk ai` engine treats a `screenshot`/`shot` step that fails to capture as
+  best-effort: it logs the failure and continues instead of failing the run.
+
 ## [0.7.0] - 2026-07-14
 
 ### Added

@@ -52,7 +52,12 @@ RULES:
 - assert is for VERIFICATION only and is terminal — never use it as a step you expect to
   fail. Put genuinely-optional UI behind if-present.
 - Prefer resource-id / accessibility selectors over visible text where possible.
-- Translate the test literally and minimally; do not invent steps the prose does not imply.`;
+- Translate the test literally and minimally: do not invent ACTION steps (tap/text/swipe/key/assert)
+  the prose does not imply. The ONE exception is screenshot — insert screenshot steps liberally as
+  post-run review evidence: after each screen transition (launch, a navigation tap, a submit, a
+  swipe/scroll) AND inside if-present/repeat bodies, so a failing branch or loop iteration is visible
+  in the report. Screenshots never affect the result; err toward too many. They are dumped into the
+  report for humans and never read back, so they are free on replay.`;
 
 export const REPAIR_GRAMMAR = `A single step in a verikun plan failed to resolve its selector against the live screen
 (shown below). Decide between two outcomes — and be STRICT:

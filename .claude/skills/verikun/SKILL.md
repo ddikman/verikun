@@ -149,6 +149,14 @@ outweigh dozens of `vk ui` calls. When you do, `vk` already downscales the PNG
 (700px longest edge) so the read stays cheap while text remains legible — add
 `--more` if a screen is too coarse to read, or `--full` when you need exact detail.
 
+**Two uses of a screenshot — keep them apart.** The cost above is about *reading a
+screenshot back into context* to decide your next move; that is what to avoid (perceive
+and verify with the hierarchy instead). A screenshot taken purely as **report evidence
+and never read back** costs nothing at runtime. So when you drive a flow to produce a
+report, **do** `vk screenshot` around each significant transition (and before a risky or
+verification step) — then leave it in the report, don't read the PNG back. A visual trail
+makes post-run review far easier, and a failing step already auto-captures its own screen.
+
 **Remember identifiers across runs.** After a flow succeeds, save the selectors
 you found to memory — the mapping from human intent to selector, plus the screen
 and step order, e.g.:
@@ -222,6 +230,11 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   (`--json` for a structured summary). It records like any flow, so it ends with the
   same JUnit + HTML report — including the token/cost line and **suggested improvements**
   you can fold back into the English to stabilize the test and cut future tokens.
+- **Review screenshots are automatic.** The compiler sprinkles `screenshot` steps around
+  transitions (and inside loops) so the report shows a before/after visual trail for
+  post-run review — dumped, never read back by the model, so they add no token cost on
+  replay and never gate the test (a capture that hiccups is logged and skipped, not a
+  failure).
 - **Bounded by default:** the run aborts if the estimated spend crosses **$3**
   (`--max-cost-usd`) or the wall-clock passes **15m** (`--timeout`), so a runaway
   compile/repair loop can't spend or hang without limit.
@@ -287,8 +300,12 @@ starts, so unrelated sessions never merge into one report. A run you named with
 `vk run start` is sticky to idle (only a device/session change rolls it over).
 
 When the task is "run/verify flow X and give me a report", just drive the flow
-and end with `vk run archive` — the report *is* the deliverable. The archived
-`run.json` records which selector resolved each step, so it doubles as the
+and end with `vk run archive` — the report *is* the deliverable. **Drop a
+`vk screenshot` around each significant transition** (before/after a navigation tap,
+a submit, a screen change) so the report carries a visual trail for post-run review —
+these are write-only evidence, so don't read the PNGs back (see [Be frugal](#be-frugal-text-over-images-and-remember-identifiers)).
+A failing step already auto-captures its own screen + hierarchy on top of that. The
+archived `run.json` records which selector resolved each step, so it doubles as the
 identifier memory described above. Set `VERIKUN_NO_RUN=1` to disable recording.
 
 ## Exit codes — rely on these for control flow

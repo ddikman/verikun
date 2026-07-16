@@ -338,3 +338,33 @@ test('runPlan: a UI-dump failure during repair still attempts the repair with an
   assert.equal(r.ok, true);
   assert.equal(hierarchyLen, 0); // safeElements() returned [] instead of crashing the run
 });
+
+// --- best-effort review screenshots (a failed capture must never fail the run) ---
+
+test('runPlan: a review screenshot (or shot) that fails to capture does NOT fail the run', async () => {
+  // The vk ai grammar sprinkles screenshot steps around transitions; a screencap
+  // hiccup returns non-zero. It is best-effort evidence, so the run stays green and
+  // the model is never asked to "repair" a screenshot.
+  for (const cmd of ['screenshot', 'shot']) {
+    const { fn, calls } = execFrom([{ code: 3, error: new Error('screencap failed') }]);
+    const counter = { n: 0 };
+    let healed = 0;
+    const r = await runPlan(
+      plan(leaf(cmd)),
+      deps({ exec: fn, provider: fakeProvider(leaf('tap', ['@x']), counter), markHealed: () => healed++ }),
+    );
+    assert.equal(r.ok, true, `${cmd} should be best-effort`);
+    assert.equal(counter.n, 0); // never asks the model to repair a screenshot
+    assert.equal(calls.length, 1); // ran once, no retry
+    assert.equal(healed, 1); // the failed step is downgraded so the report stays clean
+  }
+});
+
+test('runPlan: the best-effort guard is scoped to screenshot — other commands still fail terminally', async () => {
+  // A launch that exits non-zero (env error, non-healable) must remain a terminal
+  // failure; the guard must not swallow every command's non-zero exit.
+  const { fn } = execFrom([{ code: 3, error: new Error('device offline') }]);
+  const r = await runPlan(plan(leaf('launch', ['com.example.app'])), deps({ exec: fn }));
+  assert.equal(r.ok, false);
+  assert.match(r.failure?.reason ?? '', /device offline/);
+});
