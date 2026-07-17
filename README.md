@@ -1,15 +1,12 @@
 # verikun
 
-Drive a connected Android device/emulator or iOS simulator the way
-Puppeteer drives a browser — **tap, type, swipe, screenshot**, and most
-importantly **inspect the UI hierarchy by semantic identifiers** so an AI agent
-can act and then *verify* what happened.
+> **Agent-driven, natural-language mobile tests — during agent development or in CI.** Self-healing and self-improving, with cost caps and test reports.
 
-It is a thin, deterministic, zero-runtime-dependency wrapper over `adb` (Android)
-and `idb` + `xcrun simctl` (iOS) that turns the raw `uiautomator` dump (Android)
-or `idb ui describe-all` accessibility tree (iOS) into a compact, token-efficient
-list of meaningful elements addressable by `resource-id` / accessibility id,
-visible text, accessibility label, or class.
+- **Agent CLI** — `vk <command>`: one-shot commands to inspect the screen as a semantic tree (or screenshot) and act on it.
+- **Puppeteer for native mobile** — a thin wrapper over native Android and iOS automation runners with zero runtime dependencies.
+- **Natural-language tests** — `vk ai <file>`: runs plain-English tests, compiled once and replayed model-free (~$0), calling a model only to self-heal a drifted step.
+- **Self-improving** — the agent runner will provide prescriptive improvements to existing scripts to help stabilise flakiness for future runs.
+- **CI-ready** — `vk suite` runs a folder of tests as one gated pass/fail run; `vk server` exposes a real device over an authenticated tunnel so a disposable CI runner (no phone attached) can still drive it.
 
 ```
 $ vk ui
@@ -22,6 +19,12 @@ $ vk ui
 $ vk tap @sign_in_btn
 tapped [3] Button "Sign in" @sign_in_btn (540,1020) tap
 ```
+
+## Skill/plugin instead of MCP
+
+verikun ships as a skill and plugin, not an MCP server, and that is deliberate. A skill lets us **guide the agent on how to use verikun** — when to inspect the hierarchy, what to assert, which command fits the step, and how to read the result back. That domain knowledge travels with the tool, so the agent drives the device *well*, not just correctly.
+
+There is also no need for an MCP here: verikun runs locally with all its dependencies, and the agent calls it through the plain `vk` CLI — no shared session, data, or authentication to broker.
 
 ## Install
 
