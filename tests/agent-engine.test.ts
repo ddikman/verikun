@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { runPlan, EngineDeps, ExecFn, ExecOutcome } from '../src/agent/engine';
-import { Plan, PlanNode, LeafStep } from '../src/agent/ir';
+import { Plan, PlanNode, LeafStep, IfPresentNode, RepeatNode } from '../src/agent/ir';
 import { SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
 import { CostTracker } from '../src/agent/cost';
 import { AgentProvider } from '../src/agent/provider';
@@ -249,6 +249,38 @@ test('runPlan: repeat stops as soon as the target selector is present', async ()
   );
   assert.equal(r.ok, true);
   assert.equal(calls.n, 0); // guard met before any body run
+});
+
+// --- control-body heal persistence (regression for #18) --------------------
+// A heal applied to a leaf INSIDE an if-present/repeat body must be spliced back
+// into the plan object exactly like a top-level heal (see "a selector MISS heals"
+// above), so it persists on green via writePlan(result.plan). Guards against the
+// "vk ai doesn't persist repeat-body heals" misdiagnosis in #18 — where the
+// recurring heal was actually a flaky selector re-missing, not a dropped repair.
+
+test('runPlan: a heal inside an if-present body is spliced into the persisted plan (#18)', async () => {
+  const { fn } = execFrom([{ code: 1, error: new SelectorNotFoundError('miss') }, { code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'if-present', selector: 'text:Go', body: [leaf('tap', ['@login'])] }),
+    deps({ exec: fn, getElements: () => [makeEl({ text: 'Go' })], provider: fakeProvider(leaf('tap', ['@signin'])) }),
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.modelRepairs, 1);
+  // the repaired BODY leaf is written back into the control node (what gets persisted on green)
+  assert.equal((r.plan.steps[0] as IfPresentNode).body[0].positionals[0], '@signin');
+});
+
+test('runPlan: a heal inside a repeat body is spliced into the persisted plan (#18)', async () => {
+  const { fn } = execFrom([{ code: 1, error: new SelectorNotFoundError('miss') }, { code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:Done', cap: 5, body: [leaf('tap', ['@login'])] }),
+    // constant screen that never matches 'text:Done': iteration 0 runs the body (which heals),
+    // iteration 1 exits on no-progress — the heal is already spliced into node.body by then.
+    deps({ exec: fn, getElements: () => [makeEl({ text: 'row' })], provider: fakeProvider(leaf('tap', ['@signin'])) }),
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.modelRepairs, 1);
+  assert.equal((r.plan.steps[0] as RepeatNode).body[0].positionals[0], '@signin');
 });
 
 // --- budget ----------------------------------------------------------------
