@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-21
+
+### Added
+- **`vk ai --model codex-cli` — drive the compiler/repair off a logged-in `codex` CLI, no
+  API key.** A third provider backend (`CliProvider`, `src/agent/cli-provider.ts`) shells out
+  to an already-authenticated coding-agent CLI instead of calling an HTTP API, so anyone with
+  a ChatGPT subscription and `codex login` can run `vk ai` / `vk suite` without setting
+  `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. It runs `codex exec` read-only in a neutral temp
+  dir (never touching the working tree) and uses codex's native `--output-schema` to constrain
+  the plan JSON; `parsePlan`/`validateNode` remains the trust boundary regardless of provider.
+  The provider seam (`AgentProvider`) and the shared prompt/grammar are unchanged — it's one
+  more class behind the same `providerFor(model)` routing. (The `cursor-cli` backend will stack
+  on the same class next.)
+
+### Changed
+- Provider availability is now per-provider: HTTP providers still need their API key in the
+  environment, while a CLI provider (`codex-cli`) is available when its binary is on PATH. The
+  `vk ai`/`vk suite` preflight errors reflect this (e.g. "the `codex` CLI was not found on PATH
+  — run `codex login`") instead of only naming an env var.
+- For `codex-cli`, spend is billed to the user's subscription rather than per token, so cost is
+  reported as `$0` and `--max-cost-usd` / `--cost-override` are inert no-ops; a run is bounded
+  by `maxRepairs` and `--timeout` instead. Plans stay provider-agnostic in the cache, so a plan
+  compiled by any model replays for free under `--model codex-cli` (use `--recompile` to force
+  a fresh compile when comparing providers).
+
 ## [0.8.1] - 2026-07-21
 
 ### Changed
