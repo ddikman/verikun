@@ -218,10 +218,16 @@ vk ai onboarding.md --max-cost-usd 0.50 # tighten the spend cap (default $3)
 vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
 ```
 
-- Needs `ANTHROPIC_API_KEY` (Claude models) or `OPENAI_API_KEY` (OpenAI models). Default
+- Needs `ANTHROPIC_API_KEY` (Claude models) or `OPENAI_API_KEY` (OpenAI models) — **or no key
+  at all** with `--model codex-cli`, which drives an already-logged-in `codex` CLI off your
+  ChatGPT subscription (run `codex login` once; verikun just needs the binary on PATH). Default
   model `claude-sonnet-4-6`; `--model` switches model **and** provider — Anthropic
-  (`claude-haiku-4-5` · `claude-sonnet-4-6` · `claude-opus-4-8` · `claude-fable-5`) or
-  OpenAI (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5`).
+  (`claude-haiku-4-5` · `claude-sonnet-4-6` · `claude-opus-4-8` · `claude-fable-5`),
+  OpenAI (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5`), or the CLI backend (`codex-cli`).
+- For `codex-cli`, spend is on your subscription, not per token, so the cost line reads `$0`
+  and `--max-cost-usd` / `--cost-override` are no-ops (the run is still bounded by repairs +
+  `--timeout`). Plans are provider-agnostic, so one compiled by any model replays for free
+  under `codex-cli`; use `--recompile` to force a fresh compile when comparing providers.
 - The plan expresses **conditions** (`if-present`, for optional interstitials like a
   permission dialog) and **bounded loops** (`repeat … until`, e.g. scroll-until) —
   control flow `vk batch` cannot, so a flaky popup or a scroll-to-find no longer breaks
@@ -239,7 +245,8 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   (`--max-cost-usd`) or the wall-clock passes **15m** (`--timeout`), so a runaway
   compile/repair loop can't spend or hang without limit.
 - Exit `0` pass · `1` a step failed (or the budget/timeout was hit) · `2` usage · `3` environment
-  (e.g. the model's API key — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — unset).
+  (e.g. the model's API key — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — unset, or the `codex`
+  CLI missing / not logged in for `--model codex-cli`).
 
 ## Run a suite of tests (vk suite)
 

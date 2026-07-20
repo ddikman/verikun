@@ -22,9 +22,10 @@ export interface Price {
   output: number;
 }
 
-/** Which backend serves a --model. The one v1 seam has two implementations —
- *  ClaudeProvider (claude.ts) and OpenAiProvider (openai.ts); cmdAi routes on this. */
-export type ProviderId = 'anthropic' | 'openai';
+/** Which backend serves a --model. HTTP providers read an API key from env — ClaudeProvider
+ *  (claude.ts) and OpenAiProvider (openai.ts); CLI providers shell out to an already-logged-in
+ *  agent CLI — CliProvider (cli-provider.ts), e.g. 'codex'. cmdAi routes on this. */
+export type ProviderId = 'anthropic' | 'openai' | 'codex';
 
 interface ModelSpec extends Price {
   provider: ProviderId;
@@ -44,6 +45,11 @@ const MODELS: Record<string, ModelSpec> = {
   'gpt-5.4-mini': { input: 0.75, output: 4.5, provider: 'openai' },
   'gpt-5.4': { input: 2.5, output: 15, provider: 'openai' },
   'gpt-5.5': { input: 5, output: 30, provider: 'openai' },
+  // CLI-agent backend: billed to the user's ChatGPT subscription via the `codex` CLI, not per
+  // token — so price is $0 and --max-cost-usd/--cost-override are inert no-ops (the run is
+  // bounded by maxRepairs + --timeout instead). Named `codex-cli` to read clearly as "the CLI"
+  // and to avoid colliding with cursor's own `gpt-5.x-codex` model aliases.
+  'codex-cli': { input: 0, output: 0, provider: 'codex' },
 };
 
 export const MODEL_PRICES: Record<string, Price> = Object.fromEntries(
