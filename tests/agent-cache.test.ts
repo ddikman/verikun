@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planKey, readPlan, writePlan, findSeed, nlHash } from '../src/agent/cache';
-import { Plan } from '../src/agent/ir';
+import { Plan, RepeatNode } from '../src/agent/ir';
 
 // The cache writes under ./.verikun (cwd-relative), so each test runs inside a
 // throwaway temp dir. node:test runs a file's tests sequentially, so chdir is safe.
@@ -44,6 +44,31 @@ test('readPlan: a miss returns null; write then read returns the plan', () => {
   assert.ok(got);
   assert.equal(got!.plan.steps.length, 1);
   assert.equal(got!.nlHash, nlHash('x'));
+});
+
+test('readPlan: a repeat-body leaf survives the write→read round-trip (control-body persistence, #18)', () => {
+  const key = { nl: 'ctrl', pkg: 'com.x', build: '1', platform: 'android' };
+  const withBody: Plan = {
+    version: 1,
+    package: 'com.x',
+    platform: 'android',
+    steps: [
+      {
+        type: 'repeat',
+        selector: 'text:Done',
+        cap: 5,
+        body: [{ type: 'command', command: 'tap', positionals: ['@signin'], flags: [] }],
+      },
+    ],
+  };
+  writePlan(key, withBody);
+  const got = readPlan(key);
+  assert.ok(got);
+  const step0 = got!.plan.steps[0];
+  assert.equal(step0.type, 'repeat');
+  // the nested body leaf (what a heal rewrites) must round-trip intact — not dropped by
+  // writePlan's serialization nor by parsePlan's re-validation on read
+  assert.equal((step0 as RepeatNode).body[0].positionals[0], '@signin');
 });
 
 test('readPlan: a plan compiled by a different verikun/grammar is invalidated (forces recompile)', () => {
