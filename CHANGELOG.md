@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-21
+
+### Changed
+- `vk devices` now prints an aligned, headed table — a header row plus columns that
+  line up across Android/iOS rows, with empty optional columns (MODEL/PRODUCT/NOTE)
+  omitted. Previously rows were tab-joined and dropped empty cells, so a device
+  missing a model/product slid its remaining cells out of alignment. `--json` output
+  is unchanged.
+
 ## [0.8.0] - 2026-07-15
 
 ### Added

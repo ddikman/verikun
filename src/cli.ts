@@ -180,14 +180,35 @@ function cmdDevices(ctx: Ctx): number {
     err('No devices found.');
     return 0;
   }
-  for (const d of allDevices) {
-    out(
-      [d.platform, d.serial, d.state, d.model ?? '', d.product ? `(${d.product})` : '', d.note ? `[${d.note}]` : '']
-        .filter(Boolean)
-        .join('\t'),
-    );
-  }
+  for (const line of formatDeviceTable(allDevices)) out(line);
   return 0;
+}
+
+/**
+ * Render the device list as an aligned, headed table (header line first, then one
+ * line per device). Optional columns (MODEL/PRODUCT/NOTE) are dropped when no device
+ * populates them; every shown cell is padded to its column width so columns line up
+ * regardless of which cells are empty — the previous `.filter(Boolean).join('\t')`
+ * dropped empty cells, sliding later cells into earlier tab stops. Exported for unit
+ * testing.
+ */
+export function formatDeviceTable(devices: DeviceInfo[]): string[] {
+  const columns: Array<{ header: string; get: (d: DeviceInfo) => string; optional?: boolean }> = [
+    { header: 'PLATFORM', get: (d) => d.platform },
+    { header: 'SERIAL', get: (d) => d.serial },
+    { header: 'STATE', get: (d) => d.state },
+    { header: 'MODEL', get: (d) => d.model ?? '', optional: true },
+    { header: 'PRODUCT', get: (d) => d.product ?? '', optional: true },
+    { header: 'NOTE', get: (d) => d.note ?? '', optional: true },
+  ];
+  // Drop optional columns that no device populates (e.g. NOTE for an Android-only list).
+  const shown = columns.filter((c) => !c.optional || devices.some((d) => c.get(d) !== ''));
+  const rows = [shown.map((c) => c.header), ...devices.map((d) => shown.map((c) => c.get(d)))];
+  const widths = shown.map((_, i) => Math.max(...rows.map((r) => r[i].length)));
+  // Pad every cell except the last shown column (no trailing whitespace); join with 2 spaces.
+  return rows.map((r) =>
+    r.map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]))).join('  ').trimEnd(),
+  );
 }
 
 function cmdDoctor(ctx: Ctx): number {
