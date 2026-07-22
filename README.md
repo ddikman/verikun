@@ -47,6 +47,16 @@ This repo doubles as a Claude Code [plugin marketplace](https://code.claude.com/
 
 The plugin ships the **skill**; the `vk` **CLI** is a separate Node package — install it with `npm install -g verikun` (see [Install](#install) above) so `vk` lands on your `PATH`. The compiled `dist/` is gitignored, so it isn't bundled into the installed plugin.
 
+### Install the skill for other agents (Cursor, Copilot, Windsurf, …)
+
+Not using Claude Code? The skill is a plain [`SKILL.md`](.claude/skills/verikun/SKILL.md) with `name`/`description` frontmatter, so [`vercel-labs/skills`](https://github.com/vercel-labs/skills) can install it into any of the 70+ agents it supports. Install the `vk` CLI (see [Install](#install) above), then pull the skill straight from this repo:
+
+```sh
+npx skills add ddikman/verikun --skill verikun    # pick your agent when prompted
+```
+
+Add `--agent cursor` (or `windsurf`, `github-copilot`, `opencode`, …) to target one directly, and `-g` to install it globally instead of into the current project. As with the plugin, this installs the **skill** only — the `vk` **CLI** still comes from `npm install -g verikun`.
+
 ## Quick start
 
 ```sh

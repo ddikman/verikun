@@ -10,6 +10,8 @@ description: >-
   entry. Produces a short summary that leads with
   intent, bans filler openers and file-by-file narration, and points the reviewer at the
   real risk areas. Does not publish (mark ready for review) unless explicitly asked.
+metadata:
+  internal: true
 ---
 
 # Create PR
