@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, SelectorNotFoundError } from './errors';
-import { runText } from './exec';
+import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver } from './drivers';
 import { Driver, DeviceInfo, Element, Platform, Point } from './types';
 import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
@@ -13,6 +13,7 @@ import { downscalePng } from './image';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS } from './agent/engine';
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
+import { CliProvider, CODEX_SPEC } from './agent/cli-provider';
 import { AgentProvider } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price } from './agent/cost';
@@ -995,20 +996,47 @@ function readAiTest(file: string): string {
   return nl;
 }
 
-/** The env var carrying the API key for a model's provider (per-provider keys). */
-function keyEnvFor(model: string): string {
-  return providerFor(model) === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+/** Is the backend for `model` usable right now? HTTP providers need their API key in env;
+ *  a CLI provider needs its binary on PATH (auth lives in the CLI's own login, not an env key). */
+function providerAvailable(model: string): boolean {
+  switch (providerFor(model)) {
+    case 'openai':
+      return !!process.env.OPENAI_API_KEY;
+    case 'codex':
+      return commandExists(CODEX_SPEC.bin);
+    default:
+      return !!process.env.ANTHROPIC_API_KEY;
+  }
 }
 
-/** Route the model to its backend; each provider reads its own key. A missing key
- *  means no provider (compile/repair unavailable) — the same graceful degradation
- *  as before. */
+/** What's missing when a provider is unavailable — the tail of the preflight error message. */
+function providerRequirement(model: string): string {
+  switch (providerFor(model)) {
+    case 'openai':
+      return 'OPENAI_API_KEY is not set';
+    case 'codex':
+      return `the \`${CODEX_SPEC.bin}\` CLI was not found on PATH — install it and run \`codex login\` (ChatGPT subscription, no API key)`;
+    default:
+      return 'ANTHROPIC_API_KEY is not set';
+  }
+}
+
+/** Route the model to its backend. HTTP providers read their own key; a CLI provider shells
+ *  out to its logged-in binary. Unavailable → null (compile/repair off), the same graceful
+ *  degradation as before: a cached plan can still replay for free without any provider. */
 function makeProvider(opts: AiOptions): AgentProvider | null {
-  const apiKey = process.env[keyEnvFor(opts.model)];
-  if (!apiKey) return null;
-  return providerFor(opts.model) === 'openai'
-    ? new OpenAiProvider({ model: opts.model, apiKey, effort: opts.effort })
-    : new ClaudeProvider({ model: opts.model, apiKey, effort: opts.effort });
+  switch (providerFor(opts.model)) {
+    case 'openai': {
+      const apiKey = process.env.OPENAI_API_KEY;
+      return apiKey ? new OpenAiProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
+    }
+    case 'codex':
+      return commandExists(CODEX_SPEC.bin) ? new CliProvider({ spec: CODEX_SPEC }) : null;
+    default: {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      return apiKey ? new ClaudeProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
+    }
+  }
 }
 
 /** Obtain the plan: a cache hit (free) or a compile (pays tokens; may seed from a
@@ -1028,7 +1056,7 @@ async function obtainPlan(
     return { plan: cached.plan, cached: true };
   }
   if (!provider) {
-    throw new CliError(`${keyEnvFor(opts.model)} is not set — \`vk ai\` needs it to compile the test (model ${opts.model}). Set it and retry.`, 3);
+    throw new CliError(`${providerRequirement(opts.model)} — needed to compile the test (model ${opts.model}).`, 3);
   }
   const seed = findSeed(key);
   if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
@@ -1123,7 +1151,7 @@ async function runAiTest(
 
   // Running needs the provider for repair-on-failure; a cache hit with no key can't repair.
   if (!provider) {
-    throw new CliError(`${keyEnvFor(opts.model)} is not set — \`vk ai\` needs it to repair a failing step at runtime (model ${opts.model}).`, 3);
+    throw new CliError(`${providerRequirement(opts.model)} — needed to repair a failing step at runtime (model ${opts.model}).`, 3);
   }
 
   // The budget is a TOTAL-run ceiling: if the compile alone already crossed it, abort
@@ -1310,10 +1338,10 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
   const dirArg = positionals[0];
   if (!dirArg) throw new CliError('Usage: verikun suite <dir> [--app <id>] [--server url] [--name n] [--json]', 2);
   const opts = parseAiOptions(flags);
-  // Pre-flight the model key BEFORE touching any device/server: every test needs it
+  // Pre-flight the provider BEFORE touching any device/server: every test needs it
   // to compile (on a cache miss) or to repair at runtime.
-  if (!process.env[keyEnvFor(opts.model)]) {
-    throw new CliError(`${keyEnvFor(opts.model)} is not set — \`vk suite\` needs it to compile/repair tests (model ${opts.model}).`, 3);
+  if (!providerAvailable(opts.model)) {
+    throw new CliError(`${providerRequirement(opts.model)} — needed to compile/repair tests (model ${opts.model}).`, 3);
   }
   const reqPlatform = platformFromFlags(flags);
   const { backend, platform, device } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
@@ -1618,13 +1646,16 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       path. The model is woken only to repair a step
                                       that fails to resolve; a green run persists the
                                       (repaired) plan so the next run is free. Needs
-                                      ANTHROPIC_API_KEY (Claude) or OPENAI_API_KEY
-                                      (gpt-5.x). Progress -> stderr; the report path ->
+                                      ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (gpt-5.x),
+                                      or a logged-in agent CLI (--model codex-cli uses your
+                                      'codex login' ChatGPT subscription — no API key; cost
+                                      is $0 so --max-cost-usd/--cost-override are no-ops).
+                                      Progress -> stderr; the report path ->
                                       stdout. --show-plan prints the compiled IR without
                                       running; --recompile ignores the cache.
                                       Models: claude-haiku-4-5 | claude-sonnet-4-6
                                       (default) | claude-opus-4-8 | claude-fable-5 |
-                                      gpt-5.4-mini | gpt-5.4 | gpt-5.5.
+                                      gpt-5.4-mini | gpt-5.4 | gpt-5.5 | codex-cli.
 
 SUITE (run a directory of natural-language tests as one gated suite)
   suite <dir> [--app <id>] [--name n] [--json]  (+ all \`ai\` flags, incl. --server)

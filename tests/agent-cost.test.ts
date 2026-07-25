@@ -17,7 +17,19 @@ test('providerFor: routes known models to their backend, unknown falls back to a
   assert.equal(providerFor('gpt-5.4'), 'openai');
   assert.equal(providerFor('gpt-5.4-mini'), 'openai');
   assert.equal(providerFor('claude-opus-4-8'), 'anthropic');
+  assert.equal(providerFor('codex-cli'), 'codex');
   assert.equal(providerFor('nonexistent-model'), 'anthropic');
+});
+
+test('codex-cli: allowed, resolves, and is priced $0 (billed to the subscription)', () => {
+  assert.ok(ALLOWED_MODELS.includes('codex-cli'));
+  assert.equal(resolveModel('codex-cli'), 'codex-cli');
+  assert.deepEqual(priceFor('codex-cli'), { input: 0, output: 0 });
+  // $0 price ⇒ any usage estimates to $0 ⇒ the budget gate can never trip for a CLI provider.
+  const t = new CostTracker(priceFor('codex-cli'), 3);
+  t.add({ input_tokens: 9_000_000, output_tokens: 9_000_000 }, 'compile');
+  assert.equal(t.usd(), 0);
+  assert.equal(t.exceeded(), false);
 });
 
 test('registry: every allowed model has a price', () => {
