@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { runPlan, EngineDeps, ExecFn, ExecOutcome } from '../src/agent/engine';
 import { Plan, PlanNode, LeafStep, IfPresentNode, RepeatNode } from '../src/agent/ir';
-import { SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, envError } from '../src/errors';
 import { CostTracker } from '../src/agent/cost';
 import { AgentProvider } from '../src/agent/provider';
 import { makeEl, asLeaf } from './helpers';
@@ -679,6 +679,119 @@ test('runPlan: the best-effort guard is scoped to screenshot — other commands 
   const r = await runPlan(plan(leaf('launch', ['com.example.app'])), deps({ exec: fn }));
   assert.equal(r.ok, false);
   assert.match(r.failure?.reason ?? '', /device offline/);
+  assert.equal(r.abortedForEnv, true); // code 3 is environment, not a regression
+});
+
+// --- environment aborts (the box is broken, not the app) -------------------
+
+test('runPlan: an exit-3 CliError aborts for ENV and never wakes the model', async () => {
+  const { fn, calls } = execFrom([{ code: 3, error: envError("'idb' was not found on PATH.") }]);
+  const counter = { n: 0 };
+  const r = await runPlan(
+    plan(leaf('wait', ['text:Start'])),
+    deps({ exec: fn, provider: fakeProvider(leaf('tap', ['@x']), counter) }),
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForEnv, true);
+  assert.equal(counter.n, 0); // an env error is not healable — never ask the model
+  assert.equal(calls.length, 1); // and never retried
+  // `failure` stays populated alongside the flag: the suite row reads it, and callers
+  // that only know about `failure` keep working unchanged.
+  assert.equal(r.failure?.where, 'steps[0]');
+  assert.match(r.failure?.reason ?? '', /idb/);
+});
+
+test('runPlan: an assertion failure is NOT an env abort (it is a real regression)', async () => {
+  // `assert` RETURNS exit 1 without throwing — the one failure that must stay red.
+  const { fn } = execFrom([{ code: 1 }]);
+  const r = await runPlan(plan(leaf('assert', ['text:Home'])), deps({ exec: fn }));
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForEnv, undefined);
+  assert.equal(r.failure?.where, 'steps[0]');
+});
+
+test('runPlan: an env error inside an if-present body aborts the run', async () => {
+  const { fn } = execFrom([{ code: 3, error: envError('device offline') }]);
+  const r = await runPlan(
+    plan({ type: 'if-present', selector: 'text:Go', body: [leaf('tap', ['@go'])] }),
+    deps({ exec: fn, getElements: () => [makeEl({ text: 'Go' })] }),
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForEnv, true);
+});
+
+test('runPlan: an if-present guard that cannot READ the screen aborts — never a false green', async () => {
+  // The bug this guards: with a broken toolchain every getElements() throws, so a
+  // guard would read "absent" and skip its body. A guard-heavy plan would then finish
+  // FULLY GREEN having executed nothing at all.
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'if-present', selector: 'text:Go', body: [leaf('tap', ['@go'])] }),
+    deps({
+      exec: fn,
+      getElements: () => {
+        throw envError("'idb' was not found on PATH.");
+      },
+    }),
+  );
+  assert.equal(r.ok, false, 'must not pass while blind');
+  assert.equal(r.abortedForEnv, true);
+  assert.equal(calls.length, 0); // the body never ran
+  assert.match(r.failure?.reason ?? '', /could not read the screen/);
+});
+
+test('runPlan: a ONE-OFF dump failure at a guard is absorbed by the retry, not an abort', async () => {
+  // This is where the transient tolerance actually lives. Every real dump failure is an
+  // exit-3 CliError, so it cannot be "tolerated" by classification — only by the second
+  // attempt succeeding. A flaky uiautomator dump must not abort the run.
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  let n = 0;
+  const r = await runPlan(
+    plan({ type: 'if-present', selector: 'text:Go', body: [leaf('tap', ['@go'])] }),
+    deps({
+      exec: fn,
+      getElements: () => {
+        if (++n === 1) throw envError('uiautomator dump failed');
+        return [makeEl({ text: 'Go' })];
+      },
+    }),
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.abortedForEnv, undefined);
+  assert.equal(calls.length, 1, 'the guard resolved on retry and the body ran');
+});
+
+test('runPlan: a non-CliError dump failure at a guard still reads as absent', async () => {
+  // Defensive: nothing in the drivers produces this today (all dump failures are exit-3
+  // CliErrors), but a plain throw must degrade to "absent", never to a bogus env abort.
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'if-present', selector: 'text:Go', body: [leaf('tap', ['@go'])] }),
+    deps({
+      exec: fn,
+      getElements: () => {
+        throw new Error('dump failed');
+      },
+    }),
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.abortedForEnv, undefined);
+  assert.equal(calls.length, 0);
+});
+
+test('runPlan: a repeat guard that cannot READ the screen aborts too', async () => {
+  const { fn } = execFrom([{ code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:End', cap: 5, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      getElements: () => {
+        throw envError('device offline');
+      },
+    }),
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForEnv, true);
 });
 
 test('runPlan: an EMPTY dump is a bad read, not "absent" — re-read even at settleMs 0', async () => {

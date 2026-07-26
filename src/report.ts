@@ -233,6 +233,14 @@ export interface SuiteRun {
   verikun: string;
   totals: SuiteTotals;
   tests: SuiteTestResult[];
+  /**
+   * Set only when the suite STOPPED EARLY because the device environment broke
+   * mid-run (exit 3 — tool gone, device unplugged, server unreachable) and a re-probe
+   * confirmed it. The `notRun` files have NO rows in `tests`, and `totals` counts only
+   * what actually ran — deliberately, so `passed + failed === tests` still holds and a
+   * dashboard never reports a not-run test as a regression.
+   */
+  aborted?: { reason: string; notRun: string[] };
 }
 
 export interface SuiteTotals {
@@ -268,6 +276,9 @@ const SUITE_STYLE = `
   table.tests td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
   table.tests a { color:inherit; }
   .fail-reason { color:var(--fail); font-size:12px; margin-top:2px; }
+  .aborted { background:#fff4e5; border:1px solid #f0b429; border-radius:8px; padding:12px 14px; margin:0 0 14px; font-size:13px; }
+  .aborted strong { color:#8a5300; }
+  .aborted ul { margin:6px 0 0; padding-left:20px; color:var(--muted); }
 `;
 
 function suiteTestRow(t: SuiteTestResult, linkBase: string): string {
@@ -297,10 +308,25 @@ export function toSuiteHtml(suite: SuiteRun, opts: { linkBase?: string } = {}): 
   const chips = [
     `<span class="chip pass">${t.passed} passed</span>`,
     t.failed ? `<span class="chip fail">${t.failed} failed</span>` : '',
+    suite.aborted ? `<span class="chip fail">ABORTED</span>` : '',
     `<span class="chip muted">${t.tests} tests &middot; ${t.steps} steps &middot; ${fmtDuration(t.durationMs)} &middot; $${t.costUsd.toFixed(4)}</span>`,
   ]
     .filter(Boolean)
     .join('\n      ');
+
+  // The banner, not a table row per skipped file: a not-run test is not a result, and
+  // faking a FAIL row for one would be the very "phantom regression" this prevents.
+  const abortedBanner = suite.aborted
+    ? `  <div class="aborted">
+    <strong>Suite aborted — the device environment broke mid-run.</strong>
+    <div>${htmlEsc(suite.aborted.reason)}</div>
+${
+  suite.aborted.notRun.length
+    ? `    <ul>${suite.aborted.notRun.map((f) => `<li>${htmlEsc(f)} — not run</li>`).join('')}</ul>\n`
+    : ''
+}  </div>
+`
+    : '';
 
   const metaBits = [
     `<code>${htmlEsc(suite.id)}</code>`,
@@ -325,7 +351,7 @@ export function toSuiteHtml(suite: SuiteRun, opts: { linkBase?: string } = {}): 
   <div class="summary">
       ${chips}
   </div>
-  <table class="tests">
+${abortedBanner}  <table class="tests">
     <thead><tr><th></th><th>Test</th><th>Steps</th><th>Repairs</th><th>Cost</th><th>Duration</th></tr></thead>
     <tbody>
 ${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}

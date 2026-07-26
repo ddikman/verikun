@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { describeError, rebuildError } from '../src/rpc';
-import { CliError, SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
+import { CliError, SelectorNotFoundError, AmbiguousSelectorError, isEnvError, envError } from '../src/errors';
 import { makeEl } from './helpers';
 
 // The error codec is what lets the `vk ai` engine keep its heal-vs-terminal
@@ -44,6 +44,14 @@ test('rpc codec: a plain CliError keeps its exact exit code', () => {
     assert.ok(!(rebuilt instanceof AmbiguousSelectorError), 'must not upgrade to a heal trigger');
     assert.equal((rebuilt as CliError).exitCode, code);
   }
+});
+
+test('rpc codec: an env error is still classified as env after the round-trip', () => {
+  // The remote path must reach the SAME abort decision as local: `vk suite --server`
+  // relies on this to stop when the server's device disappears.
+  const rebuilt = rebuildError(wire(describeError(envError("'idb' was not found on PATH."))));
+  assert.equal(isEnvError(rebuilt), true);
+  assert.equal(isEnvError(rebuildError(wire(describeError(new SelectorNotFoundError('miss'))))), false);
 });
 
 test('rpc codec: a non-CliError throw maps to a plain Error (exit 3 semantics)', () => {

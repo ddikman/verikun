@@ -5,7 +5,7 @@
 //   2  usage error or ambiguous selector (caller must refine)
 //   3  environment error (adb/simctl missing, no/multiple devices, dump failed)
 
-import type { Element } from './types';
+import type { Element, ToolProbe } from './types';
 
 export class CliError extends Error {
   constructor(
@@ -20,6 +20,21 @@ export class CliError extends Error {
 export const usageError = (m: string) => new CliError(m, 2);
 export const notFound = (m: string) => new CliError(m, 1);
 export const envError = (m: string) => new CliError(m, 3);
+
+/**
+ * An environment failure (exit 3): a tool missing from PATH, no/ambiguous device, a
+ * hierarchy dump or capture that failed. The one predicate every layer shares to tell
+ * "the box is broken" from "the app is broken" — the agent runner aborts on it instead
+ * of recording a regression, and `vk suite` stops rather than reporting N phantom
+ * failures. Accepts `unknown` so `catch (e)` blocks can pass their binding directly.
+ */
+export function isEnvError(e: unknown): boolean {
+  return e instanceof CliError && e.exitCode === 3;
+}
+
+/** Turn a failed tool probe into the environment error both drivers' preflight throws,
+ *  so the install hint reads the same whether it came from `vk doctor` or a preflight. */
+export const probeFailure = (p: ToolProbe): CliError => envError(`${p.detail}${p.hint ? `\n  ${p.hint}` : ''}`);
 
 // --- Selector-resolution errors (heal triggers for the agent runner) --------
 //

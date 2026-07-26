@@ -87,3 +87,43 @@ test('toSuiteHtml: escapes HTML in names and failure text', () => {
   assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;'));
   assert.ok(html.includes('saw &lt;hierarchy&gt; &amp; stuff'));
 });
+
+// --- aborted suites (the environment broke mid-run) -------------------------
+
+test('toSuiteIndexJson: an aborted suite carries reason + notRun, still schemaVersion 1', () => {
+  // Purely additive: a reader that only knows `tests`/`totals` is unaffected, which is
+  // why the schema version does not move.
+  const s = { ...suite([result()]), aborted: { reason: "'idb' was not found on PATH.", notRun: ['02-x.md', '03-y.md'] } };
+  const parsed = JSON.parse(toSuiteIndexJson(s)) as SuiteRun;
+  assert.equal(parsed.schemaVersion, 1);
+  assert.deepEqual(parsed.aborted?.notRun, ['02-x.md', '03-y.md']);
+  assert.match(parsed.aborted?.reason ?? '', /idb/);
+  // Not-run tests are NOT rows and NOT counted — passed + failed === tests must hold,
+  // or every dashboard's arithmetic breaks and reports phantom regressions.
+  assert.equal(parsed.tests.length, 1);
+  assert.equal(parsed.totals.tests, 1);
+  assert.equal(parsed.totals.passed + parsed.totals.failed, parsed.totals.tests);
+});
+
+test('toSuiteHtml: an aborted suite renders a banner listing the not-run tests', () => {
+  const s = { ...suite([result()]), aborted: { reason: 'device disconnected', notRun: ['02-x.md'] } };
+  const html = toSuiteHtml(s);
+  assert.ok(html.includes('Suite aborted'), 'banner');
+  assert.ok(html.includes('device disconnected'), 'reason');
+  assert.ok(html.includes('02-x.md — not run'), 'the skipped test is named, not faked as a FAIL row');
+  assert.ok(html.includes('ABORTED'), 'summary chip');
+});
+
+test('toSuiteHtml: the abort banner escapes its reason and filenames', () => {
+  const s = { ...suite([result()]), aborted: { reason: 'saw <tag> & more', notRun: ['<evil>.md'] } };
+  const html = toSuiteHtml(s);
+  assert.ok(html.includes('saw &lt;tag&gt; &amp; more'));
+  assert.ok(html.includes('&lt;evil&gt;.md'));
+  assert.ok(!html.includes('<evil>.md'));
+});
+
+test('toSuiteHtml: a normal suite has no abort banner', () => {
+  const html = toSuiteHtml(suite([result()]));
+  assert.ok(!html.includes('Suite aborted'));
+  assert.ok(!html.includes('ABORTED'));
+});

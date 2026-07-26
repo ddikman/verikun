@@ -61,11 +61,38 @@ export interface DeviceInfo {
 }
 
 /**
+ * The result of probing one external CLI a driver depends on (`adb`, `xcrun`, `idb`).
+ * Shared by `vk doctor` — which renders every probe and keeps going — and by
+ * `Driver.preflight()`, which throws on the first failure.
+ */
+export interface ToolProbe {
+  /** Display name, e.g. "adb". */
+  name: string;
+  ok: boolean;
+  /** On success, a short version/status line worth showing; on failure, the error message. */
+  detail: string;
+  /** Install/repair hint, shown only on failure. */
+  hint?: string;
+}
+
+/**
  * A platform backend. Android is implemented via `adb`; iOS via `simctl`
  * (screenshots today) and `idb` (interaction — planned).
  */
 export interface Driver {
   readonly platform: Platform;
+  /**
+   * Verify this driver's toolchain can actually drive the target: throws
+   * `CliError(…, 3)` (with an install hint) on the FIRST missing or unrunnable tool,
+   * and `CliError(…, 2)` when the device is ambiguous. Cheap — at most a couple of
+   * subprocesses — so `vk ai` / `vk suite` can call it before spending money on a
+   * compile instead of dying at the first step that happens to need the tool.
+   *
+   * Deliberately STATELESS (no memoized "already checked" flag): `vk suite` re-invokes
+   * it after an environment-flavoured failure to tell a transient dump flake from a
+   * genuinely broken box. Memoizing here would silently disable that.
+   */
+  preflight(): void;
   /** List attached devices/simulators (does not require a single device to be resolved). */
   listDevices(): DeviceInfo[];
   /** Resolve the concrete device serial/udid this driver will act on (throws if ambiguous). */

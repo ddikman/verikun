@@ -331,9 +331,12 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
     generated = true;
   }
 
-  // Build the ONE driver the server will ever use, and fail fast (exit 2/3) if no
-  // device resolves — before binding a port.
+  // Build the ONE driver the server will ever use, and fail fast (exit 2/3) if the
+  // toolchain can't drive it — before binding a port. preflight() covers resolving the
+  // device AND the tools; without it the server happily listens on a box with no idb
+  // and then 500s every /v1/exec.
   const driver = getDriver(platform, device);
+  driver.preflight();
   const serial = driver.resolvedSerial();
 
   // Handlers print "tapped …" confirmations via out(); a server's stdout is not a

@@ -1,10 +1,10 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
-import { CliError, SelectorNotFoundError } from './errors';
+import { CliError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
-import { getDriver, AdbDriver, IdbDriver } from './drivers';
-import { Driver, DeviceInfo, Element, Platform, Point } from './types';
+import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
+import { Driver, DeviceInfo, Element, Platform, Point, ToolProbe } from './types';
 import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
@@ -217,52 +217,38 @@ export function formatDeviceTable(devices: DeviceInfo[]): string[] {
   );
 }
 
+/** Render one shared ToolProbe the way doctor always has: present -> stdout, failure +
+ *  hint -> stderr. Unlike `Driver.preflight()` (which throws on the first failure),
+ *  doctor reports every probe so one run lists everything that needs fixing. */
+function reportProbe(p: ToolProbe): boolean {
+  if (p.ok) {
+    // A multi-line detail (simctl's booted-device listing) reads as its own block
+    // rather than smashed onto the `name:` line.
+    if (p.detail.includes('\n')) {
+      out(`${p.name}: present`);
+      out(p.detail);
+    } else {
+      out(`${p.name}: ${p.detail}`);
+    }
+  } else {
+    err(`${p.name}: ${p.detail}`);
+    if (p.hint) err(`  ${p.hint}`);
+  }
+  return p.ok;
+}
+
 function cmdDoctor(ctx: Ctx): number {
   if (ctx.platform === 'ios') {
-    try {
-      const r = runText('xcrun', ['simctl', 'list', 'devices', 'booted']);
-      out('xcrun: present');
-      out(r.stdout.trim() || '(no booted simulators)');
-    } catch (e) {
-      // Not necessarily missing: runText also throws on a spawn timeout or other exec
-      // failure, so surface the real reason rather than always claiming "NOT FOUND".
-      err(`xcrun: ${(e as Error).message}`);
-      err('  (if the Xcode command-line tools are not installed: `xcode-select --install`)');
-      return 3;
-    }
-
+    // xcrun is the floor: without it there is no device list to reason about.
+    if (!reportProbe(probeXcrun())) return 3;
     // idb (+ its companion) powers everything interactive: ui/tap/text/swipe/key/logs.
-    const idb = process.env.IDB || 'idb';
-    let idbOk = true;
-    try {
-      runText(idb, ['--help']); // idb has no --version; --help confirms the binary runs
-      out('idb: present');
-    } catch (e) {
-      err(`idb: ${(e as Error).message}`);
-      err('  needed for ui/tap/text/swipe/key/logs — install: `brew install idb-companion` then `pip install fb-idb`');
-      idbOk = false;
-    }
-    try {
-      runText('idb_companion', ['--help']);
-      out('idb_companion: present');
-    } catch (e) {
-      err(`idb_companion: ${(e as Error).message}`);
-      err('  install: `brew install idb-companion`');
-      idbOk = false;
-    }
+    const idbOk = [probeIdb(), probeIdbCompanion()].map(reportProbe).every(Boolean);
     out('note: simulator screenshots + launch/stop work via simctl; ui/tap/text/swipe/key/logs use idb.');
     return idbOk ? 0 : 3;
   }
 
   const adb = process.env.ADB || 'adb';
-  try {
-    out('adb: ' + runText(adb, ['version']).stdout.split('\n')[0]);
-  } catch (e) {
-    // Not necessarily missing: runText also throws on a spawn timeout or other exec
-    // failure — surface the real reason rather than always claiming "NOT FOUND".
-    err(`adb: ${(e as Error).message}`);
-    return 3;
-  }
+  if (!reportProbe(probeAdb())) return 3;
 
   const devices = ctx.driver.listDevices();
   const usable = devices.filter((d) => d.state === 'device');
@@ -1146,6 +1132,11 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   const server = flagStr(flags, 'server') || process.env.VERIKUN_SERVER || undefined;
   if (!server) {
     const driver = getDriver(platform, device);
+    // Fail fast on a broken toolchain BEFORE any model spend — the mirror of the
+    // remote branch's pingServer below. Without this, a missing `idb` isn't noticed
+    // until the first step that reads the hierarchy (launch/screenshot go through
+    // simctl on a simulator), by which point every test in a suite has been compiled.
+    driver.preflight();
     return {
       backend: {
         exec: (command, positionals, f) => executeOutcome(command, positionals, f, driver),
@@ -1157,6 +1148,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
           if (platform === 'ios') driver.stop(appId);
           else driver.clearApp(appId);
         },
+        preflight: () => driver.preflight(),
       },
       platform,
       device,
@@ -1174,8 +1166,20 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   const health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
   runCtx = { platform: health.platform, device: health.serial };
   err(`[verikun] server ${server}: ${health.platform} · device ${health.serial} · verikun ${health.version}`);
+  const remote = createRemoteBackend(opts, health);
   return {
-    backend: createRemoteBackend(opts, health),
+    backend: {
+      ...remote,
+      // Ping first (URL, key, version), then fetch the hierarchy once. The ping alone
+      // is NOT enough as a health probe: /v1/health answers from config captured at
+      // server startup and never touches the device, so it cannot see a phone that was
+      // unplugged next to the server — the suite's mid-run re-probe would call it
+      // healthy and keep grinding. One dump is the cheap call that actually proves it.
+      preflight: async () => {
+        await pingServer(opts);
+        await remote.getElements();
+      },
+    },
     platform: health.platform,
     device: health.serial,
     remote: { url: server, version: health.version },
@@ -1291,7 +1295,9 @@ async function runAiTest(
       ? `ABORTED — cost ceiling $${opts.maxCostUsd} reached`
       : result.abortedForTimeout
         ? `ABORTED — run timeout (${Math.round(opts.timeoutMs / 1000)}s) reached`
-        : `FAIL at ${result.failure?.where}: ${result.failure?.reason}`;
+        : result.abortedForEnv
+          ? `ABORTED — environment: ${result.failure?.reason}`
+          : `FAIL at ${result.failure?.where}: ${result.failure?.reason}`;
   err(`[ai] ${status} · ${costLine}`);
   err(`[ai] report: ${htmlPath}`);
   if (result.improvements.length) {
@@ -1313,6 +1319,7 @@ async function runAiTest(
     ...(result.failure ? { failure: result.failure } : {}),
     ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
     ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
+    ...(result.abortedForEnv ? { abortedForEnv: true } : {}),
   };
 }
 
@@ -1356,11 +1363,14 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
       ...(result.failure ? { failure: result.failure } : {}),
       ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
       ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
+      ...(result.abortedForEnv ? { abortedForEnv: true } : {}),
     });
   } else if (result.reportHtml) {
     out(result.reportHtml); // primary machine result: the report path
   }
-  return result.ok ? 0 : 1;
+  // An environment failure is exit 3, not 1: the box is broken, not the app. Exit 1
+  // here would be indistinguishable from a real regression and page the wrong person.
+  return result.abortedForEnv ? 3 : result.ok ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,6 +1420,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
       // Reset app state between tests only when the app id is known; without --app,
       // each test is responsible for its own isolation (e.g. `launch --clear`).
       reset: app ? () => backend.reset(app) : undefined,
+      preflight: () => backend.preflight?.(),
     });
   } finally {
     await backend.close?.();
