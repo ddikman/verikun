@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # `registry-url` writes the .npmrc that points npm at the public registry.
       # It is required even though no token is used, and the .npmrc it writes
@@ -67,7 +67,7 @@ jobs:
       # trades a real risk for a saved step. 22.x also clears the >= 22.14 that
       # trusted publishing wants.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22.x
           registry-url: https://registry.npmjs.org
@@ -144,7 +144,7 @@ jobs:
 
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Lift this version's section out of CHANGELOG.md: every line between its
       # own `## [X.Y.Z]` heading and the next `## ` heading.
