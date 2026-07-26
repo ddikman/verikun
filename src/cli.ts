@@ -13,10 +13,10 @@ import { downscalePng } from './image';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS } from './agent/engine';
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
-import { CliProvider, CODEX_SPEC } from './agent/cli-provider';
+import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-provider';
 import { AgentProvider } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
-import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price } from './agent/cost';
+import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
 import { Plan } from './agent/ir';
 import { ExecBackend } from './rpc';
 import { createRemoteBackend, pingServer, RemoteOpts } from './agent/remote';
@@ -996,47 +996,43 @@ function readAiTest(file: string): string {
   return nl;
 }
 
+/** The CLI-agent backends, by ProviderId. Adding a CLI provider is one entry here rather than a
+ *  new arm in each of the three functions below — they all ask the same question of it. */
+const CLI_SPECS: Partial<Record<ProviderId, CliAgentSpec>> = { codex: CODEX_SPEC, cursor: CURSOR_SPEC };
+
 /** Is the backend for `model` usable right now? HTTP providers need their API key in env;
  *  a CLI provider needs its binary on PATH (auth lives in the CLI's own login, not an env key). */
 function providerAvailable(model: string): boolean {
-  switch (providerFor(model)) {
-    case 'openai':
-      return !!process.env.OPENAI_API_KEY;
-    case 'codex':
-      return commandExists(CODEX_SPEC.bin);
-    default:
-      return !!process.env.ANTHROPIC_API_KEY;
-  }
+  const id = providerFor(model);
+  const spec = CLI_SPECS[id];
+  if (spec) return commandExists(spec.bin);
+  return id === 'openai' ? !!process.env.OPENAI_API_KEY : !!process.env.ANTHROPIC_API_KEY;
 }
 
 /** What's missing when a provider is unavailable — the tail of the preflight error message. */
 function providerRequirement(model: string): string {
-  switch (providerFor(model)) {
-    case 'openai':
-      return 'OPENAI_API_KEY is not set';
-    case 'codex':
-      return `the \`${CODEX_SPEC.bin}\` CLI was not found on PATH — install it and run \`codex login\` (ChatGPT subscription, no API key)`;
-    default:
-      return 'ANTHROPIC_API_KEY is not set';
-  }
+  const id = providerFor(model);
+  const spec = CLI_SPECS[id];
+  // Reuse the spec's own loginHint rather than restating it, so the two can't drift apart.
+  if (spec) return `the \`${spec.bin}\` CLI was not found on PATH — install it and ${spec.loginHint}`;
+  return id === 'openai' ? 'OPENAI_API_KEY is not set' : 'ANTHROPIC_API_KEY is not set';
 }
 
 /** Route the model to its backend. HTTP providers read their own key; a CLI provider shells
  *  out to its logged-in binary. Unavailable → null (compile/repair off), the same graceful
- *  degradation as before: a cached plan can still replay for free without any provider. */
+ *  degradation as before: a cached plan can still replay for free without any provider.
+ *  CLI providers get no `model`, so the CLI picks its own default — the "I just have a
+ *  subscription" path; --effort is likewise inapplicable to them. */
 function makeProvider(opts: AiOptions): AgentProvider | null {
-  switch (providerFor(opts.model)) {
-    case 'openai': {
-      const apiKey = process.env.OPENAI_API_KEY;
-      return apiKey ? new OpenAiProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
-    }
-    case 'codex':
-      return commandExists(CODEX_SPEC.bin) ? new CliProvider({ spec: CODEX_SPEC }) : null;
-    default: {
-      const apiKey = process.env.ANTHROPIC_API_KEY;
-      return apiKey ? new ClaudeProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
-    }
+  const id = providerFor(opts.model);
+  const spec = CLI_SPECS[id];
+  if (spec) return commandExists(spec.bin) ? new CliProvider({ spec }) : null;
+  if (id === 'openai') {
+    const apiKey = process.env.OPENAI_API_KEY;
+    return apiKey ? new OpenAiProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
   }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  return apiKey ? new ClaudeProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
 }
 
 /** Obtain the plan: a cache hit (free) or a compile (pays tokens; may seed from a
@@ -1647,15 +1643,18 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       that fails to resolve; a green run persists the
                                       (repaired) plan so the next run is free. Needs
                                       ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (gpt-5.x),
-                                      or a logged-in agent CLI (--model codex-cli uses your
-                                      'codex login' ChatGPT subscription — no API key; cost
-                                      is $0 so --max-cost-usd/--cost-override are no-ops).
+                                      or a logged-in agent CLI — no API key: --model
+                                      codex-cli uses your 'codex login' ChatGPT
+                                      subscription, cursor-cli your 'cursor-agent login'
+                                      Cursor one (cost is $0 for both, so
+                                      --max-cost-usd/--cost-override are no-ops).
                                       Progress -> stderr; the report path ->
                                       stdout. --show-plan prints the compiled IR without
                                       running; --recompile ignores the cache.
                                       Models: claude-haiku-4-5 | claude-sonnet-4-6
                                       (default) | claude-opus-4-8 | claude-fable-5 |
-                                      gpt-5.4-mini | gpt-5.4 | gpt-5.5 | codex-cli.
+                                      gpt-5.4-mini | gpt-5.4 | gpt-5.5 | codex-cli |
+                                      cursor-cli.
 
 SUITE (run a directory of natural-language tests as one gated suite)
   suite <dir> [--app <id>] [--name n] [--json]  (+ all \`ai\` flags, incl. --server)

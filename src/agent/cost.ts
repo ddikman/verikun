@@ -24,8 +24,8 @@ export interface Price {
 
 /** Which backend serves a --model. HTTP providers read an API key from env — ClaudeProvider
  *  (claude.ts) and OpenAiProvider (openai.ts); CLI providers shell out to an already-logged-in
- *  agent CLI — CliProvider (cli-provider.ts), e.g. 'codex'. cmdAi routes on this. */
-export type ProviderId = 'anthropic' | 'openai' | 'codex';
+ *  agent CLI — CliProvider (cli-provider.ts), i.e. 'codex' and 'cursor'. cmdAi routes on this. */
+export type ProviderId = 'anthropic' | 'openai' | 'codex' | 'cursor';
 
 interface ModelSpec extends Price {
   provider: ProviderId;
@@ -45,11 +45,13 @@ const MODELS: Record<string, ModelSpec> = {
   'gpt-5.4-mini': { input: 0.75, output: 4.5, provider: 'openai' },
   'gpt-5.4': { input: 2.5, output: 15, provider: 'openai' },
   'gpt-5.5': { input: 5, output: 30, provider: 'openai' },
-  // CLI-agent backend: billed to the user's ChatGPT subscription via the `codex` CLI, not per
-  // token — so price is $0 and --max-cost-usd/--cost-override are inert no-ops (the run is
-  // bounded by maxRepairs + --timeout instead). Named `codex-cli` to read clearly as "the CLI"
-  // and to avoid colliding with cursor's own `gpt-5.x-codex` model aliases.
+  // CLI-agent backends: billed to the user's ChatGPT/Cursor subscription via an already-logged-in
+  // CLI, not per token — so price is $0 and --max-cost-usd/--cost-override are inert no-ops (the
+  // run is bounded by maxRepairs + --timeout instead). The `-cli` suffix reads clearly as "the
+  // CLI" and keeps these from colliding with the CLIs' own model aliases — cursor in particular
+  // offers `gpt-5.3-codex`, `gpt-5.4-high`, `claude-opus-4-8-thinking-high` and friends.
   'codex-cli': { input: 0, output: 0, provider: 'codex' },
+  'cursor-cli': { input: 0, output: 0, provider: 'cursor' },
 };
 
 export const MODEL_PRICES: Record<string, Price> = Object.fromEntries(

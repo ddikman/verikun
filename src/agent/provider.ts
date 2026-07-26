@@ -2,10 +2,13 @@ import { Element } from '../types';
 import { Plan, LeafStep } from './ir';
 import { Usage } from './cost';
 
-// The seam between the engine and whatever LLM compiles/repairs a plan. v1 ships
-// one implementation (ClaudeProvider, ./claude.ts); Grok/OpenAI/Gemini are future
-// implementations behind this same interface. Every call returns its token `usage`
-// so the engine can bill it against the run's cost budget.
+// The seam between the engine and whatever LLM compiles/repairs a plan. Four backends
+// implement it today: two over HTTP with an API key — ClaudeProvider (./claude.ts) and
+// OpenAiProvider (./openai.ts) — and two that shell out to an already-logged-in agent CLI,
+// both served by the one spec-parameterized CliProvider (./cli-provider.ts): codex and
+// cursor-agent. `providerFor(model)` (./cost.ts) picks between them. Every call returns its
+// token `usage` so the engine can bill it against the run's cost budget (a CLI backend is
+// billed to the user's subscription instead, so it reports empty usage — i.e. $0).
 
 export interface CompileInput {
   /** The natural-language test source, verbatim. */
