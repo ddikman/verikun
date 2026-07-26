@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-26
+
+### Added
+- **`vk ai --model cursor-cli` — compile/repair off a logged-in `cursor-agent`, no API key.**
+  The second CLI-agent backend, stacking on the same `CliProvider` class 0.9.0 introduced: it is
+  a new `CliAgentSpec` (`CURSOR_SPEC`), not a new provider class. Anyone with a Cursor
+  subscription and `cursor-agent login` can now run `vk ai` / `vk suite` without setting
+  `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. Like `codex-cli` it is billed to the subscription, so
+  its cost line reads `$0` and `--max-cost-usd` / `--cost-override` are inert.
+- Unlike `codex`, `cursor-agent` has **no JSON-schema flag**, so the plan schema is injected into
+  the prompt and `extractJson` peels the object back out of the `--output-format json` envelope;
+  `parsePlan` / `validateNode` remains the execution trust boundary either way. The call runs
+  `--mode ask` (read-only) with `--workspace` pointed at a scratch dir, so it never sees — let
+  alone touches — your working tree, and is never given `--force` / `--yolo`. A `cursor-agent`
+  run that reports `is_error` while still exiting `0` is surfaced as an environment error (exit
+  `3`) rather than a confusing "did not return parseable JSON".
+
+### Changed
+- `providerAvailable` / `providerRequirement` / `makeProvider` (`cli.ts`) now look CLI backends up
+  in one `CLI_SPECS` table instead of each carrying a per-CLI `switch` arm, and the "not found on
+  PATH" error reuses the spec's own `loginHint` rather than restating it. Adding a third agent CLI
+  is a spec plus a table entry.
+- Corrected the `AgentProvider` docs in `CLAUDE.md` and `src/agent/provider.ts`, which still
+  described a single v1 Claude implementation and never mentioned the OpenAI or CLI backends.
+
 ## [0.9.0] - 2026-07-21
 
 ### Added

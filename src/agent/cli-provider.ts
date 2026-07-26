@@ -102,6 +102,65 @@ export const CODEX_SPEC: CliAgentSpec = {
   loginHint: 'run `codex login` to sign in with your ChatGPT subscription (no API key needed)',
 };
 
+/** cursor-agent (Cursor CLI): non-interactive `--print` with a JSON envelope on stdout. Unlike
+ *  codex it has NO schema flag of any kind, so the schema is injected into the prompt and
+ *  extractJson/parsePlan do the rest. Two flags are load-bearing beyond the obvious ones:
+ *  `--trust`, without which a headless call dies at a "Workspace Trust Required" gate and exits 1
+ *  before the model ever runs; and `--mode ask`, cursor's documented read-only Q&A mode, which
+ *  stands in for codex's `--sandbox read-only` (cursor's own `--sandbox` only takes enabled/
+ *  disabled). Plain `--print` "has access to all tools, including write and shell", so `--mode ask`
+ *  plus the neutral `--workspace` are what keep this a pure transform — and we deliberately never
+ *  pass --force/--yolo/--approve-mcps. */
+export const CURSOR_SPEC: CliAgentSpec = {
+  id: 'cursor',
+  bin: 'cursor-agent',
+  schema: 'prompt', // no native schema flag — schemaInstruction() injects it into the prompt
+  usesOutputFile: false, // stdout is the only channel out; no --output-last-message equivalent
+  buildArgs(prompt, { cwd, model }) {
+    const args = [
+      '--print', // non-interactive one-shot
+      '--output-format', 'json', // a stable envelope instead of TTY-decorated text
+      '--mode', 'ask', // read-only Q&A mode: no edits, no shell
+      '--workspace', cwd, // root the agent in a neutral temp dir, not the verikun working tree
+      '--trust', // required: else headless stops at the workspace-trust prompt
+    ];
+    if (model) args.push('--model', model);
+    args.push(prompt); // prompt is the trailing positional
+    return args;
+  },
+  rawText: cursorResultText,
+  loginHint: 'run `cursor-agent login` to sign in with your Cursor subscription (no API key needed)',
+};
+
+/** Peel the model's final message out of cursor-agent's `--output-format json` envelope:
+ *  `{type:"result", subtype:"success", is_error:false, result:"<final text>", …}`.
+ *  Two things a plain `JSON.parse(s).result` would get wrong:
+ *  - cursor can exit 0 while reporting failure via `is_error:true` (e.g. it hit a turn limit), which
+ *    CliProvider's exit-code check cannot see. Left alone, the error prose would flow into
+ *    extractJson and surface as a misleading "did not return parseable JSON", so map it to the same
+ *    exit 3 a non-zero exit gets.
+ *  - an envelope shape drift (or a future default of --output-format text) falls back to the raw
+ *    stdout, so extractJson's tolerant scan still gets a chance instead of failing outright. */
+export function cursorResultText(stdout: string): string {
+  let envelope: Record<string, unknown> | undefined;
+  try {
+    const parsed: unknown = JSON.parse(stdout.trim());
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) envelope = parsed as Record<string, unknown>;
+  } catch {
+    /* not JSON at all (e.g. --output-format text) — fall through to the raw stdout */
+  }
+  if (!envelope) return stdout;
+  if (envelope.is_error === true) {
+    const detail = typeof envelope.result === 'string' ? tail(envelope.result) : '';
+    throw new CliError(`\`cursor-agent\` reported an error: ${detail || '(no detail)'}`, 3);
+  }
+  // Only peel when this really IS the envelope. Parsing alone isn't enough: if cursor ever returns
+  // the plan object bare (or renames the field), treating any JSON object as an envelope would
+  // blank it to '' and report "returned an empty response" — so anything without a string
+  // `result` falls through to the raw stdout, where extractJson can still find the object.
+  return typeof envelope.result === 'string' ? envelope.result : stdout;
+}
+
 export interface CliProviderOpts {
   spec: CliAgentSpec;
   /** Optional underlying model for the CLI's own --model. v1 usually leaves this undefined,

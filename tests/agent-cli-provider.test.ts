@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CliProvider,
-  CliAgentSpec,
   CODEX_SPEC,
+  CURSOR_SPEC,
+  cursorResultText,
   RunImpl,
   extractJson,
   schemaInstruction,
@@ -194,35 +195,65 @@ test('the temp schema file is cleaned up even when the CLI call fails', () => {
   });
 });
 
-// A schema:'prompt' spec (the shape the future cursor provider uses): no --output-schema file;
-// the schema is injected into the prompt, and rawText peels the model's text out of an envelope.
-const ENVELOPE_SPEC: CliAgentSpec = {
-  id: 'codex', // any ProviderId; irrelevant for schema:'prompt' (no temp file is written)
-  bin: 'fake-agent',
-  schema: 'prompt',
-  usesOutputFile: false, // this CLI's only output is stdout — read via rawText
-  buildArgs: (prompt, { model }) => {
-    const a = ['-p', '--output-format', 'json'];
-    if (model) a.push('--model', model);
-    a.push(prompt);
-    return a;
-  },
-  rawText: (stdout) => (JSON.parse(stdout) as { result: string }).result,
-  loginHint: 'log in',
-};
+// cursor-agent takes the OTHER branch of the same class: schema:'prompt' (it has no schema flag of
+// any kind) and usesOutputFile:false (stdout is its only channel out), so the schema is injected
+// into the prompt and rawText peels the model's text out of the --output-format json envelope.
 
-test("schema:'prompt' path: injects the schema into the prompt and peels a fenced envelope result", () => {
+/** A realistic cursor-agent `--output-format json` envelope. Shape verified against the real
+ *  binary (build 2026.06.04): `result` is the final assistant message as a string. */
+function cursorEnvelope(result: string, isError = false): string {
+  return JSON.stringify({
+    type: 'result',
+    subtype: isError ? 'error' : 'success',
+    is_error: isError,
+    duration_ms: 6305,
+    result,
+    session_id: '9cf64d1e',
+    request_id: '4aacf396',
+  });
+}
+
+test("compile (cursor): schema goes in the prompt, and the plan is peeled from the json envelope", () => {
   return withTmp((dir) => {
-    const envelope = JSON.stringify({ result: '```json\n' + PLAN_JSON + '\n```' });
+    // The model wrapped its JSON in a fence, inside the envelope's `result` string — both layers
+    // have to come off for the plan to parse.
     const captured: Captured = {};
-    const provider = new CliProvider({ spec: ENVELOPE_SPEC, tmpDir: dir, runImpl: fakeRun({ stdout: envelope }, captured) });
-    return provider.compile({ nl: 'x', platform: 'android' }).then(({ plan }) => {
+    const stdout = cursorEnvelope('```json\n' + PLAN_JSON + '\n```');
+    const provider = new CliProvider({ spec: CURSOR_SPEC, tmpDir: dir, runImpl: fakeRun({ stdout }, captured) });
+    return provider.compile({ nl: 'tap the login button', platform: 'android' }).then(({ plan, usage }) => {
+      assert.equal(captured.bin, 'cursor-agent');
+      const args = captured.args!;
+      assert.ok(args.includes('--print')); // non-interactive one-shot
+      assert.equal(argVal(args, '--output-format'), 'json');
+      assert.equal(argVal(args, '--mode'), 'ask'); // read-only Q&A mode — cursor's no-writes lever
+      assert.equal(argVal(args, '--workspace'), dir); // rooted in the neutral temp dir, not the repo
+      assert.ok(args.includes('--trust')); // load-bearing: headless stops at the trust gate without it
+      assert.equal(captured.opts!.cwd, dir);
+      // never hand an agentic CLI blanket approval for a pure text transform
+      assert.ok(!args.includes('--force') && !args.includes('--yolo') && !args.includes('--approve-mcps'));
+      assert.ok(!args.includes('--output-schema')); // cursor has no native schema flag
+      assert.match(args_prompt(captured), /JSON Schema/); // ...so the schema is injected into the prompt
+      assert.match(args_prompt(captured), /pure text-to-JSON transformer/);
+
       assert.equal(plan.steps.length, 1);
-      assert.ok(!captured.args!.includes('--output-schema')); // no native schema flag for this path
-      assert.match(args_prompt(captured), /JSON Schema/); // schema was injected into the prompt text
-      assert.deepEqual(readdirSync(dir), []); // no temp file written for the prompt path
+      assert.deepEqual(usage, {}); // subscription-billed ⇒ $0
+      assert.deepEqual(readdirSync(dir), []); // no temp files at all on the prompt/stdout path
     });
   });
+});
+
+test('cursorResultText: peels `result`, maps is_error to exit 3, falls back to raw stdout', () => {
+  assert.equal(cursorResultText(cursorEnvelope('{"a":1}')), '{"a":1}');
+  // cursor can exit 0 while reporting failure — that must not reach extractJson and surface as
+  // the misleading "did not return parseable JSON"; it is an env error like a non-zero exit.
+  assert.throws(
+    () => cursorResultText(cursorEnvelope('hit the turn limit', true)),
+    (e: unknown) => e instanceof CliError && e.exitCode === 3 && /hit the turn limit/.test(e.message),
+  );
+  // shape drift (or --output-format text) degrades to the raw stdout so extractJson still gets a go
+  assert.equal(cursorResultText('{"a":1}'), '{"a":1}');
+  assert.equal(cursorResultText('plain text answer'), 'plain text answer');
+  assert.equal(cursorResultText('[1,2]'), '[1,2]'); // a JSON array is not the envelope
 });
 
 test('extractJson: bare, fenced, prose-wrapped, and brace-in-string cases; throws exit 1 on garbage', () => {
