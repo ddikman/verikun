@@ -1,0 +1,178 @@
+name: Publish to npm
+
+# Publish `verikun` to the public npm registry when a `vX.Y.Z` tag is pushed.
+#
+# Auth is npm TRUSTED PUBLISHING (OIDC): GitHub Actions mints a short-lived token
+# from this job's `id-token` claim and npm verifies that claim against a
+# per-package publisher config. There is no NPM_TOKEN secret in this repo —
+# nothing to rotate, nothing to leak — and the publish carries a signed
+# provenance attestation linking the tarball on npm back to this commit.
+#
+# ⚠️ THE FILENAME IS PART OF THE CONTRACT. npm's trusted-publisher config names
+# this file literally ("publish.yml"). Renaming or moving it breaks publishing,
+# and the only symptom is an auth failure at publish time — nothing warns you
+# earlier. If you rename it, update the npm side in the same change.
+#
+# The npm side is configured once, at
+# https://www.npmjs.com/package/verikun/access (all fields case-sensitive):
+#   Organization or user  ddikman
+#   Repository            verikun
+#   Workflow filename     publish.yml
+#   Environment name      (blank)
+#   Allowed actions       npm publish
+#
+# To release: land the version bump on main (the create-pr skill does it in the
+# PR), then tag the merge commit:
+#   git tag v0.10.0 && git push origin v0.10.0
+# The tag must point at a commit that CONTAINS this file — a tag-push event runs
+# the workflow as of the tagged commit, so tagging an older one does nothing at
+# all (no run, no error).
+
+on:
+  push:
+    # Deliberately loose: `v` followed by a digit, then anything.
+    # Actions does document a `+` quantifier, so the precise
+    # `v[0-9]+.[0-9]+.[0-9]+` would be valid — but a filter pattern that fails
+    # to match is completely silent: the tag pushes, no run starts, and nothing
+    # anywhere reports an error. So the trigger stays broad and the real
+    # validation happens in the version guard below, where a bad tag fails
+    # loudly. This still ignores junk like the stray `v.0.5.0` (no leading
+    # digit). Release vs prerelease is decided later, from the tag's shape.
+    tags: ['v[0-9]*']
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false # never interrupt a publish part-way
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required: mints the OIDC token npm trades for a publish credential
+      contents: read
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      # `registry-url` writes the .npmrc that points npm at the public registry.
+      # It is required even though no token is used, and the .npmrc it writes
+      # references an unset NODE_AUTH_TOKEN — that is fine and is exactly npm's
+      # own documented example; the OIDC exchange supplies credentials instead.
+      #
+      # 22.x, not the 24 npm's example uses: this job runs `npm test` as a
+      # release gate, and CI only ever exercises the suite on Node 20/22 (the
+      # runner is sensitive to Node's `node --test` behaviour — see CLAUDE.md on
+      # the test glob). Gating a release on a Node version nothing else covers
+      # trades a real risk for a saved step. 22.x also clears the >= 22.14 that
+      # trusted publishing wants.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # The cost of pinning 22.x above: trusted publishing landed in npm 11.5.1,
+      # but Node 22 still bundles npm 10.x. (Node 24 bundles 11.x, which is why
+      # npm's example needs no such step.) Without this the publish fails with an
+      # authentication error that reads like a bad token, not an old client.
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+
+      # The tag is the release's identity, but package.json is what npm actually
+      # publishes. npm forbids republishing a version, so a mismatch has to fail
+      # here — before the number is burned on the wrong contents.
+      - name: Verify the tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+          echo "Releasing verikun@$pkg"
+
+      # `prepare` runs on install, so this also regenerates src/version.ts and
+      # compiles dist/ — the strict-tsc gate is covered right here, which is why
+      # there is no separate build step mirroring ci.yml's.
+      - name: Install dependencies (also builds dist/ via `prepare`)
+        run: npm ci
+
+      # src/version.ts and .claude-plugin/plugin.json are generated from
+      # package.json's version yet committed, and plugin.json has drifted before.
+      # gen-version.mjs is deterministic and idempotent, so if the install above
+      # changed either file the tagged commit is stale — stop rather than ship a
+      # release whose plugin manifest disagrees with the package.
+      - name: Verify the committed generated files are current
+        run: git diff --exit-code -- src/version.ts .claude-plugin/plugin.json
+
+      # A tag can point at any commit, not only one CI already vetted.
+      - name: Test (unit suite)
+        run: npm test
+
+      # A hyphen means a prerelease (v1.0.0-rc.1), which must not become what
+      # `npm install -g verikun` resolves to.
+      - name: Resolve the dist-tag
+        id: disttag
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "dist_tag=next"   >> "$GITHUB_OUTPUT" ;;
+            *)   echo "dist_tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # No NODE_AUTH_TOKEN: npm detects the Actions OIDC environment and trades
+      # the id-token for a short-lived publish credential itself.
+      #
+      # `--provenance` is belt-and-braces. npm documents it as unnecessary under
+      # trusted publishing ("automatically generates ... you don't need to add
+      # the flag"), but field reports say otherwise, and the two failure modes
+      # are not symmetric: passing it when it is redundant costs nothing, while
+      # omitting it when it is needed silently ships a release with no
+      # attestation — the exact guarantee this workflow exists to provide.
+      - name: Publish to npm
+        run: npm publish --provenance --tag "${{ steps.disttag.outputs.dist_tag }}"
+
+  # Deliberately a separate job: the one holding the npm OIDC credential above
+  # never also holds write access to the repository. Runs only after a
+  # successful publish, so a green release page always means a real release.
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      # Lift this version's section out of CHANGELOG.md: every line between its
+      # own `## [X.Y.Z]` heading and the next `## ` heading.
+      - name: Extract the release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { inside = 1; next }
+            inside && /^## /        { exit }
+            inside                  { print }
+          ' CHANGELOG.md > release-notes.md
+          echo "--- extracted release notes ---"
+          cat release-notes.md
+
+      # The `--generate-notes` branch is the fallback for a missing or blank
+      # changelog section, so a release is never published with an empty body.
+      # `grep -q '[^[:space:]]'` rather than `test -s`: a section holding only a
+      # blank line is non-empty as a file but empty as release notes.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          if grep -q '[^[:space:]]' release-notes.md; then
+            gh release create "$GITHUB_REF_NAME" --title "verikun $version" --notes-file release-notes.md $flags
+          else
+            echo "no CHANGELOG.md section for $version — falling back to generated notes"
+            gh release create "$GITHUB_REF_NAME" --title "verikun $version" --generate-notes $flags
+          fi
