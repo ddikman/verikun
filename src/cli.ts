@@ -1712,7 +1712,7 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       path. The model is woken only to repair a step
                                       that fails to resolve; a green run persists the
                                       (repaired) plan so the next run is free. Needs
-                                      ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (gpt-5.x),
+                                      ANTHROPIC_API_KEY (Claude), OPENAI_API_KEY (gpt-*),
                                       or a logged-in agent CLI — no API key: --model
                                       codex-cli uses your 'codex login' ChatGPT
                                       subscription, cursor-cli your 'cursor-agent login'
@@ -1723,8 +1723,8 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       running; --recompile ignores the cache.
                                       Models: claude-haiku-4-5 | claude-sonnet-4-6
                                       (default) | claude-opus-4-8 | claude-fable-5 |
-                                      gpt-5.4-mini | gpt-5.4 | gpt-5.5 | codex-cli |
-                                      cursor-cli.
+                                      gpt-5.4-mini | gpt-5.4 | gpt-5.5 | gpt-4.1 |
+                                      codex-cli | cursor-cli.
 
 SUITE (run a directory of natural-language tests as one gated suite)
   suite <dir> [--app <id>] [--name n] [--json]  (+ all \`ai\` flags, incl. --server)

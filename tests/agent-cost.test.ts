@@ -16,6 +16,7 @@ import { CliError } from '../src/errors';
 test('providerFor: routes known models to their backend, unknown falls back to anthropic', () => {
   assert.equal(providerFor('gpt-5.4'), 'openai');
   assert.equal(providerFor('gpt-5.4-mini'), 'openai');
+  assert.equal(providerFor('gpt-4.1'), 'openai');
   assert.equal(providerFor('claude-opus-4-8'), 'anthropic');
   assert.equal(providerFor('codex-cli'), 'codex');
   assert.equal(providerFor('cursor-cli'), 'cursor');
@@ -38,6 +39,33 @@ for (const model of ['codex-cli', 'cursor-cli']) {
 
 test('registry: every allowed model has a price', () => {
   for (const m of ALLOWED_MODELS) assert.ok(MODEL_PRICES[m], `${m} must be priced`);
+});
+
+test('gpt-4.1: allowed, resolves, and priced under the default sonnet', () => {
+  assert.ok(ALLOWED_MODELS.includes('gpt-4.1'));
+  assert.equal(resolveModel('gpt-4.1'), 'gpt-4.1');
+  assert.equal(MODEL_PRICES['gpt-4.1'].input, 2);
+  assert.equal(MODEL_PRICES['gpt-4.1'].output, 8);
+  const sonnet = MODEL_PRICES[DEFAULT_MODEL];
+  assert.ok(MODEL_PRICES['gpt-4.1'].input < sonnet.input);
+  assert.ok(MODEL_PRICES['gpt-4.1'].output < sonnet.output);
+});
+
+test('gpt-4.1: cache reads bill at its own 0.25x, not the 0.1x default', () => {
+  // $2/1M input * 0.25 = $0.50 per 1M cached — the published cached-input rate. The
+  // multiplier has to survive the MODELS -> MODEL_PRICES -> priceFor -> tracker path.
+  const price = priceFor('gpt-4.1');
+  assert.equal(price.cacheReadMult, 0.25);
+  assert.ok(Math.abs(estimateCostUsd({ cache_read_input_tokens: 1_000_000 }, price) - 0.5) < 1e-9);
+  const t = new CostTracker(price);
+  t.add({ cache_read_input_tokens: 1_000_000 }, 'compile');
+  assert.ok(Math.abs(t.usd() - 0.5) < 1e-9);
+});
+
+test('estimateCostUsd: a --cost-override carries no cacheReadMult, so cache reads stay 0.1x', () => {
+  const price = priceFor('gpt-4.1', parseCostOverride('2/8'));
+  assert.equal(price.cacheReadMult, undefined);
+  assert.ok(Math.abs(estimateCostUsd({ cache_read_input_tokens: 1_000_000 }, price) - 0.2) < 1e-9);
 });
 
 test('parseCostOverride: parses <input/output>', () => {

@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-03
+
+### Added
+- **`vk ai --model gpt-4.1` — a cheaper alternative to the default `claude-sonnet-4-6`.** $2/$8 per
+  1M against sonnet's $3/$15, priced in the bundled table like every other model. It reuses the
+  existing `OpenAiProvider` (Chat Completions + strict `json_schema` Structured Outputs, which
+  gpt-4.1 supports) and `OPENAI_API_KEY`, so it is a `MODELS` row rather than a new backend.
+- `Price.cacheReadMult` — an optional per-model override for the cache-read multiplier. gpt-4.1
+  bills cache reads at **0.25x** input ($0.50/1M), not the 0.1x every model in the table until now
+  shared, and that table is what the `--max-cost-usd` gate meters. A `--cost-override` carries no
+  multiplier and so still assumes 0.1x.
+
+### Fixed
+- `reasoning_effort` is now sent only to OpenAI models that accept it (a `REASONING_MODELS`
+  allowlist, mirroring `claude.ts`'s `EFFORT_MODELS`). gpt-4.1 is the registry's first
+  **non-reasoning** model and OpenAI rejects the parameter for it with a `400` — which the retry
+  loop deliberately does not retry — so unguarded, `--model gpt-4.1 --effort high` would have died
+  as a usage error (exit `2`) before reaching the device. An allowlist rather than a denylist: an
+  unlisted model quietly forgoes effort instead of failing the run.
+
 ## [0.12.0] - 2026-08-03
 
 ### Added
@@ -118,6 +138,7 @@ All notable changes to this project are documented here. The format is based on
 - **`VERIKUN_GUARD_SETTLE_MS`** — tune the `vk ai` guard settle window without a rebuild (`0`
   restores the previous single-shot probe). The right value is device-dependent, so it is meant
   to be measured against a real app rather than guessed.
+
 
 ## [0.10.0] - 2026-07-26
 

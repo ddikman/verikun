@@ -27,9 +27,6 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 // gpt-5.x are reasoning models: they take reasoning_effort, require max_completion_tokens
 // (not max_tokens), and reject a custom temperature. Map verikun's effort scale onto
 // OpenAI's (whose ceiling is 'high'), and only send it when the caller asked for one.
-// INVARIANT: every OpenAI model in cost.ts's registry is a reasoning model that accepts
-// reasoning_effort. If a non-reasoning model is ever added there, gate this send behind an
-// allowlist like claude.ts's EFFORT_MODELS (else it 400s → exit 2 with no retry).
 const EFFORT_MAP: Record<string, string> = {
   low: 'low',
   medium: 'medium',
@@ -38,10 +35,18 @@ const EFFORT_MAP: Record<string, string> = {
   max: 'high',
 };
 
+// reasoning_effort is rejected outright by non-reasoning models (gpt-4.1), and a 400 is NOT
+// retried — it surfaces as exit 2 — so send the param only for models known to accept it,
+// mirroring claude.ts's EFFORT_MODELS. An ALLOWLIST on purpose: a model missing from here
+// merely forgoes effort, whereas a denylist would let the next non-reasoning model 400.
+// Keep in step with cost.ts's registry when adding an OpenAI model.
+const REASONING_MODELS = new Set(['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5']);
+
 export interface OpenAiProviderOpts {
   model: string;
   apiKey: string;
-  /** low | medium | high | xhigh | max — mapped onto OpenAI's reasoning_effort. */
+  /** low | medium | high | xhigh | max — mapped onto OpenAI's reasoning_effort, and sent
+   *  only for the reasoning models that accept it (see REASONING_MODELS). */
   effort?: string;
   maxRetries?: number;
   /** Per-request wall-clock timeout in ms (default 120s); a stalled call is aborted and retried. */
@@ -206,7 +211,7 @@ export class OpenAiProvider implements AgentProvider {
         { role: 'user', content: user },
       ],
     };
-    if (this.opts.effort) {
+    if (this.opts.effort && REASONING_MODELS.has(this.opts.model)) {
       const mapped = EFFORT_MAP[this.opts.effort];
       if (mapped) body.reasoning_effort = mapped;
     }

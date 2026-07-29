@@ -111,6 +111,17 @@ test('effort: xhigh/max clamp to OpenAI high; no effort omits reasoning_effort',
   assert.equal('reasoning_effort' in (capNone.body as object), false);
 });
 
+test('effort: gpt-4.1 is not a reasoning model, so reasoning_effort is never sent', async () => {
+  // OpenAI 400s on reasoning_effort for a non-reasoning model and a 400 is not retried, so
+  // leaking the param here would turn `--model gpt-4.1 --effort high` into a hard exit 2.
+  const captured: Captured = {};
+  await new OpenAiProvider({ model: 'gpt-4.1', apiKey: 'k', effort: 'high', fetchImpl: fakeFetch(chatOk(PLAN_JSON), { captured }) }).compile({ nl: 'x', platform: 'android' });
+  assert.equal('reasoning_effort' in (captured.body as object), false);
+  // The rest of the request is unchanged — still strict structured output on the plan schema.
+  assert.equal(captured.body!.model, 'gpt-4.1');
+  assert.equal((captured.body!.response_format as { type: string }).type, 'json_schema');
+});
+
 test('repair: a "repair" decision yields the replacement leaf via the repair grammar', async () => {
   const repair = JSON.stringify({ decision: 'repair', step: { type: 'command', command: 'tap', positionals: ['@ok'], flags: [] } });
   const captured: Captured = {};

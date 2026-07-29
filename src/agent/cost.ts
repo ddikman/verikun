@@ -20,6 +20,11 @@ export interface Price {
   input: number;
   /** USD per 1M output tokens. */
   output: number;
+  /** Multiplier on `input` for cache-READ tokens, when the model does not bill them at the
+   *  usual CACHE_READ_MULT. Set only where a vendor deviates (gpt-4.1 reads cache at 0.25x,
+   *  $0.50 against $2.00 input); omitted everywhere else, and omitted by `--cost-override`,
+   *  which therefore keeps the 0.1x default. */
+  cacheReadMult?: number;
 }
 
 /** Which backend serves a --model. HTTP providers read an API key from env — ClaudeProvider
@@ -35,8 +40,9 @@ interface ModelSpec extends Price {
 // ALLOWED_MODELS and providerFor all derive from this, so the --model allowlist, its
 // price and its backend can never disagree. Prices WILL drift between releases
 // (Anthropic cached 2026-05-26; OpenAI 2026-07-02) — `--cost-override <input/output>`
-// is the escape hatch and is authoritative when supplied. Every model here bills cached
-// input at ~0.1x (Anthropic + OpenAI gpt-5.x alike), matching CACHE_READ_MULT below.
+// is the escape hatch and is authoritative when supplied. Nearly every model here bills
+// cached input at the ~0.1x CACHE_READ_MULT below (Anthropic + OpenAI gpt-5.x alike); the
+// exception carries an explicit `cacheReadMult`.
 const MODELS: Record<string, ModelSpec> = {
   'claude-haiku-4-5': { input: 1, output: 5, provider: 'anthropic' },
   'claude-sonnet-4-6': { input: 3, output: 15, provider: 'anthropic' },
@@ -45,6 +51,11 @@ const MODELS: Record<string, ModelSpec> = {
   'gpt-5.4-mini': { input: 0.75, output: 4.5, provider: 'openai' },
   'gpt-5.4': { input: 2.5, output: 15, provider: 'openai' },
   'gpt-5.5': { input: 5, output: 30, provider: 'openai' },
+  // The one NON-REASONING model in the registry, and cheaper than the default sonnet
+  // ($2/$8 vs $3/$15). Two consequences, both handled rather than papered over: it takes
+  // no reasoning_effort (openai.ts's REASONING_MODELS gate skips the param for it), and it
+  // bills cache reads at 0.25x rather than the 0.1x every other model here uses.
+  'gpt-4.1': { input: 2, output: 8, provider: 'openai', cacheReadMult: 0.25 },
   // CLI-agent backends: billed to the user's ChatGPT/Cursor subscription via an already-logged-in
   // CLI, not per token — so price is $0 and --max-cost-usd/--cost-override are inert no-ops (the
   // run is bounded by maxRepairs + --timeout instead). The `-cli` suffix reads clearly as "the
@@ -54,8 +65,10 @@ const MODELS: Record<string, ModelSpec> = {
   'cursor-cli': { input: 0, output: 0, provider: 'cursor' },
 };
 
+// Strip `provider` off each spec; what remains IS the Price (including any cacheReadMult,
+// so a per-model deviation reaches the tracker without being re-listed here).
 export const MODEL_PRICES: Record<string, Price> = Object.fromEntries(
-  Object.entries(MODELS).map(([m, s]) => [m, { input: s.input, output: s.output }]),
+  Object.entries(MODELS).map(([m, { provider: _provider, ...price }]) => [m, price]),
 );
 export const ALLOWED_MODELS: readonly string[] = Object.keys(MODELS);
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
@@ -90,7 +103,8 @@ export function priceFor(model: string, override?: Price): Price {
   return override ?? MODEL_PRICES[model] ?? MODEL_PRICES[DEFAULT_MODEL];
 }
 
-// Cache reads bill at ~0.1x input; cache writes (5-min TTL) at ~1.25x input.
+// Cache reads bill at ~0.1x input (unless the model overrides it via Price.cacheReadMult);
+// cache writes (5-min TTL) at ~1.25x input.
 const CACHE_READ_MULT = 0.1;
 const CACHE_WRITE_MULT = 1.25;
 const PER_M = 1_000_000;
@@ -105,7 +119,7 @@ export function estimateCostUsd(usage: Usage, price: Price): number {
     (input * price.input +
       output * price.output +
       cacheWrite * price.input * CACHE_WRITE_MULT +
-      cacheRead * price.input * CACHE_READ_MULT) /
+      cacheRead * price.input * (price.cacheReadMult ?? CACHE_READ_MULT)) /
     PER_M
   );
 }
