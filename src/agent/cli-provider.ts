@@ -201,6 +201,14 @@ export class CliProvider implements AgentProvider {
       );
     }
     parts.push('NATURAL-LANGUAGE TEST:\n' + input.nl);
+    if (input.retryFeedback) {
+      // Last, so it is the freshest thing in context: a previous compile of this same
+      // test lost something the prose stated. Naming it beats hoping the retry differs.
+      parts.push(
+        'YOUR PREVIOUS ATTEMPT AT THIS TEST WAS REJECTED. Fix this and emit the whole plan again:\n' +
+          input.retryFeedback,
+      );
+    }
     const json = this.call(GRAMMAR, parts.join('\n\n'), PLAN_JSON_SCHEMA);
     // usage:{} — a CLI is billed to the user's subscription, not per token, so cost is $0
     // (documented no-op for --max-cost-usd). The run is still bounded by maxRepairs + --timeout.

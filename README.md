@@ -233,6 +233,14 @@ like permission dialogs) and **bounded loops** (`repeat … until`, e.g. scroll 
 row appears) — control flow a flat [`batch`](#batch) script can't express. Loops carry
 a hard iteration cap and stop early if the screen stops changing.
 
+An `if-present` guard **waits for its selector to settle** before deciding the optional UI
+isn't there, so a dialog that animates in a beat after the transition is still caught. The
+window guarantees at least two looks at the screen (wall clock alone isn't a usable unit —
+a UI dump ranges from ~200ms on a fast phone to ~2.5s on an emulator), so an absent guard
+costs about one extra dump. `VERIKUN_GUARD_SETTLE_MS` tunes it; `0` restores the old
+single-shot probe. A loop's own exit check never pays this window — it's absent on every
+iteration by construction, which is what makes it a loop.
+
 - **Progress streams to stderr** (so a CI job never goes silent); **stdout is the
   report path** (or a JSON summary with `--json`). The compiled plan is logged to the
   run before it executes, for troubleshooting.
@@ -367,7 +375,11 @@ class:Button    simplified type ("Button") or full class ("android.widget.Button
 ```
 
 Modifiers: `--contains` makes text/desc matches substring-based; `--index N`
-selects the Nth match (0-based) when a selector intentionally matches several.
+selects the Nth match (0-based) when a selector intentionally matches several;
+`--enabled` matches only a control that is **actionable right now** — use it for a
+Submit/Check button the app disables until a form is valid, since such a button is
+present long before it is usable and tapping presence taps a dead control (with
+auto-wait this reads as "wait until it is pressable").
 If a selector for an action matches more than one element and no `--index` is
 given, the command fails with exit code 2 and lists the candidates — it never
 taps a guess.

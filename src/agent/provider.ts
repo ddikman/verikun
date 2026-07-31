@@ -17,6 +17,10 @@ export interface CompileInput {
   platform: string;
   /** A prior plan to adapt instead of compiling from scratch (new-build seeding). */
   seed?: Plan;
+  /** Set only on a SECOND compile attempt: what was wrong with the first one (a lint
+   *  finding — the plan lost something the prose stated). Compilation is nondeterministic,
+   *  so one guided retry recovers far more than the extra call costs. */
+  retryFeedback?: string;
 }
 
 export interface CompileResult {

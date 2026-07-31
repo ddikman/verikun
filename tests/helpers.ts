@@ -4,6 +4,15 @@
 
 import { deflateSync } from 'node:zlib';
 import { Bounds, Element } from '../src/types';
+import { LeafStep, PlanNode } from '../src/agent/ir';
+
+/** Narrow a node from a control body to a leaf. Control bodies are PlanNode[] since
+ *  they may hold a nested control node, so a test reaching for `.positionals` has to
+ *  say which it expects — and fail loudly rather than silently if it guessed wrong. */
+export function asLeaf(node: PlanNode): LeafStep {
+  if (node.type !== 'command') throw new Error(`expected a command leaf, got ${node.type}`);
+  return node;
+}
 
 /**
  * Build a normalized Element with sensible defaults, overriding only the fields a

@@ -6,6 +6,99 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-31
+
+### Added
+- **`--enabled` selector modifier** — match only a control that is *actionable right now*
+  (`enabled` plus, on Android, `clickable`/`longClickable`), and with auto-wait, block until it
+  becomes so. A Submit/Check button that the app disables until a form validates is **present**
+  long before it is **usable**, so a presence match taps a dead control, nothing happens, and the
+  failure surfaces several steps later as a confusing timeout on whatever should have come next.
+  Found by porting a real flow whose Maestro original needed the same guard (`enabled: true`).
+  The filter is applied to the candidate pool *before* the healing tiers, so a disabled exact
+  match cannot shadow an enabled partial one.
+- **`vk ai` plans can branch, loop over an unknown-length list, and carry values — the fix for
+  compile-from-one-playthrough (#33).** Four additions to the plan IR, all evaluated by the
+  engine at replay, so a green run still costs **$0** and wakes no model:
+  - **`when`** — ordered n-way dispatch: the first branch whose selector is on screen runs, and
+    only it. For "this screen is one of N kinds, handle whichever it is". No match and no `else`
+    is a **failure**, deliberately the opposite of `if-present` ("this may or may not be there").
+    A silent skip inside a loop would spin to the cap doing nothing and report green.
+  - **One level of control nesting**, so `repeat { when { … } }` — the loop-that-branches shape
+    a dynamic flow needs — is finally expressible. `ir.ts` said *"a real flow that needs deeper
+    nesting is the trigger to revisit"*; this was that flow.
+  - **`while-present`** with an optional `bind` counter: repeats while a selector is present,
+    exposing the index as `{{ctx.<name>}}`. Walks an index-addressed list whose length is not
+    knowable at compile time ("tap each pair until they are all matched"). It may nest one level
+    deeper than the branching nodes, since its own body is leaves.
+  - **`read`** — capture `text`/`desc`/`id`/`idShort` off the live tree into `{{ctx.<name>}}`,
+    for the case where a test must act on a value it cannot know in advance (an app that marks
+    the correct answer in the semantic tree, and the test must then *type* it).
+- **Placeholders** in any positional, flag value, or control-node selector: `{{ctx.NAME}}`,
+  `{{env.NAME}}`, `{{uuid}}`, `{{timestamp}}`, `{{run_id}}`. `{{uuid}}`/`{{timestamp}}` are
+  generated **once per run** and memoized, so a signup uses the same address in the email field,
+  the confirm field and a later assert — and a different one next run, which is what stops a
+  cached plan from colliding with the account its previous run created. The store is per
+  `runPlan` call, not per process, so two tests in one `vk suite` do not share a value.
+  An unset `{{ctx.*}}` or `{{env.*}}` **fails the step** rather than substituting an empty
+  string. Placeholders live in the plan, never in the prose, so the cache key is unchanged.
+  This is deliberately template substitution, not an expression language — there is no `eval`,
+  no `vm`, and nothing to sandbox.
+
+### Changed
+- **A `repeat` that stops without ever seeing its selector now FAILS.** Both exits — cap
+  exhausted and the structural no-progress bail — used to return success, so a loop whose body
+  did nothing reported green. That is the reachable false green once bodies can branch (a `when`
+  that matches nothing does nothing, the loop spins, the run passes). A post-loop confirmation
+  check runs before failing, so a target that appears after the final iteration is not a false
+  red. **This can turn a previously-green scroll-until red if it never actually found its row.**
+- `validateNode` rejects an empty control body (`when`'s `else: []` is the one exception — the
+  explicit "match nothing, do nothing" opt-in), and tolerates `null` for optional fields, which
+  is how OpenAI/codex strict mode encodes an absent `else`/`bind`.
+
+### Fixed
+- **`vk ai`: the loop no-progress guard was blind to `content-desc`, so it aborted healthy loops
+  on Flutter apps.** `structuralHash` (`src/agent/engine.ts`) fingerprinted the screen as
+  `idShort|text|type`. Flutter maps `Semantics(label:)` to Android's `contentDescription` — i.e.
+  to `desc`, never to `text` — so on a Flutter app every content-bearing node has an empty `text`
+  and the fingerprint collapsed to `id||type` for the whole screen. Measured on a live screen: 14
+  elements, **0** with `text`, 8 with `desc`. Two entirely different questions hashed
+  byte-identically, and a loop answering a different one each iteration was declared stalled and
+  failed. Now `id|text|desc|type` — and the full `id` rather than `idShort` (the suffix after the
+  last `/`), so nodes from different namespaces cannot collide in what is meant to be a
+  fingerprint. Presented as flakiness rather than a hard failure, since it only fired when the app
+  happened to serve several same-shaped screens in a row.
+- **`assert --text` now matches `content-desc` as well as `text`.** The same blindness in a second
+  place: `evalAssert` compared `m.text` only, so on a Flutter app `assert @x --text "Welcome"`
+  could never pass — while `text:Welcome` as a *selector* resolved fine, because the selector layer
+  already falls back to `desc`. The two now agree. Strictly widening: it can only turn a false
+  negative into a pass.
+- **`vk ai`: an `if-present` guard now waits for its selector before deciding the optional UI is
+  absent.** `present()` (`src/agent/engine.ts`) took a single `uiautomator` dump and trusted a
+  successful-but-empty result — its retry loop only re-fired when the dump *threw*. Every
+  selector-resolving leaf command auto-waits ~5s, so a guard was strictly **less patient than a
+  bare `tap`**, and an interstitial that animated in a few hundred ms after a transition was
+  missed by the very construct meant to catch it. This is the first of the fixes for the
+  compile-from-one-playthrough problem (#33) — optional interstitials were one of its four
+  variation classes.
+- The window is **not** a pure wall-clock box. A UI dump measured ~2.4s on an emulator and can be
+  ~10x faster on a physical device, so a time-only budget gives a fast phone a dozen looks at the
+  screen and a slow emulator none — the first implementation of this fix was a silent no-op on
+  exactly the devices that needed it. A non-zero window therefore guarantees **at least two
+  looks**, and keeps polling while time remains. Cost of an absent guard is about one extra dump
+  (~2-3.5s on the reference emulator, proportionally less on real hardware).
+- A **loop's own exit check never pays the window** (`settleMs = 0`). That guard is absent on
+  every iteration by construction — that is what makes it a loop — so inheriting the window would
+  burn `cap ×` it (~37s at cap 25) to discover something already expected.
+- The transient-dump retry is unchanged and **orthogonal** to the new window: a dump that throws
+  is still retried once even with the window closed, so a flaky `uiautomator` call never reads as
+  "absent" and skips a body that should have run.
+
+### Added
+- **`VERIKUN_GUARD_SETTLE_MS`** — tune the `vk ai` guard settle window without a rebuild (`0`
+  restores the previous single-shot probe). The right value is device-dependent, so it is meant
+  to be measured against a real app rather than guessed.
+
 ## [0.10.0] - 2026-07-26
 
 ### Added

@@ -152,6 +152,14 @@ export class OpenAiProvider implements AgentProvider {
       );
     }
     parts.push('NATURAL-LANGUAGE TEST:\n' + input.nl);
+    if (input.retryFeedback) {
+      // Last, so it is the freshest thing in context: a previous compile of this same
+      // test lost something the prose stated. Naming it beats hoping the retry differs.
+      parts.push(
+        'YOUR PREVIOUS ATTEMPT AT THIS TEST WAS REJECTED. Fix this and emit the whole plan again:\n' +
+          input.retryFeedback,
+      );
+    }
 
     // Generous completion budget: on reasoning models the plan JSON shares this ceiling
     // with reasoning tokens, so leave headroom (a 'length' finish is surfaced as an error).

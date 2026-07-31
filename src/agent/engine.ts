@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { Element } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
 import { SelectorNotFoundError, AmbiguousSelectorError } from '../errors';
-import { Plan, PlanNode, LeafStep, leafToFlags, validateNode, InvalidPlanError } from './ir';
+import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
 import { AgentProvider } from './provider';
 
@@ -46,6 +47,15 @@ export interface EngineDeps {
   markHealed?: (message?: string) => void;
   /** Max model repairs per failing step before giving up. Default 3. */
   maxRepairs?: number;
+  /** Seed values for the run's {{ctx.*}} store. */
+  initialCtx?: Record<string, string>;
+  /** Value for {{run_id}} — the Recorder run id, so a generated value is traceable
+   *  back to its report. */
+  runId?: string;
+  /** How long an `if-present` guard waits for its selector before concluding "absent".
+   *  Default DEFAULT_GUARD_SETTLE_MS. Injected (not read from process.env here) so the
+   *  engine stays dependency-free and unit-testable with a fake clock-free window of 0. */
+  guardSettleMs?: number;
   /** Epoch-ms wall-clock deadline for the whole run; once passed, the engine aborts
    *  between steps, loop iterations, and repairs (bounds a runaway plan). */
   deadline?: number;
@@ -65,6 +75,9 @@ export interface EngineResult {
 
 type StepResult =
   | { status: 'ok' }
+  /** The element a guard matched vanished before the guarded body could act on it, and
+   *  it is genuinely gone now. Stop this body; the enclosing guard treats it as done. */
+  | { status: 'guard-gone' }
   | { status: 'fail'; reason: string; where: string }
   | { status: 'budget' }
   | { status: 'timeout' };
@@ -80,15 +93,32 @@ const describe = (leaf: LeafStep): string =>
  *  the guard in execLeaf. */
 const isScreenshotLeaf = (leaf: LeafStep): boolean => leaf.command === 'screenshot' || leaf.command === 'shot';
 
-/** A structural fingerprint of the screen: sorted id+text+type set. Used for the
- *  loop no-progress check — deliberately NOT the raw hierarchy (its node ordering
- *  is nondeterministic between identical states, which would false-trip). */
+/** A structural fingerprint of the screen: a sorted id+text+desc+type set. Used for the
+ *  loop no-progress check — deliberately NOT the raw hierarchy (its node ordering is
+ *  nondeterministic between identical states, which would false-trip).
+ *
+ *  BOTH content fields are sampled, and that is load-bearing rather than belt-and-braces.
+ *  Sampling `text` alone made this blind on Flutter apps, which map `Semantics(label:)` to
+ *  Android's `contentDescription` — i.e. to `desc`, never to `text`. Measured on a live
+ *  Flutter screen: 14 elements, **0** carrying `text`, 8 carrying `desc`. The fingerprint
+ *  degenerated to `id||type` for the entire screen, so two completely different questions
+ *  hashed byte-identically and a loop answering them correctly was declared stalled.
+ *
+ *  Uses the full `id`, not `idShort` (the suffix after the last '/'), so elements from
+ *  different packages/namespaces cannot collide in what is meant to be a fingerprint.
+ *
+ *  When in doubt, sample MORE: an over-sensitive hash only costs a loop running to its cap;
+ *  an under-sensitive one fails a passing test, since a stalled loop is now fatal. */
 function structuralHash(els: Element[]): string {
   return els
-    .map((e) => `${e.idShort}|${e.text}|${e.type}`)
+    .map((e) => `${e.id}|${e.text}|${e.desc}|${e.type}`)
     .sort()
     .join('\n');
 }
+
+/** An unresolvable {{...}} placeholder. Terminal and never healed: the model cannot
+ *  repair a missing value, and substituting one would be inventing test data. */
+class CtxError extends Error {}
 
 function isHealable(outcome: ExecOutcome): boolean {
   return (
@@ -100,8 +130,89 @@ function isHealable(outcome: ExecOutcome): boolean {
 /** Default wall-clock ceiling for a whole `vk ai` run (overridable via --timeout). */
 export const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000;
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** How long a CONDITIONAL guard (`if-present`) waits for its selector to show up
+ *  before concluding "absent". Interstitials animate in: a permission dialog or promo
+ *  panel typically lands a few hundred ms after the transition that triggers it. Every
+ *  selector-resolving leaf command already auto-waits ~5s (cli.ts resolveOneWaiting),
+ *  so before this window existed a guard was strictly LESS patient than a bare `tap` —
+ *  and an optional dialog could be missed by the very construct meant to catch it.
+ *  Kept far below the leaf 5s because an ABSENT guard pays this window, every time, and
+ *  skipping fast is the common case.
+ *
+ *  NOTE the floor in present(): any non-zero window buys at least TWO looks at the screen.
+ *  Wall clock alone is not a usable unit here — a uiautomator dump measured ~2.4s on
+ *  emulator-5554 and can be ~10x faster on a physical device, so a pure time box gives a
+ *  fast phone a dozen looks and a slow emulator none. Set 0 to restore the old
+ *  single-shot probe. Override per run with VERIKUN_GUARD_SETTLE_MS (see cli.ts). */
+export const DEFAULT_GUARD_SETTLE_MS = 1500;
+
+/** Re-dump cadence inside a guard's settle window. */
+const GUARD_POLL_MS = 150;
+
+/** Consecutive identical screen snapshots before a loop is believed to be stuck.
+ *
+ *  This check is a TIME SAVER and nothing more. A loop already fails when its exit
+ *  selector never appears, so stopping early buys no safety — it only decides how long we
+ *  wait before reaching the same verdict. That asymmetry is the whole design: a false
+ *  positive fails a passing test, while a false negative costs `cap` iterations of runtime.
+ *
+ *  Tuned from a measured false positive, twice over. At 2 strikes the same plan answered
+ *  17 questions on one run and bailed after 4 on the next — the loop bodies drive screen
+ *  transitions, and a single dump lands mid-transition often enough to produce a
+ *  coincidental pair of matching hashes.
+ *
+ *  4 discriminates well because the two cases differ in character, not just degree: a loop
+ *  genuinely at rest (a scrolled-to-the-bottom list — the case this exists for) yields
+ *  identical hashes indefinitely, whereas an animating screen rarely yields four in a row. */
+const NO_PROGRESS_STRIKES = 4;
+
 export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResult> {
   const maxRepairs = deps.maxRepairs ?? 3;
+  const guardSettleMs = deps.guardSettleMs ?? DEFAULT_GUARD_SETTLE_MS;
+
+  // The run's mutable state, scoped to THIS runPlan call — never module-level. `vk suite`
+  // runs every test in one process, so a shared store would hand two sign-up tests the
+  // same {{uuid}} and recreate the collision it exists to prevent. Per-leaf generation
+  // would be equally wrong: a sign-up needs the same address in the email field, the
+  // confirm field, and a later assert.
+  const ctx = new Map<string, string>(Object.entries(deps.initialCtx ?? {}));
+  const generated = new Map<string, string>();
+  const runId = deps.runId ?? 'run';
+
+  /** Resolve {{...}} placeholders. A closed set on purpose — this is a template
+   *  substitution, not an expression language, so there is nothing to sandbox.
+   *  Unknown placeholders are left verbatim rather than blanked: a silent empty string
+   *  is how a typo becomes a false green. */
+  function interpolate(s: string): string {
+    if (!s.includes('{{')) return s;
+    return s.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}/g, (whole, name: string) => {
+      if (name.startsWith('ctx.')) {
+        const key = name.slice(4);
+        const v = ctx.get(key);
+        if (v === undefined) throw new CtxError(`{{${name}}} is not set — no earlier step stored it`);
+        return v;
+      }
+      if (name.startsWith('env.')) {
+        const key = name.slice(4);
+        const v = process.env[key];
+        // Loud, not empty: a missing CI secret must fail the step, not type "" into a field.
+        if (v === undefined || v === '') throw new CtxError(`{{${name}}} is not set in the environment`);
+        return v;
+      }
+      if (name === 'run_id') return runId;
+      // uuid/timestamp are generated ONCE per run and memoized by placeholder name.
+      if (name === 'uuid' || name === 'timestamp') {
+        const existing = generated.get(name);
+        if (existing !== undefined) return existing;
+        const v = name === 'uuid' ? randomUUID() : String(Date.now());
+        generated.set(name, v);
+        return v;
+      }
+      return whole;
+    });
+  }
   const overDeadline = (): boolean => deps.deadline !== undefined && Date.now() >= deps.deadline;
   const improvements: string[] = [];
   let modelRepairs = 0;
@@ -117,39 +228,91 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     }
   };
 
-  const present = async (selector: string): Promise<boolean> => {
-    // Re-fetch on a dump FAILURE (uiautomator can throw transiently) so a flaky dump at
-    // a guard check doesn't silently read as "absent" and skip a body that should run.
-    // Once a dump SUCCEEDS (even if empty) we trust it — no slow re-poll, so a genuinely
-    // absent guard still skips fast (the common if-present case).
-    let els: Element[] | undefined;
-    for (let i = 0; i < 2 && els === undefined; i++) {
-      try {
-        els = await deps.getElements();
-      } catch {
-        /* transient dump failure — retry once before concluding "absent" */
-      }
-    }
-    if (els === undefined) return false;
+  /** Is `selector` on screen? `settleMs` is how long to keep re-dumping while it is
+   *  absent before answering "no" — see DEFAULT_GUARD_SETTLE_MS.
+   *
+   *  Two retry behaviours here are deliberately ORTHOGONAL, and conflating them is the
+   *  bug this signature exists to prevent:
+   *    - a dump that THROWS is always retried once, even at settleMs=0, so a flaky
+   *      uiautomator call never silently reads as "absent" and skips a body that
+   *      should run;
+   *    - a dump that SUCCEEDS but does not match is re-polled only while settleMs
+   *      remains. At settleMs=0 that means exactly one pass — the fast, single-shot
+   *      probe a loop-exit check needs.
+   *  So one dump attempt always happens regardless of the window. */
+  const present = async (selector: string, settleMs: number): Promise<boolean> => {
+    let sel;
     try {
-      return matchElements(els, parseSelector(selector)).matches.length > 0;
+      sel = parseSelector(selector);
     } catch (e) {
       // A guard selector that won't parse is a compiler/plan bug — surface it (then treat
       // as not present) rather than silently skip the guarded body.
       deps.log(`[ai] guard selector '${selector}' did not parse (${(e as Error).message}) — treating as not present`);
       return false;
     }
+    const deadline = Date.now() + Math.max(0, settleMs);
+    // A non-zero window must buy at least one SECOND look, independent of the clock.
+    // Measured on emulator-5554: one uiautomator dump costs ~2.4s, which already exceeds
+    // a 1.5s window — so a purely time-boxed loop returns after a single dump and the
+    // window is a silent no-op on exactly the slow devices that need it most. Dump cost
+    // swings ~10x across devices, so "how long to wait" cannot be expressed in wall clock
+    // alone without making the guard's patience device-dependent.
+    let looks = 0;
+    const minLooks = settleMs > 0 ? 2 : 1;
+    for (;;) {
+      let els: Element[] | undefined;
+      for (let i = 0; i < 2; i++) {
+        try {
+          els = await deps.getElements();
+        } catch {
+          els = undefined; // transient dump failure — retry once before concluding "absent"
+        }
+        // An EMPTY tree is not a screen, it is a bad read: a live app always has nodes, and
+        // this device routinely returns a partial/blank dump mid-transition (measured: `ui`
+        // reported zero elements while `tap`'s auto-wait found its target 3.1s later).
+        // Trusting it means "absent" — which silently skips a guard, or sends a loop round
+        // again to tap something that already went away. Retry once even at settleMs=0,
+        // which is what the loop-exit check runs at.
+        if (els !== undefined && els.length > 0) break;
+      }
+      looks++;
+      if (els !== undefined && matchElements(els, sel).matches.length > 0) return true;
+      const remaining = deadline - Date.now();
+      if (looks >= minLooks && remaining <= 0) return false;
+      await sleep(Math.max(0, Math.min(GUARD_POLL_MS, remaining)));
+    }
   };
 
-  const runLeaf = (leaf: LeafStep): Promise<ExecOutcome> =>
-    deps.exec(leaf.command, leaf.positionals, leafToFlags(leaf));
+  const runLeaf = (leaf: LeafStep): Promise<ExecOutcome> => {
+    const flags = leafToFlags(leaf);
+    for (const k of Object.keys(flags)) flags[k] = interpolate(flags[k]);
+    return deps.exec(leaf.command, leaf.positionals.map(interpolate), flags);
+  };
 
   /** Execute one leaf, healing a selector miss/ambiguity via the model up to the cap.
    *  `replace` writes a repaired leaf back into the plan so it persists on green. */
-  async function execLeaf(leaf: LeafStep, where: string, replace: (l: LeafStep) => void): Promise<StepResult> {
+  async function execLeaf(leaf: LeafStep, where: string, replace: (l: LeafStep) => void, guard?: string): Promise<StepResult> {
     deps.log(`[ai] ${where}: ${describe(leaf)}`);
     let current = leaf;
     let outcome = await runLeaf(current);
+
+    // Guard raced the body: `if-present X { … tap X … }` checked X, X was there, and by
+    // the time the tap ran it had gone. That is not drift and there is nothing to repair —
+    // it is exactly the transient the guard exists to tolerate, and on a fast-transitioning
+    // app it happens routinely. Checked BEFORE the heal loop, because otherwise it costs
+    // three model calls to conclude that a thing which was optional is absent.
+    // Deliberately narrow: only the leaf that targets the guard's own selector, and only
+    // once the guard is confirmed false again.
+    if (
+      guard !== undefined &&
+      outcome.error instanceof SelectorNotFoundError &&
+      current.positionals.some((p) => interpolate(p) === interpolate(guard)) &&
+      !(await present(interpolate(guard), 0))
+    ) {
+      deps.log(`[ai] ${where}: '${interpolate(guard)}' disappeared after the guard matched — ending the guarded body`);
+      return { status: 'guard-gone' };
+    }
+
     let attempts = 0;
 
     while (isHealable(outcome) && attempts < maxRepairs) {
@@ -231,50 +394,187 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     return { status: 'fail', where, reason };
   }
 
-  async function walkBody(body: LeafStep[], parentWhere: string): Promise<StepResult> {
+  async function walkBody(body: PlanNode[], parentWhere: string, guard?: string): Promise<StepResult> {
     for (let j = 0; j < body.length; j++) {
-      const res = await execLeaf(body[j], `${parentWhere}.body[${j}]`, (l) => (body[j] = l));
+      const res = await walkNode(body[j], `${parentWhere}[${j}]`, (l) => (body[j] = l), guard);
+      // 'guard-gone' ends this body, not the run: the thing the guard matched went away
+      // mid-body, which is precisely the situation the guard exists to tolerate.
+      if (res.status === 'guard-gone') return { status: 'ok' };
       if (res.status !== 'ok') return res;
     }
     return { status: 'ok' };
   }
 
-  async function walkNode(node: PlanNode, where: string, replace: (l: LeafStep) => void): Promise<StepResult> {
+  /** Capture a value from the live tree into ctx. Not routed through `exec`: the
+   *  ExecFn contract returns only {code,error}, so a leaf could never hand a value back. */
+  async function execRead(node: ReadNode, where: string): Promise<StepResult> {
+    const selector = interpolate(node.selector);
+    let sel;
+    try {
+      sel = parseSelector(selector);
+    } catch (e) {
+      return { status: 'fail', where, reason: `read selector '${selector}' did not parse: ${(e as Error).message}` };
+    }
+    // Same patience as a conditional guard: the value may not have rendered yet.
+    const deadline = Date.now() + Math.max(0, guardSettleMs);
+    let looks = 0;
+    const minLooks = guardSettleMs > 0 ? 2 : 1;
+    for (;;) {
+      const els = await safeElements();
+      const { matches } = matchElements(els, sel);
+      looks++;
+      if (matches.length > 0) {
+        const value = String(matches[0][node.field] ?? '');
+        ctx.set(node.into, value);
+        deps.log(`[ai] ${where}: read ${node.field} of '${selector}' → ctx.${node.into} = ${JSON.stringify(value)}`);
+        return { status: 'ok' };
+      }
+      const remaining = deadline - Date.now();
+      if (looks >= minLooks && remaining <= 0) {
+        // Terminal, not healable: a missing source value would silently propagate an
+        // empty string into every later {{ctx.*}} use, which is a false green waiting
+        // to happen. Fail where the information is.
+        return { status: 'fail', where, reason: `read found no element matching '${selector}' (nothing to store in ctx.${node.into})` };
+      }
+      await sleep(Math.max(0, Math.min(GUARD_POLL_MS, remaining)));
+    }
+  }
+
+  async function walkNode(node: PlanNode, where: string, replace: (l: LeafStep) => void, guard?: string): Promise<StepResult> {
+    try {
+      return await walkNodeInner(node, where, replace, guard);
+    } catch (e) {
+      // An unresolvable placeholder is a plan defect, not a device failure: report it
+      // as this step's terminal failure rather than letting it abort the whole run as
+      // an "unexpected error" (exit 3).
+      if (e instanceof CtxError) return { status: 'fail', where, reason: e.message };
+      throw e;
+    }
+  }
+
+  async function walkNodeInner(node: PlanNode, where: string, replace: (l: LeafStep) => void, guard?: string): Promise<StepResult> {
     switch (node.type) {
       case 'command':
-        return execLeaf(node, where, replace);
+        return execLeaf(node, where, replace, guard);
+
+      case 'read':
+        return execRead(node, where);
 
       case 'if-present': {
-        if (await present(node.selector)) {
-          deps.log(`[ai] ${where}: if-present '${node.selector}' → present, running ${node.body.length} step(s)`);
-          return walkBody(node.body, where);
+        const selector = interpolate(node.selector);
+        if (await present(selector, guardSettleMs)) {
+          deps.log(`[ai] ${where}: if-present '${selector}' → present, running ${node.body.length} step(s)`);
+          return walkBody(node.body, `${where}.body`, selector);
         }
-        deps.log(`[ai] ${where}: if-present '${node.selector}' → absent, skipping`);
+        deps.log(`[ai] ${where}: if-present '${selector}' → absent, skipping`);
         return { status: 'ok' };
+      }
+
+      case 'when': {
+        for (let b = 0; b < node.branches.length; b++) {
+          const selector = interpolate(node.branches[b].selector);
+          // Ordered: first present branch wins, and only it runs. The settle window is
+          // per NODE, spent on the first branch checked — re-polling every branch would
+          // cost cap x branches x window inside a loop, and would let a slower-appearing
+          // earlier branch beat an already-present later one (making dispatch depend on
+          // timing rather than on order).
+          if (await present(selector, b === 0 ? guardSettleMs : 0)) {
+            deps.log(`[ai] ${where}: when → branch ${b} '${selector}' matched`);
+            return walkBody(node.branches[b].body, `${where}.branches[${b}].body`);
+          }
+        }
+        if (node.else) {
+          deps.log(`[ai] ${where}: when → no branch matched, running else (${node.else.length} step(s))`);
+          return walkBody(node.else, `${where}.else`);
+        }
+        // No branch, no else => FAIL. Skipping here is the false-green this node exists
+        // to prevent: inside a loop it would spin to the cap doing nothing and pass.
+        const tried = node.branches.map((b) => `'${interpolate(b.selector)}'`).join(', ');
+        return {
+          status: 'fail',
+          where,
+          reason: `when: no branch matched (tried ${tried}) and no else was given — the screen is one this test does not handle`,
+        };
       }
 
       case 'repeat': {
         let prevHash = '';
-        for (let i = 0; i < node.cap; i++) {
+        let stalled = 0;
+        let satisfied = false;
+        let i = 0;
+        for (; i < node.cap; i++) {
           if (overDeadline()) {
             deps.log(`[ai] ${where}: run timeout reached — stopping repeat after ${i} iteration(s)`);
             return { status: 'timeout' };
           }
-          if (await present(node.selector)) {
+          // settleMs=0 on purpose: this guard is absent on EVERY iteration by construction
+          // (that is what makes it a loop), so a settle window here would be paid `cap`
+          // times — 25 × 1.5s ≈ 37s of dead wall-clock per loop — to discover something
+          // we already expect. The interstitial case that needs patience is `if-present`.
+          if (await present(interpolate(node.selector), 0)) {
+            satisfied = true;
             deps.log(`[ai] ${where}: repeat reached '${node.selector}' after ${i} iteration(s)`);
-            return { status: 'ok' };
+            break;
           }
-          const hash = structuralHash(await safeElements());
-          if (i > 0 && hash === prevHash) {
-            deps.log(`[ai] ${where}: repeat made no progress (screen unchanged) — stopping after ${i} iteration(s)`);
-            return { status: 'ok' };
+          // No-progress detection over a SINGLE un-settled dump is unreliable on a real
+          // app: mid-transition frames read as empty (measured — `vk ui` reported zero
+          // elements on a screen where `tap`'s auto-wait found its target 3.1s later).
+          // Two such frames hash identically and look exactly like a stuck loop. Since a
+          // stalled loop is now a FAILURE, a false positive here fails a passing test, so
+          // this needs two independent guards:
+          //   1. an empty dump is UNKNOWN, not "unchanged" — never a progress sample;
+          //   2. require consecutive identical NON-EMPTY snapshots before believing it.
+          const els = await safeElements();
+          if (els.length === 0) {
+            deps.log(`[ai] ${where}: screen read as empty (mid-transition?) — not counting it as progress either way`);
+          } else {
+            const hash = structuralHash(els);
+            stalled = i > 0 && hash === prevHash ? stalled + 1 : 0;
+            prevHash = hash;
+            if (stalled >= NO_PROGRESS_STRIKES) {
+              deps.log(`[ai] ${where}: repeat made no progress across ${stalled + 1} checks — stopping after ${i} iteration(s)`);
+              break;
+            }
           }
-          prevHash = hash;
           deps.log(`[ai] ${where}: repeat iteration ${i + 1}/${node.cap}`);
-          const res = await walkBody(node.body, `${where}#${i + 1}`);
+          const res = await walkBody(node.body, `${where}#${i + 1}.body`);
           if (res.status !== 'ok') return res;
         }
-        deps.log(`[ai] ${where}: repeat hit cap ${node.cap} without '${node.selector}' (continuing)`);
+        // A loop that stopped without ever seeing its target did NOT do its job. Both
+        // exits (cap exhausted, and the no-progress bail) used to return ok, which let a
+        // loop whose body did nothing report green — the reachable false green.
+        if (!satisfied && !(await present(interpolate(node.selector), guardSettleMs))) {
+          return {
+            status: 'fail',
+            where,
+            reason: `repeat stopped after ${i} iteration(s) without '${interpolate(node.selector)}' ever appearing`,
+          };
+        }
+        return { status: 'ok' };
+      }
+
+      case 'while-present': {
+        if (node.bind) ctx.set(node.bind, '0');
+        let ran = 0;
+        for (let i = 0; i < node.cap; i++) {
+          if (overDeadline()) {
+            deps.log(`[ai] ${where}: run timeout reached — stopping while-present after ${i} iteration(s)`);
+            return { status: 'timeout' };
+          }
+          const selector = interpolate(node.selector);
+          // First check gets the settle window (the list may still be rendering); later
+          // checks are single-shot, since by then the list is up and we are just walking it.
+          if (!(await present(selector, i === 0 ? guardSettleMs : 0))) {
+            deps.log(`[ai] ${where}: while-present '${selector}' → absent, loop done after ${ran} iteration(s)`);
+            return { status: 'ok' };
+          }
+          deps.log(`[ai] ${where}: while-present iteration ${i + 1}/${node.cap} ('${selector}')`);
+          const res = await walkBody(node.body, `${where}#${i + 1}.body`, selector);
+          if (res.status !== 'ok') return res;
+          ran++;
+          if (node.bind) ctx.set(node.bind, String(Number(ctx.get(node.bind) ?? '0') + 1));
+        }
+        deps.log(`[ai] ${where}: while-present hit cap ${node.cap}`);
         return { status: 'ok' };
       }
     }

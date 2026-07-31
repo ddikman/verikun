@@ -10,7 +10,8 @@ import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/forma
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
 import { Recorder, isRecordable, RunStep } from './run';
 import { downscalePng } from './image';
-import { runPlan, DEFAULT_RUN_TIMEOUT_MS } from './agent/engine';
+import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
+import { lintPlan } from './agent/lint';
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
 import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-provider';
@@ -58,7 +59,11 @@ function buildSelector(raw: string | undefined, flags: Flags): Selector {
   if (!raw) {
     throw new CliError('Missing selector. e.g. `@login_button`, `text:Login`, `desc:Submit`.', 2);
   }
-  return parseSelector(raw, { contains: flagBool(flags, 'contains'), index: flagNum(flags, 'index') });
+  return parseSelector(raw, {
+    contains: flagBool(flags, 'contains'),
+    index: flagNum(flags, 'index'),
+    enabled: flagBool(flags, 'enabled'),
+  });
 }
 
 export function parsePoint(s: string): Point {
@@ -497,6 +502,19 @@ function shotMaxEdge(): number {
   return DEFAULT_SHOT_MAX_EDGE;
 }
 
+/** How long a `vk ai` `if-present` guard waits for its selector before deciding the
+ *  optional UI is absent. `VERIKUN_GUARD_SETTLE_MS` overrides the engine default so the
+ *  window can be tuned against a real app without a rebuild (0 restores the old
+ *  single-shot probe). Exported for unit tests. */
+export function guardSettleMs(): number {
+  const env = process.env.VERIKUN_GUARD_SETTLE_MS;
+  if (env !== undefined && env !== '') {
+    const n = Number(env);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return DEFAULT_GUARD_SETTLE_MS;
+}
+
 /** Resolve an `--out` path and confine it to the working directory. A host-side write
  *  (a screenshot PNG, captured device logs) must never land outside cwd via a `..`
  *  traversal or an absolute path — including when driven by `vk ai` model output, whose
@@ -649,12 +667,21 @@ export function evalAssert(
     reason = 'not found';
   } else if (wantText !== undefined) {
     const contains = flagBool(flags, 'contains');
-    pass = matches.some((m) =>
+    // Compare against text OR content-desc, mirroring what the selector layer already
+    // does (a `text:` selector falls back to desc when nothing matches on text). Without
+    // the fallback this could never pass on a Flutter app, which maps Semantics(label:)
+    // to contentDescription and leaves `text` empty on every node — while `text:Foo` as a
+    // SELECTOR resolved fine, so the contradiction was silent and read as a real failure.
+    // Strictly widening: it only turns false negatives into passes.
+    const content = (m: Element): string[] => [m.text, m.desc].filter((v) => v !== '');
+    const hit = (v: string): boolean =>
       contains
-        ? m.text.toLowerCase().includes(wantText.toLowerCase())
-        : m.text.trim().toLowerCase() === wantText.trim().toLowerCase(),
-    );
-    reason = pass ? 'text matched' : `found, but text != ${JSON.stringify(wantText)} (got ${JSON.stringify(matches.map((m) => m.text))})`;
+        ? v.toLowerCase().includes(wantText.toLowerCase())
+        : v.trim().toLowerCase() === wantText.trim().toLowerCase();
+    pass = matches.some((m) => content(m).some(hit));
+    reason = pass
+      ? 'text matched'
+      : `found, but text != ${JSON.stringify(wantText)} (got ${JSON.stringify(matches.flatMap(content))})`;
   } else {
     pass = true;
     reason = `found ${matches.length}`;
@@ -1057,8 +1084,38 @@ async function obtainPlan(
   const seed = findSeed(key);
   if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
   err(`[ai] compiling '${file}' with ${opts.model} (effort ${opts.effort ?? 'default'})…`);
-  const compiled = await provider.compile({ nl: key.nl, pkg: key.pkg, platform: key.platform, seed: seed?.plan });
+
+  let compiled = await provider.compile({ nl: key.nl, pkg: key.pkg, platform: key.platform, seed: seed?.plan });
   cost.add(compiled.usage, 'compile');
+
+  // Compilation is nondeterministic: the same prose has produced `launch --clear` on one
+  // run and plain `launch` on the next, silently dropping something the test stated. One
+  // guided retry is much cheaper than discovering it as a device-run failure several steps
+  // later. Budget is re-checked HERE because the first attempt has already been billed.
+  const findings = lintPlan(key.nl, compiled.plan);
+  if (findings.length > 0) {
+    const feedback = findings.map((f) => `- ${f.message}`).join('\n');
+    err(`[ai] compiled plan does not match the test — recompiling once:\n${feedback}`);
+    if (cost.exceeded()) {
+      err('[ai] cost ceiling reached — keeping the first plan rather than paying for a retry');
+    } else {
+      const retry = await provider.compile({
+        nl: key.nl,
+        pkg: key.pkg,
+        platform: key.platform,
+        seed: seed?.plan,
+        retryFeedback: feedback,
+      });
+      cost.add(retry.usage, 'compile');
+      const still = lintPlan(key.nl, retry.plan);
+      // Keep the retry either way: it was compiled with strictly more information. If it
+      // still trips the lint, say so rather than pretending the plan is clean.
+      if (still.length > 0) err(`[ai] the retry still does not match the test — running it anyway:\n${still.map((f) => `- ${f.message}`).join('\n')}`);
+      else err('[ai] recompile matches the test');
+      compiled = retry;
+    }
+  }
+
   err(`[ai] compiled ${compiled.plan.steps.length} top-level step(s) · ${cost.summaryLine()}`);
   try {
     writePlan(key, compiled.plan);
@@ -1177,7 +1234,7 @@ async function runAiTest(
     const sealed = Recorder.archive();
     err(`[ai] archived the active run ('${existing.name}', ${existing.steps.length} step(s)) → ${sealed.dir}`);
   }
-  Recorder.start(`ai: ${basename(file)}`, platform, device, true);
+  const started = Recorder.start(`ai: ${basename(file)}`, platform, device, true);
 
   // Suppress per-step `out()` so stdout stays the one final result; progress -> stderr.
   const prevQuiet = setOutputQuiet(true);
@@ -1191,6 +1248,8 @@ async function runAiTest(
       log: (m) => err(m),
       markHealed: (m) => Recorder.markLastStepHealed(m),
       maxRepairs: 3,
+      guardSettleMs: guardSettleMs(),
+      runId: started.id,
       deadline,
     });
   } catch (e) {
@@ -1707,6 +1766,8 @@ AUTO-WAIT (selector lookups retry until they resolve)
   up to 5s when a lookup misses, so a settling UI needs no explicit \`wait\`.
   --wait <dur>   override the window: 8s, 800ms, or bare ms (3000); 0 disables
   --no-wait      fail fast on the first miss (same as --wait 0)
+  A \`vk ai\` plan's if-present guard has its own smaller settle window (>=2 looks at
+  the screen); VERIKUN_GUARD_SETTLE_MS tunes it, 0 = old single-shot probe.
   Ambiguity is never waited on (the elements are already there). The \`wait\`
   command stays for explicit polling, including --gone, with --timeout/--interval.
 

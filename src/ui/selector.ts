@@ -31,6 +31,12 @@ export interface Selector {
   value: string;
   contains: boolean;
   index?: number;
+  /** Only match elements the UI currently considers actionable (`enabled` and, when the
+   *  platform reports it, `clickable`). A submit button that is greyed out until the form
+   *  is valid is PRESENT long before it is usable, so a plain presence match taps a dead
+   *  control and the flow silently does nothing. Combined with auto-wait this becomes
+   *  "wait until it is actually pressable". */
+  enabled?: boolean;
   raw: string;
 }
 
@@ -41,7 +47,7 @@ export interface MatchResult {
 
 export function parseSelector(
   raw: string,
-  opts: { contains?: boolean; index?: number } = {},
+  opts: { contains?: boolean; index?: number; enabled?: boolean } = {},
 ): Selector {
   let kind: SelectorKind = 'text';
   let value = raw;
@@ -58,8 +64,21 @@ export function parseSelector(
   }
 
   if (!value) throw new CliError(`Empty selector value in '${raw}'`, 2);
-  return { kind, value, contains: !!opts.contains, index: opts.index, raw };
+  return { kind, value, contains: !!opts.contains, index: opts.index, enabled: opts.enabled, raw };
 }
+
+/** Is this element actionable right now?
+ *
+ *  Just `enabled` — the a11y attribute, matching what Maestro's `enabled: true` means.
+ *  An earlier version also required `clickable || longClickable`, reasoning that a
+ *  disabled Button might report clickable=false. That was speculation and it was wrong in
+ *  the direction that hurts: plenty of legitimate tap targets are CONTAINERS whose own
+ *  clickable flag is false (the tappable child is inside), so the extra conjunct filtered
+ *  out real elements and turned `--enabled` into a source of phantom "not found" misses —
+ *  which then burned model repairs. Prefer under-filtering here: a tap on a present-but-
+ *  odd element fails loudly, whereas a selector that silently matches nothing looks like
+ *  app drift and sends the heal loop chasing it. */
+const isActionable = (e: Element): boolean => e.enabled;
 
 const norm = (s: string) => s.trim().toLowerCase();
 const strip = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -125,6 +144,9 @@ function tiers(sel: Selector): Matcher[] {
 }
 
 export function matchElements(elements: Element[], sel: Selector): MatchResult {
+  // Applied BEFORE the tier ladder, not after: filtering the candidate pool keeps a
+  // disabled exact match from shadowing an enabled partial one.
+  if (sel.enabled) elements = elements.filter(isActionable);
   for (const { tier, test } of tiers(sel)) {
     const found = elements.filter(test);
     if (found.length === 0) continue;

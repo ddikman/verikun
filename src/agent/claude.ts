@@ -54,6 +54,14 @@ export class ClaudeProvider implements AgentProvider {
       );
     }
     parts.push('NATURAL-LANGUAGE TEST:\n' + input.nl);
+    if (input.retryFeedback) {
+      // Last, so it is the freshest thing in context: a previous compile of this same
+      // test lost something the prose stated. Naming it beats hoping the retry differs.
+      parts.push(
+        'YOUR PREVIOUS ATTEMPT AT THIS TEST WAS REJECTED. Fix this and emit the whole plan again:\n' +
+          input.retryFeedback,
+      );
+    }
 
     const { json, usage } = await this.call(GRAMMAR, parts.join('\n\n'), PLAN_JSON_SCHEMA, 8192);
     return { plan: parsePlan(json), usage };

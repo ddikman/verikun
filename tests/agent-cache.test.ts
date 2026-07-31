@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planKey, readPlan, writePlan, findSeed, nlHash } from '../src/agent/cache';
 import { Plan, RepeatNode } from '../src/agent/ir';
+import { asLeaf } from './helpers';
 
 // The cache writes under ./.verikun (cwd-relative), so each test runs inside a
 // throwaway temp dir. node:test runs a file's tests sequentially, so chdir is safe.
@@ -68,7 +69,7 @@ test('readPlan: a repeat-body leaf survives the write→read round-trip (control
   assert.equal(step0.type, 'repeat');
   // the nested body leaf (what a heal rewrites) must round-trip intact — not dropped by
   // writePlan's serialization nor by parsePlan's re-validation on read
-  assert.equal((step0 as RepeatNode).body[0].positionals[0], '@signin');
+  assert.equal(asLeaf((step0 as RepeatNode).body[0]).positionals[0], '@signin');
 });
 
 test('readPlan: a plan compiled by a different verikun/grammar is invalidated (forces recompile)', () => {
