@@ -48,11 +48,136 @@ test('validateNode: rejects an unknown command (the hallucination guard)', () =>
   );
 });
 
-test('validateNode: rejects a control node nested in a control body (shallow only in v1)', () => {
+const tapLeaf = { type: 'command', command: 'tap', positionals: ['@a'], flags: [] };
+
+test('validateNode: accepts a control node nested ONE level (repeat containing a when)', () => {
+  // The loop-that-branches shape: "until the flow ends, handle whichever screen is showing".
+  const node = validateNode(
+    {
+      type: 'repeat',
+      selector: 'text:Review',
+      cap: 20,
+      body: [{ type: 'when', branches: [{ selector: '@multi', body: [tapLeaf] }] }],
+    },
+    'x',
+  );
+  assert.equal(node.type, 'repeat');
+});
+
+test('validateNode: rejects a THIRD level of the BRANCHING nodes (when/repeat)', () => {
+  // if-present and while-present are allowed this deep (leaf-only bodies); when and
+  // repeat are not — they are the ones whose bodies want to be deep, and allowing them
+  // is what would actually blow up the schema.
   assert.throws(
-    () => validateNode({ type: 'if-present', selector: 'x', body: [{ type: 'if-present', selector: 'y', body: [] }] }, 'x'),
+    () =>
+      validateNode(
+        {
+          type: 'repeat',
+          selector: 'text:Review',
+          cap: 5,
+          body: [
+            {
+              type: 'when',
+              branches: [
+                { selector: '@a', body: [{ type: 'when', branches: [{ selector: '@b', body: [tapLeaf] }] }] },
+              ],
+            },
+          ],
+        },
+        'x',
+      ),
     InvalidPlanError,
   );
+});
+
+test('validateNode: while-present may sit one level deeper than the branching nodes', () => {
+  // repeat { when { while-present { tap } } } — a branch that walks an index-addressed
+  // list. Without this the model hard-codes _0.._3 and the plan breaks the moment a
+  // question has a different number of pairs.
+  const node = validateNode(
+    {
+      type: 'repeat',
+      selector: 'text:Review',
+      cap: 20,
+      body: [
+        {
+          type: 'when',
+          branches: [
+            {
+              selector: '@pairs',
+              body: [{ type: 'while-present', selector: 'id:opt_{{ctx.i}}', bind: 'i', cap: 10, body: [tapLeaf] }],
+            },
+          ],
+        },
+      ],
+    },
+    'x',
+  );
+  assert.equal(node.type, 'repeat');
+});
+
+test('validateNode: the innermost while-present may NOT contain another control node', () => {
+  assert.throws(
+    () =>
+      validateNode(
+        {
+          type: 'repeat',
+          selector: 'text:Review',
+          cap: 5,
+          body: [
+            {
+              type: 'when',
+              branches: [
+                {
+                  selector: '@a',
+                  body: [
+                    {
+                      type: 'while-present',
+                      selector: '@b',
+                      cap: 5,
+                      body: [{ type: 'if-present', selector: '@c', body: [tapLeaf] }],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        'x',
+      ),
+    InvalidPlanError,
+  );
+});
+
+test('validateNode: rejects an empty control body (silence must not read as success)', () => {
+  assert.throws(() => validateNode({ type: 'if-present', selector: 'x', body: [] }, 'x'), InvalidPlanError);
+  assert.throws(() => validateNode({ type: 'repeat', selector: 'x', cap: 3, body: [] }, 'x'), InvalidPlanError);
+});
+
+test("validateNode: when's else MAY be empty — the explicit \"do nothing\" opt-in", () => {
+  const node = validateNode({ type: 'when', branches: [{ selector: '@a', body: [tapLeaf] }], else: [] }, 'x');
+  assert.equal(node.type, 'when');
+  if (node.type === 'when') assert.deepEqual(node.else, []);
+});
+
+test('validateNode: when with no branches is rejected', () => {
+  assert.throws(() => validateNode({ type: 'when', branches: [] }, 'x'), InvalidPlanError);
+});
+
+test('validateNode: tolerates null for optional fields (OpenAI strict mode nullifies them)', () => {
+  const w = validateNode({ type: 'when', branches: [{ selector: '@a', body: [tapLeaf] }], else: null }, 'x');
+  assert.equal(w.type, 'when');
+  if (w.type === 'when') assert.equal(w.else, undefined);
+  const l = validateNode({ type: 'while-present', selector: '@a', bind: null, cap: 5, body: [tapLeaf] }, 'x');
+  assert.equal(l.type, 'while-present');
+  if (l.type === 'while-present') assert.equal(l.bind, undefined);
+});
+
+test('validateNode: read needs a known field and an identifier-shaped "into"', () => {
+  const node = validateNode({ type: 'read', selector: '@answer', field: 'text', into: 'answer' }, 'x');
+  assert.equal(node.type, 'read');
+  assert.throws(() => validateNode({ type: 'read', selector: '@a', field: 'bounds', into: 'x' }, 'x'), InvalidPlanError);
+  assert.throws(() => validateNode({ type: 'read', selector: '@a', field: 'text', into: 'a.b' }, 'x'), InvalidPlanError);
 });
 
 test('validateNode: rejects flags that are not {name,value}[]', () => {
@@ -63,7 +188,9 @@ test('validateNode: rejects flags that are not {name,value}[]', () => {
 });
 
 test('validateNode: repeat without a positive cap falls back to the default cap', () => {
-  const node = validateNode({ type: 'repeat', selector: '@x', cap: 0, body: [] }, 'x');
+  // Body is non-empty on purpose: this test is about the CAP fallback, and an empty body
+  // is now rejected for its own reasons — keep the two failures from masking each other.
+  const node = validateNode({ type: 'repeat', selector: '@x', cap: 0, body: [tapLeaf] }, 'x');
   assert.equal(node.type, 'repeat');
   if (node.type === 'repeat') assert.ok(node.cap > 0);
 });
@@ -89,4 +216,26 @@ test('KNOWN_COMMANDS excludes inspection/diagnostic commands (agent action set o
   // log/logs reach a device shell + host write; find/ui/current are non-recordable
   // selector-resolvers (the markLastStepHealed coupling). None may be agent-emitted.
   for (const c of ['find', 'ui', 'current', 'log', 'logs']) assert.ok(!KNOWN_COMMANDS.has(c));
+});
+
+test('validateNode: if-present may also sit at the innermost level, inside a when branch', () => {
+  // The measured failure: blocked from a conditional here, the model emitted an
+  // unconditional `wait` instead, which fails whenever the optional step is skipped.
+  const node = validateNode(
+    {
+      type: 'repeat',
+      selector: 'text:Review',
+      cap: 20,
+      body: [
+        {
+          type: 'when',
+          branches: [
+            { selector: '@multi', body: [{ type: 'if-present', selector: '@continue', body: [tapLeaf] }] },
+          ],
+        },
+      ],
+    },
+    'x',
+  );
+  assert.equal(node.type, 'repeat');
 });

@@ -114,7 +114,15 @@ never auto-resolved — if the winning tier has >1 match, an action lists the
 candidates and exits 2 rather than guess.
 
 Modifiers: `--contains` forces substring (skips the exact tier); `--index N`
-picks the Nth match (0-based) when a selector intentionally matches several.
+picks the Nth match (0-based) when a selector intentionally matches several;
+`--enabled` matches only a control that is **actionable right now**.
+
+Reach for `--enabled` on any button the app keeps disabled until something else
+is done — a Check/Submit/Continue that lights up only once an answer is picked
+or a form validates. Such a button is *present* long before it is usable, so a
+plain presence match taps a dead control, nothing happens, and the failure
+surfaces several steps later as a puzzling timeout on whatever should have come
+next. With auto-wait, `--enabled` means "wait until it is actually pressable".
 
 ## Auto-wait
 
@@ -234,7 +242,10 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
 - The plan expresses **conditions** (`if-present`, for optional interstitials like a
   permission dialog) and **bounded loops** (`repeat … until`, e.g. scroll-until) —
   control flow `vk batch` cannot, so a flaky popup or a scroll-to-find no longer breaks
-  the flow.
+  the flow. An `if-present` guard **waits for its selector to settle** (at least two looks
+  at the screen) before deciding the optional UI is absent, so a dialog that animates in a
+  beat after the transition is still caught. An absent guard costs about one extra UI dump;
+  `VERIKUN_GUARD_SETTLE_MS=0` restores the old single-shot probe.
 - **Progress streams to stderr** (never silent in CI); **stdout is the report path**
   (`--json` for a structured summary). It records like any flow, so it ends with the
   same JUnit + HTML report — including the token/cost line and **suggested improvements**

@@ -232,3 +232,23 @@ test('chooseLogOpts: --since beats -n, --full, and the session window', () => {
 test('chooseLogOpts: the package positional is carried through as appId', () => {
   assert.deepEqual(chooseLogOpts({}, { appId: 'com.app' }), { appId: 'com.app' });
 });
+
+test('evalAssert: --text matches content-desc too (Flutter puts everything there)', () => {
+  // Same class of bug as the structuralHash one: a text-only comparison is blind on any
+  // app that maps its labels to contentDescription. The SELECTOR layer already falls back
+  // to desc, so text-only here made `assert desc:X --text Y` contradict `text:Y`.
+  const els = [makeEl({ idShort: 'title', text: '', desc: 'Welcome back' })];
+  const sel = parseSelector('@title');
+  assert.equal(evalAssert(els, sel, { text: 'Welcome back' }).pass, true);
+  assert.equal(evalAssert(els, sel, { text: 'Welcome', contains: true }).pass, true);
+  assert.equal(evalAssert(els, sel, { text: 'Goodbye' }).pass, false);
+});
+
+test('evalAssert: --text still matches plain text, and still reports what it saw', () => {
+  const els = [makeEl({ idShort: 'title', text: 'Home', desc: '' })];
+  const sel = parseSelector('@title');
+  assert.equal(evalAssert(els, sel, { text: 'Home' }).pass, true);
+  const miss = evalAssert(els, sel, { text: 'Away' });
+  assert.equal(miss.pass, false);
+  assert.match(miss.reason, /Home/); // the observed value is still in the failure message
+});

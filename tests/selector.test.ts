@@ -143,3 +143,41 @@ test('resolveOne: throws CliError(2) (ambiguous) when more than one matches', ()
     (e: unknown) => e instanceof CliError && e.exitCode === 2 && /matched 2 elements/.test(e.message),
   );
 });
+
+// --- --enabled: "actionable right now", not merely present ---------------------------
+// Evidenced by a real flow: a Check button is present from the moment the question
+// renders but stays disabled until an option is picked. Tapping presence taps a dead
+// control, the flow silently does nothing, and the failure surfaces several steps later
+// as a timeout on whatever should have appeared next.
+
+test('matchElements: --enabled skips a present-but-disabled control', () => {
+  const els = [makeEl({ idShort: 'check', enabled: false, clickable: false })];
+  assert.equal(matchElements(els, parseSelector('@check')).matches.length, 1);
+  assert.equal(matchElements(els, parseSelector('@check', { enabled: true })).matches.length, 0);
+});
+
+test('matchElements: --enabled accepts it once it becomes actionable', () => {
+  const els = [makeEl({ idShort: 'check', enabled: true, clickable: true })];
+  assert.equal(matchElements(els, parseSelector('@check', { enabled: true })).matches.length, 1);
+});
+
+test('matchElements: --enabled keeps a non-clickable CONTAINER that is enabled', () => {
+  // Regression guard. Requiring clickable here filtered out real tap targets — many are
+  // containers whose tappable child is inside — which turned --enabled into a source of
+  // phantom "not found" misses that then burned model repairs on a live device.
+  const els = [makeEl({ idShort: 'submit', enabled: true, clickable: false })];
+  assert.equal(matchElements(els, parseSelector('@submit', { enabled: true })).matches.length, 1);
+});
+
+test('matchElements: --enabled filters the pool BEFORE the tier ladder', () => {
+  // A disabled EXACT match must not shadow an enabled PARTIAL one — otherwise the filter
+  // would turn a resolvable tap into a miss rather than into the right element.
+  const els = [
+    makeEl({ idShort: 'submit', enabled: false, clickable: false }),
+    makeEl({ idShort: 'submit_button', enabled: true, clickable: true }),
+  ];
+  const r = matchElements(els, parseSelector('@submit', { enabled: true }));
+  assert.equal(r.matches.length, 1);
+  assert.equal(r.matches[0].idShort, 'submit_button');
+  assert.equal(r.tier, 'partial');
+});
