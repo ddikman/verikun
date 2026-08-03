@@ -69,6 +69,7 @@ function state(steps: RunStep[]): RunState {
 function aiResult(overrides: Partial<AiRunResult> = {}): AiRunResult {
   return {
     ok: true,
+    cached: false,
     costUsd: 0.05,
     costLine: 'est $0.05',
     modelRepairs: 0,

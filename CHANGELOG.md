@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-03
+
+### Added
+- **`suggest-verikun-improvement` skill.** When *verikun itself* is the friction — a model
+  heal on a **cached** replay (the $0 replay that still woke the model), a repair give-up,
+  or a recurring gotcha — the main `verikun` skill hands off to this new skill, which drafts
+  a light, **TL;DR-first** improvement suggestion for `ddikman/verikun`. It is
+  **draft-first** (the user reviews before anything is submitted) and **aggressively redacts**
+  every app-under-test specific (package, on-screen text, selector values, test prose, logs,
+  screenshots) so no client code or logic can leak. De-dup is by a generalised *category*
+  fingerprint, so one issue tracks each verikun weakness class rather than one per app or
+  control.
+- **`cached` in `vk ai --json`.** The structured summary now reports whether the plan was a
+  cached replay (`true`) or a fresh compile (`false`), so a heal on a cached replay — the
+  signal the skill keys on — is detectable from the JSON instead of by parsing the
+  `[ai] plan cache hit` stderr line.
+
 ## [0.13.0] - 2026-08-03
 
 ### Added

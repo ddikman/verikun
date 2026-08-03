@@ -23,6 +23,10 @@ import { VERSION } from './version';
  *  imports cli.ts. */
 export interface AiRunResult {
   ok: boolean;
+  /** True when the plan came from the cache (a replay); false when freshly compiled. A
+   *  heal (modelRepairs > 0) on a cached replay is the "recurring friction" signal — the
+   *  deterministic $0 replay still had to wake the model, so the compiled selector is unstable. */
+  cached: boolean;
   /** Model spend for this test (compile + repairs), rounded to 4 decimals. */
   costUsd: number;
   costLine: string;
