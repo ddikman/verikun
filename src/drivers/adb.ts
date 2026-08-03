@@ -1,9 +1,29 @@
-import { Driver, DeviceInfo, Element, Platform } from '../types';
-import { CliError } from '../errors';
+import { Driver, DeviceInfo, Element, Platform, ToolProbe } from '../types';
+import { CliError, probeFailure } from '../errors';
 import { runText, runBinary } from '../exec';
 import { parseHierarchy } from '../ui/android-parse';
 
 const ADB = process.env.ADB || 'adb';
+const ADB_HINT = 'install the Android platform-tools (`brew install --cask android-platform-tools`), or point ADB at the binary';
+
+/** Is `adb` present and runnable? Shared by `vk doctor` and AdbDriver.preflight() so
+ *  the two can't drift on what "the Android toolchain works" means. */
+export function probeAdb(): ToolProbe {
+  try {
+    const r = runText(ADB, ['version']);
+    // runText only throws when the binary can't be SPAWNED, so a broken-but-present adb
+    // needs its exit code checked too — otherwise it reports as healthy.
+    if (r.code !== 0) {
+      return { name: 'adb', ok: false, detail: `adb version exited ${r.code}: ${r.stderr.trim()}`, hint: ADB_HINT };
+    }
+    return { name: 'adb', ok: true, detail: r.stdout.split('\n')[0] };
+  } catch (e) {
+    // Not necessarily missing: runText also throws on a spawn timeout or other exec
+    // failure — surface the real reason rather than always claiming "NOT FOUND".
+    return { name: 'adb', ok: false, detail: (e as Error).message, hint: ADB_HINT };
+  }
+}
+
 
 // Named keys -> Android keycodes. Numeric codes are also accepted directly.
 const KEYCODES: Record<string, number> = {
@@ -82,6 +102,27 @@ export class AdbDriver implements Driver {
 
   constructor(serial?: string) {
     this.requested = serial;
+  }
+
+  preflight(): void {
+    const adb = probeAdb();
+    if (!adb.ok) throw probeFailure(adb);
+    // Resolving the serial is the other half of "can I drive anything?": it throws
+    // exit 3 with no device attached and exit 2 when several are and none was chosen.
+    const serial = this.resolvedSerial();
+    // …but that answer is cached, so ask the device itself. That is what lets a suite's
+    // mid-run re-probe notice a phone that was unplugged or an emulator that died,
+    // rather than replaying the resolution it made before anything went wrong.
+    const state = runText(ADB, ['-s', serial, 'get-state']);
+    const got = state.stdout.trim();
+    if (state.code !== 0 || got !== 'device') {
+      throw probeFailure({
+        name: 'adb',
+        ok: false,
+        detail: `device ${serial} is not ready (${got || state.stderr.trim().split('\n')[0] || `adb get-state exited ${state.code}`})`,
+        hint: 'reconnect it (check `verikun devices`); an unauthorized device needs the USB-debugging prompt accepted',
+      });
+    }
   }
 
   listDevices(): DeviceInfo[] {

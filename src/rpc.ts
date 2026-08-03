@@ -113,6 +113,11 @@ export interface ExecBackend {
   install(appPath: string): Promise<void> | void;
   /** Reset app state between suite tests (clear on Android; honest degrade to stop on iOS). */
   reset(appId: string): Promise<void> | void;
+  /** Verify the backend can actually drive the device, throwing CliError(…, 3) if not
+   *  (locally: the driver's toolchain; remotely: the server still answers). Called once
+   *  up front by `vk ai` / `vk suite`, and again by the suite as a health probe after an
+   *  environment-flavoured failure — so it must stay cheap and STATELESS. */
+  preflight?(): Promise<void> | void;
   /** Release held resources when the command finishes — the remote backend frees
    *  the server's device lock so the NEXT command (a fresh run token) isn't 409'd
    *  until the idle takeover. Best-effort; local backends need none. */

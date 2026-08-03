@@ -261,6 +261,9 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
 - Exit `0` pass · `1` a step failed (or the budget/timeout was hit) · `2` usage · `3` environment
   (e.g. the model's API key — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — unset, or the `codex` /
   `cursor-agent` CLI missing / not logged in for `--model codex-cli` / `cursor-cli`).
+- **`3` also means the device toolchain is broken**, checked *before* anything is compiled
+  (missing `adb`/`idb`, no device, an ambiguous target) and again if it breaks mid-run. Treat
+  it as "fix the machine", never as a failing test — the message carries the install hint.
 
 ## Run a suite of tests (vk suite)
 
@@ -278,6 +281,11 @@ vk suite tests/ --app com.example.app        # reset app data between tests
 - A failing test doesn't stop the suite. stdout is the suite directory
   (`./.verikun/suites/<id>/` with `index.json` + `index.html` linking every
   test's report); **exit 1 if any test failed** — so it gates CI directly.
+- **A broken *environment* does stop it: exit `3`.** If a test dies from an environment
+  error the toolchain is re-probed; only if it's still broken does the suite abort (so a
+  one-off flaky dump doesn't kill the run). The tests that never ran are listed in
+  `index.json`'s `aborted.notRun` and in the HTML banner — they are **not** counted as
+  failures. So `3` = fix the machine and rerun; `1` = a real regression to investigate.
 
 ## Drive a remote device (--server)
 
@@ -334,7 +342,9 @@ identifier memory described above. Set `VERIKUN_NO_RUN=1` to disable recording.
 - `0` success / found / assertion passed
 - `1` not found / assertion failed / wait timeout
 - `2` usage error **or ambiguous selector** (refine it or add `--index N`)
-- `3` environment error (no device, adb missing, hierarchy dump failed)
+- `3` environment error (no device, adb/idb missing, hierarchy dump failed) — for
+  `ai`/`suite`/`install`/`server` the toolchain is verified up front, so this arrives
+  immediately with an install hint rather than mid-flow
 
 ## Gotchas
 

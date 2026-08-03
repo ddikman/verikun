@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-03
+
+### Added
+- **Toolchain preflight** — device setup is now verified before tests run and will fail the suite instead of test-by-test.
+  It will verify that idb and/or adb are available and that there are devices that can be used.
+- **An aborted suite says which tests never ran** — `index.json` gains an `aborted` block
+  and `index.html` a banner. Skipped tests are not counted as failures.
+
+### Fixed
+- **`vk ai` and `vk suite` exit `3` (was `1`) when the environment is what failed**, so a
+  broken machine no longer looks like a failing app. Restores the documented exit-code contract.
+- **A control-flow guard no longer reads an unreadable screen as "absent".** It used to skip
+  its body, so a guard-heavy plan could pass having executed nothing.
+- **No more duplicate `could not capture failure …` noise** when the toolchain is itself why
+  the step failed. Evidence capture is still attempted, just not narrated twice.
+
+### Known gap
+- A failing `screenshot` step still stays green even when a missing tool caused it: a genuine
+  screencap hiccup looks identical, so telling them apart needs a separate error type.
+
 ## [0.11.0] - 2026-07-31
 
 ### Added

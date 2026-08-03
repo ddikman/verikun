@@ -1,8 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync, unlinkSync } from 'node:fs';
-import { Driver, DeviceInfo, Element, Platform } from '../types';
-import { CliError } from '../errors';
+import { Driver, DeviceInfo, Element, Platform, ToolProbe } from '../types';
+import { CliError, probeFailure } from '../errors';
 import { runText } from '../exec';
 import { parseIosHierarchy } from '../ui/ios-parse';
 
@@ -21,6 +21,51 @@ import { parseIosHierarchy } from '../ui/ios-parse';
 
 const XCRUN = 'xcrun';
 const IDB = process.env.IDB || 'idb';
+
+// Tool probes, shared by `vk doctor --ios` (which renders every one and keeps going)
+// and IdbDriver.preflight() (which throws on the first failure) so the two can't drift
+// on what "the iOS toolchain works" means — or on the install hints.
+
+const IDB_HINT = 'needed for ui/tap/text/swipe/key/logs — install: `brew install idb-companion` then `pip install fb-idb`';
+const XCRUN_HINT = 'if the Xcode command-line tools are not installed: `xcode-select --install`';
+
+export function probeXcrun(): ToolProbe {
+  try {
+    const r = runText(XCRUN, ['simctl', 'list', 'devices', 'booted']);
+    // runText only throws when the binary can't be SPAWNED, so a tool that exists but
+    // fails (broken install, missing Xcode selection) needs the exit code checked too.
+    if (r.code !== 0) {
+      return { name: 'xcrun', ok: false, detail: `xcrun simctl exited ${r.code}: ${r.stderr.trim()}`, hint: XCRUN_HINT };
+    }
+    return { name: 'xcrun', ok: true, detail: r.stdout.trim() || '(no booted simulators)' };
+  } catch (e) {
+    // Not necessarily missing: runText also throws on a spawn timeout or other exec
+    // failure, so surface the real reason rather than always claiming "NOT FOUND".
+    return { name: 'xcrun', ok: false, detail: (e as Error).message, hint: XCRUN_HINT };
+  }
+}
+
+export function probeIdb(): ToolProbe {
+  try {
+    const r = runText(IDB, ['--help']); // idb has no --version; --help confirms the binary runs
+    if (r.code !== 0) return { name: 'idb', ok: false, detail: `idb --help exited ${r.code}: ${r.stderr.trim()}`, hint: IDB_HINT };
+    return { name: 'idb', ok: true, detail: 'present' };
+  } catch (e) {
+    return { name: 'idb', ok: false, detail: (e as Error).message, hint: IDB_HINT };
+  }
+}
+
+export function probeIdbCompanion(): ToolProbe {
+  try {
+    // Spawn-only on purpose: idb_companion prints its usage to stderr and exits 1 for
+    // --help, so its exit code says nothing about health. Presence is all we can cheaply
+    // assert here — idb itself is the probe that has to actually work.
+    runText('idb_companion', ['--help']);
+    return { name: 'idb_companion', ok: true, detail: 'present' };
+  } catch (e) {
+    return { name: 'idb_companion', ok: false, detail: (e as Error).message, hint: 'install: `brew install idb-companion`' };
+  }
+}
 
 const DEFAULT_LOG_LINES = 200;
 const DEFAULT_LOG_WINDOW = '5m';
@@ -105,6 +150,34 @@ export class IdbDriver implements Driver {
   constructor(device?: string) {
     // 'booted' is a simctl-only alias idb can't address, so treat it as "auto-resolve".
     this.requested = device && device !== 'booted' ? device : undefined;
+  }
+
+  preflight(): void {
+    // resolvedSerial() shells to simctl, so it already covers a missing xcrun, no
+    // booted simulator / connected device, and an ambiguous target (exit 2).
+    this.resolvedSerial();
+    // idb is required to drive iOS AT ALL — simulator or not. simctl covers launch,
+    // stop and screenshots, so without this a missing idb goes unnoticed until the
+    // first step that reads the hierarchy, long after a compile has been paid for.
+    //
+    // `describe` rather than doctor's `idb --help`: one round-trip that proves idb runs
+    // AND that the target is still reachable through its companion. That second half is
+    // what lets `vk suite`'s mid-run re-probe notice a simulator that died — `--help`
+    // would keep answering happily with the device long gone. (doctor keeps `--help`
+    // because it must report on idb with no device booted at all.)
+    let r;
+    try {
+      // Default 30s timeout, same as screenSize()'s identical call: preflight is the
+      // FIRST idb call of the process, so it is the one that pays idb_companion's
+      // cold start — the last place to shave the budget.
+      r = runText(IDB, ['describe', '--udid', this.udid()]);
+    } catch (e) {
+      throw probeFailure({ name: 'idb', ok: false, detail: (e as Error).message, hint: IDB_HINT });
+    }
+    if (r.code !== 0) {
+      const why = r.stderr.trim().split('\n')[0] || `exit code ${r.code}`;
+      throw probeFailure({ name: 'idb', ok: false, detail: `idb cannot reach ${this.udid()}: ${why}`, hint: IDB_HINT });
+    }
   }
 
   /** All available simulators (booted or shutdown) via simctl. Tolerates odd output. */

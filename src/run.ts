@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Driver, Element } from './types';
 import { Selector, MatchTier } from './ui/selector';
 import { formatCompact } from './ui/format';
-import { CliError } from './errors';
+import { CliError, isEnvError } from './errors';
 import { artifactDir, err } from './output';
 import { toJUnitXml, toHtml } from './report';
 
@@ -436,13 +436,16 @@ export class Recorder {
     this.step.exitCode = exitCode;
     this.step.status = exitCode === 1 ? 'failed' : 'error';
     if (!this.step.message) this.step.message = e.message;
-    this.capture(driver);
+    // The step failed BECAUSE the environment is broken, so evidence capture is
+    // near-certain to fail the same way. Still attempt it (a screencap can succeed
+    // where a dump doesn't), but don't narrate two more copies of the same error.
+    this.capture(driver, isEnvError(e));
     this.commit();
   }
 
   // Best-effort: grab a screenshot and the UI hierarchy of the failing page.
   // The device may be unreachable (that may be why we failed) — swallow errors.
-  private capture(driver?: Driver): void {
+  private capture(driver?: Driver, quiet = false): void {
     if (!driver) return;
     try {
       this.writeArtifact(`artifacts/step-${this.step.index}-fail.png`, driver.screenshot());
@@ -450,13 +453,13 @@ export class Recorder {
     } catch (e) {
       // Best-effort evidence: the device may be gone (often why the step failed). Surface
       // it so a screenshot bug isn't hidden, but never let it derail failure recording.
-      err(`[verikun] could not capture failure screenshot (${(e as Error).message})`);
+      if (!quiet) err(`[verikun] could not capture failure screenshot (${(e as Error).message})`);
     }
     try {
       const text = formatCompact(driver.getElements({ all: false }));
       this.step.failHierarchy = text.length > HIERARCHY_CAP ? text.slice(0, HIERARCHY_CAP) + '\n…(truncated)' : text;
     } catch (e) {
-      err(`[verikun] could not capture failure hierarchy (${(e as Error).message})`);
+      if (!quiet) err(`[verikun] could not capture failure hierarchy (${(e as Error).message})`);
     }
   }
 

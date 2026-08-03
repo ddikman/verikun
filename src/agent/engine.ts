@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Element } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
-import { SelectorNotFoundError, AmbiguousSelectorError } from '../errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, isEnvError } from '../errors';
 import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
 import { AgentProvider } from './provider';
@@ -71,6 +71,11 @@ export interface EngineResult {
   failure?: { where: string; reason: string };
   abortedForBudget?: boolean;
   abortedForTimeout?: boolean;
+  /** The run stopped because the ENVIRONMENT broke (exit 3: tool missing, device gone,
+   *  hierarchy dump failed) rather than because the app misbehaved. `failure` is still
+   *  populated — this only says the failure is not a regression, so callers can exit 3
+   *  and `vk suite` can stop instead of reporting every remaining test as broken. */
+  abortedForEnv?: boolean;
 }
 
 type StepResult =
@@ -79,8 +84,34 @@ type StepResult =
    *  it is genuinely gone now. Stop this body; the enclosing guard treats it as done. */
   | { status: 'guard-gone' }
   | { status: 'fail'; reason: string; where: string }
+  | { status: 'env'; reason: string; where: string }
   | { status: 'budget' }
   | { status: 'timeout' };
+
+/** An outcome is environment-flavoured if it carries an exit-3 CliError, or simply
+ *  reported code 3 — the latter also catches a remote step whose error crossed the
+ *  wire as a plain Error (rebuildError drops exitCode) and a non-CliError throw,
+ *  both of which the top-level contract already maps to exit 3. Over-classifying is
+ *  safe here because `vk suite` re-probes before treating it as fatal. */
+const isEnvOutcome = (outcome: ExecOutcome): boolean => outcome.code === 3 || isEnvError(outcome.error);
+
+/**
+ * A control-flow guard could not read the screen even once, because the environment is
+ * broken (exit 3). Thrown out of `present()` and converted to a `status: 'env'` step
+ * result by the single catch in runPlan's step loop.
+ *
+ * A throw rather than a wider `present()` return type on purpose: `present()` has seven
+ * call sites across `if-present` / `when` / `repeat` / `while-present` / the guard-race
+ * check, and every one of them would need the same three-line env branch — repetition in
+ * the most intricate code here, and a silent false green at whichever site someone forgot.
+ * runPlan still RETURNS its result; this never escapes the engine.
+ */
+class GuardBlindError extends Error {
+  constructor(selector: string, cause: Error) {
+    super(`could not read the screen to evaluate '${selector}': ${cause.message.split('\n')[0]}`);
+    this.name = 'GuardBlindError';
+  }
+}
 
 const describe = (leaf: LeafStep): string =>
   [leaf.command, ...leaf.positionals, ...leaf.flags.map((f) => (f.value === 'true' ? `--${f.name}` : `--${f.name} ${f.value}`))]
@@ -239,7 +270,10 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
    *    - a dump that SUCCEEDS but does not match is re-polled only while settleMs
    *      remains. At settleMs=0 that means exactly one pass — the fast, single-shot
    *      probe a loop-exit check needs.
-   *  So one dump attempt always happens regardless of the window. */
+   *  So one dump attempt always happens regardless of the window.
+   *
+   *  Throws GuardBlindError when the window closes having NEVER once read the screen
+   *  and the failure was an environment error — see that class for why. */
   const present = async (selector: string, settleMs: number): Promise<boolean> => {
     let sel;
     try {
@@ -258,14 +292,20 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     // swings ~10x across devices, so "how long to wait" cannot be expressed in wall clock
     // alone without making the guard's patience device-dependent.
     let looks = 0;
+    // Did ANY dump in this whole call come back? A successful-but-empty tree counts: that
+    // is a bad read of a live screen, not a blind one, and it is already handled below.
+    let everRead = false;
+    let lastErr: unknown;
     const minLooks = settleMs > 0 ? 2 : 1;
     for (;;) {
       let els: Element[] | undefined;
       for (let i = 0; i < 2; i++) {
         try {
           els = await deps.getElements();
-        } catch {
+          everRead = true;
+        } catch (e) {
           els = undefined; // transient dump failure — retry once before concluding "absent"
+          lastErr = e;
         }
         // An EMPTY tree is not a screen, it is a bad read: a live app always has nodes, and
         // this device routinely returns a partial/blank dump mid-transition (measured: `ui`
@@ -278,7 +318,13 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
       looks++;
       if (els !== undefined && matchElements(els, sel).matches.length > 0) return true;
       const remaining = deadline - Date.now();
-      if (looks >= minLooks && remaining <= 0) return false;
+      if (looks >= minLooks && remaining <= 0) {
+        // The window closed having NEVER once read the screen, because the environment is
+        // broken. Answering "absent" here is a lie that silently skips the body — and a
+        // guard-heavy plan would then finish fully GREEN having executed nothing.
+        if (!everRead && isEnvError(lastErr)) throw new GuardBlindError(selector, lastErr as Error);
+        return false;
+      }
       await sleep(Math.max(0, Math.min(GUARD_POLL_MS, remaining)));
     }
   };
@@ -389,9 +435,12 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     if (isHealable(outcome)) {
       return { status: 'fail', where, reason: `unresolved after ${maxRepairs} repair attempt(s): ${outcome.error!.message.split('\n')[0]}` };
     }
-    // Terminal: an assertion failure (exit 1, no throw) or an environment error.
+    // Terminal: an assertion failure (exit 1, no throw) or an environment error. The
+    // two are reported differently — an assertion failure is a regression to fix, an
+    // environment error means the harness is broken and nothing downstream is
+    // trustworthy, so the caller aborts rather than banking a red result.
     const reason = outcome.error ? outcome.error.message.split('\n')[0] : `exited ${outcome.code}`;
-    return { status: 'fail', where, reason };
+    return { status: isEnvOutcome(outcome) ? 'env' : 'fail', where, reason };
   }
 
   async function walkBody(body: PlanNode[], parentWhere: string, guard?: string): Promise<StepResult> {
@@ -585,12 +634,25 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
       deps.log(`[ai] run timeout reached before steps[${i}] — aborting`);
       return { ok: false, plan, modelRepairs, improvements, abortedForTimeout: true };
     }
-    const res = await walkNode(plan.steps[i], `steps[${i}]`, (l) => (plan.steps[i] = l));
+    // The one place a blind guard becomes a step result — see GuardBlindError.
+    let res: StepResult;
+    try {
+      res = await walkNode(plan.steps[i], `steps[${i}]`, (l) => (plan.steps[i] = l));
+    } catch (e) {
+      if (!(e instanceof GuardBlindError)) throw e;
+      res = { status: 'env', where: `steps[${i}]`, reason: e.message };
+    }
     if (res.status === 'budget') {
       return { ok: false, plan, modelRepairs, improvements, abortedForBudget: true };
     }
     if (res.status === 'timeout') {
       return { ok: false, plan, modelRepairs, improvements, abortedForTimeout: true };
+    }
+    if (res.status === 'env') {
+      // `failure` is populated as well as the flag: the suite report still wants a row
+      // reason, and callers that only know about `failure` keep working unchanged.
+      deps.log(`[ai] ABORTED at ${res.where} — environment: ${res.reason}`);
+      return { ok: false, plan, modelRepairs, improvements, abortedForEnv: true, failure: { where: res.where, reason: res.reason } };
     }
     if (res.status === 'fail') {
       deps.log(`[ai] FAILED at ${res.where}: ${res.reason}`);

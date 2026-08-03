@@ -286,16 +286,30 @@ vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote devi
 - **Each test is a full `vk ai` run** — plan cache, self-healing, cost budget, and
   its own archived JUnit + HTML report under `./.verikun/runs/<id>/`. A test that
   fails (or errors) doesn't stop the suite; the rest still run.
+- **But a broken *environment* does stop it.** If a test dies from an environment
+  error (exit 3 — tool gone, device unplugged, server unreachable), the toolchain is
+  re-probed; only if it is *still* broken does the suite abort. That re-probe matters:
+  a transient `uiautomator` dump failure also exits 3, and shouldn't vaporize a
+  20-test run. Continuing on a genuinely dead box just produces one identical red row
+  per remaining test — noise that reads exactly like a mass regression.
 - **The suite writes an overview** to `./.verikun/suites/<id>/`:
   - **`index.json`** — a stable, `schemaVersion`ed manifest: per-test pass/fail,
     steps, model repairs, cost, duration, and the run id, plus suite totals. This
     is the **output contract for reporting** — upload/publish steps compose over
     it (see the [CI recipe](#ci-recipe)) instead of verikun growing upload plugins.
-  - **`index.html`** — a summary page linking every test's `report.html`.
-- **Exit code is the CI gate:** `1` if any test failed, `0` all green, `2` bad/empty
-  directory. All `ai` flags (`--model`, `--max-cost-usd`, `--timeout`, …) apply to
-  every test; the provider (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or the `codex` /
-  `cursor-agent` CLI for `--model codex-cli` / `cursor-cli`) is checked up front.
+    On an abort it also carries `aborted: {reason, notRun}`; the not-run tests get
+    **no rows and no place in `totals`**, so `passed + failed === tests` still holds
+    and nothing downstream mistakes a skipped test for a regression.
+  - **`index.html`** — a summary page linking every test's `report.html`, with a
+    banner naming the not-run tests when the suite aborted.
+- **Exit code is the CI gate:** `0` all green · `1` a test failed · `2` bad/empty
+  directory · `3` environment (the provider or the device toolchain is unavailable,
+  or the box broke mid-run). The `1`-vs-`3` split is the point: `1` is a regression
+  to investigate, `3` is a machine to fix. All `ai` flags (`--model`,
+  `--max-cost-usd`, `--timeout`, …) apply to every test; both the provider
+  (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or the `codex` / `cursor-agent` CLI for
+  `--model codex-cli` / `cursor-cli`) **and** the device toolchain (`adb` / `idb` +
+  a resolvable device) are checked up front, before anything is compiled.
 
 ## Remote devices — `vk server`
 
@@ -435,7 +449,7 @@ condition as a step in its own right.
 | `0` | success / found / assertion passed |
 | `1` | not found / assertion failed / wait timeout |
 | `2` | usage error or ambiguous selector (caller must refine) |
-| `3` | environment error (adb/simctl missing, no/multiple devices, dump failed) |
+| `3` | environment error (adb/idb/simctl missing, no/multiple devices, dump failed). `ai`, `suite`, `install` and `server` verify the toolchain up front, so this arrives immediately with an install hint instead of mid-flow — and a `suite` whose device dies mid-run stops with `3` rather than reporting the rest as failures |
 
 Data goes to stdout; diagnostics/errors go to stderr.
 
