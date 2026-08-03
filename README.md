@@ -251,7 +251,8 @@ iteration by construction, which is what makes it a loop.
   the bundled per-1M price table if it drifts.
 - **`--model`** picks the model and its provider — Anthropic (`claude-haiku-4-5` ·
   `claude-sonnet-4-6` (default) · `claude-opus-4-8` · `claude-fable-5`), OpenAI
-  (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5`), each read from its own key
+  (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5` · `gpt-4.1`, the last a non-reasoning model
+  that undercuts the default sonnet at $2/$8 per 1M), each read from its own key
   (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`), or a CLI backend — **`codex-cli`** (the
   logged-in `codex` binary) or **`cursor-cli`** (`cursor-agent`) — which need no key at
   all: spend is on your subscription, so their cost line is `$0` and `--max-cost-usd` /

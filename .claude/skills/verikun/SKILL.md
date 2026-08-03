@@ -232,7 +232,8 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   `cursor-agent login` once; verikun just needs the binary on PATH). Default model
   `claude-sonnet-4-6`; `--model` switches model **and** provider — Anthropic
   (`claude-haiku-4-5` · `claude-sonnet-4-6` · `claude-opus-4-8` · `claude-fable-5`),
-  OpenAI (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5`), or a CLI backend (`codex-cli` · `cursor-cli`).
+  OpenAI (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5` · `gpt-4.1` — cheaper than the default sonnet,
+  and non-reasoning, so `--effort` does not apply to it), or a CLI backend (`codex-cli` · `cursor-cli`).
 - For the CLI backends, spend is on your subscription, not per token, so the cost line reads `$0`
   and `--max-cost-usd` / `--cost-override` are no-ops (the run is still bounded by repairs +
   `--timeout`). Each CLI chooses its own underlying model, and is run read-only in a scratch
