@@ -1217,6 +1217,7 @@ async function runAiTest(
     err(`[ai] cost ceiling $${opts.maxCostUsd} reached during compile (${cost.summaryLine()}) — not running`);
     return {
       ok: false,
+      cached,
       costUsd: Number(cost.usd().toFixed(4)),
       costLine: cost.summaryLine(),
       modelRepairs: 0,
@@ -1308,6 +1309,7 @@ async function runAiTest(
 
   return {
     ok: result.ok,
+    cached,
     costUsd: Number(cost.usd().toFixed(4)),
     costLine,
     modelRepairs: result.modelRepairs,
@@ -1352,6 +1354,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   if (flagBool(flags, 'json')) {
     json({
       ok: result.ok,
+      cached: result.cached,
       model: opts.model,
       cost: result.costLine,
       costUsd: result.costUsd,

@@ -577,6 +577,20 @@ vk tap @tap_to_continue_label_id
 **Cost:** $0.45 · **Wall time:** ~4 min · **Model:** Claude Sonnet 4.6 with
 prompt-cache hits (1 M cache-read tokens kept cost low on a long conversation).
 
+## Feedback — help improve verikun
+
+verikun improves from the rough edges people hit while driving it. When verikun *itself* is
+the friction — a step that heals on every cached replay (an unstable compiled selector,
+often a label-only control with no resource-id), a repair "give-up", or a gotcha in its own
+operation — that's worth an issue at
+[github.com/ddikman/verikun/issues](https://github.com/ddikman/verikun/issues).
+
+Driving verikun with an AI agent + the [skill](.claude/skills/verikun/SKILL.md)? It hands
+off to the **`suggest-verikun-improvement`** skill, which drafts a short, TL;DR-first
+suggestion, **reviews it with you before anything is submitted**, and **redacts every
+app-under-test specific** (package, on-screen text, selector values, test prose, logs) so no
+client code or logic can leak.
+
 ## Build from source
 
 For local development, or to run an unreleased version, build from a clone:
