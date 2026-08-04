@@ -37,6 +37,9 @@
     "test": "tsc -p tsconfig.test.json && node --test --test-reporter=spec .test-build/tests/*.test.js",
     "test:ci": "mkdir -p test-results && tsc -p tsconfig.test.json && node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/github-test-summary.mjs --test-reporter-destination=test-results/summary.md .test-build/tests/*.test.js",
     "test:watch": "tsc -p tsconfig.test.json && node --test --watch --test-reporter=spec .test-build/tests/*.test.js",
+    "test:e2e": "npm run build && tsc -p tsconfig.test.json && node --test --test-reporter=spec .test-build/tests/e2e/*.test.js",
+    "flutter-app:apk": "cd example/flutter-app && fvm flutter build apk --debug",
+    "flutter-app:ios": "cd example/flutter-app && fvm flutter build ios --simulator --debug",
     "prepare": "npm run build"
   },
   "engines": {
