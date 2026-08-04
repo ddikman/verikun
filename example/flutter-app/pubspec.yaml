@@ -1,0 +1,19 @@
+name: testapp
+description: "Controlled fixture app for verifying the verikun (vk) CLI against a real device."
+# Never published — this is a test fixture, not a package.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+# Deliberately dependency-free beyond the Flutter SDK itself. This app is a
+# ruler, not software under test: every extra dependency is a way for the
+# fixture to break for reasons that have nothing to do with vk.
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

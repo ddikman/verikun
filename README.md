@@ -399,6 +399,39 @@ If a selector for an action matches more than one element and no `--index` is
 given, the command fails with exit code 2 and lists the candidates — it never
 taps a guess.
 
+### Which selector to reach for: `@id` first, `text:` second, `desc:` never
+
+Not all four selector kinds travel equally well. If a flow has to run on both
+Android and iOS, this ordering matters:
+
+| selector | Android | iOS | portable? |
+|---|---|---|---|
+| `@id` | `resource-id` | `AXUniqueId` | **yes — always prefer this** |
+| `text:` | visible text, falling back to `content-desc` | `AXLabel` / `title` / `AXValue` | yes |
+| `desc:` | `content-desc` | `accessibilityHint` only | **no — Android in practice** |
+| `class:` | widget class | element role | no — see below |
+
+Two traps worth knowing:
+
+- **`desc:` does not fall back.** `text:` falls back to `desc` when no text
+  matches, so a `text:Submit` selector finds an element carrying only an
+  accessibility label. The reverse is not true — `desc:Submit` will never match
+  visible text. On iOS an accessibility label arrives as `text`, so a `desc:`
+  selector written against Android silently stops matching there.
+- **`class:` is mostly useless on a cross-platform UI toolkit.** Flutter text
+  inputs report as `android.widget.EditText` / `TextField`, but almost everything
+  else is `android.view.View` — so `class:Button` cannot match a Flutter button
+  regardless of what the widget is.
+
+There is a further, sharper reason to prefer `@id`: it is the only selector that
+is not text, so it survives **localisation**. A flow pinned with `text:` breaks
+the moment the device is in a different language.
+
+For a Flutter app, `@id` comes from `Semantics(identifier:)`; `Semantics(label:)`
+gives you `desc` on Android but `text` on iOS. A worked example, with the
+cross-platform gotchas measured on real hardware, is in
+[`example/flutter-app`](example/flutter-app/).
+
 ## Auto-wait
 
 A UI rarely settles the instant the previous action returns. So selector
