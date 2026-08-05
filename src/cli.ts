@@ -5,7 +5,17 @@ import { CliError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
 import { Bounds, Driver, DeviceInfo, Element, Platform, Point, ToolProbe } from './types';
-import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
+import {
+  parseSelector,
+  matchElements,
+  resolveOne,
+  Selector,
+  MatchTier,
+  MatchResult,
+  StateFilter,
+  STATE_ATTRS,
+} from './ui/selector';
+import { assertStateSupported } from './ui/state-support';
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
 import {
   Direction,
@@ -71,15 +81,40 @@ export function deviceFromFlags(flags: Flags, platform: Platform): string | unde
   );
 }
 
-function buildSelector(raw: string | undefined, flags: Flags): Selector {
+/**
+ * Read the `--enabled` / `--not-enabled` / `--selected` / … pairs off the flags.
+ *
+ * An ABSENT flag must stay `undefined`, never `false`: these modifiers are tri-state
+ * ("must be" / "must not be" / "don't care"), so passing `flagBool()` straight through —
+ * which is what this replaced — would quietly turn every selector on every command into
+ * "must be disabled, unselected, unchecked and unfocused".
+ */
+export function stateFromFlags(flags: Flags): StateFilter {
+  const state: StateFilter = {};
+  for (const attr of STATE_ATTRS) {
+    const yes = flagBool(flags, attr);
+    const no = flagBool(flags, `not-${attr}`);
+    if (yes && no) throw new CliError(`Cannot combine --${attr} with --not-${attr}.`, 2);
+    if (yes) state[attr] = true;
+    else if (no) state[attr] = false;
+  }
+  return state;
+}
+
+function buildSelector(ctx: Ctx, raw: string | undefined): Selector {
   if (!raw) {
     throw new CliError('Missing selector. e.g. `@login_button`, `text:Login`, `desc:Submit`.', 2);
   }
-  return parseSelector(raw, {
-    contains: flagBool(flags, 'contains'),
-    index: flagNum(flags, 'index'),
-    enabled: flagBool(flags, 'enabled'),
+  const sel = parseSelector(raw, {
+    contains: flagBool(ctx.flags, 'contains'),
+    index: flagNum(ctx.flags, 'index'),
+    ...stateFromFlags(ctx.flags),
   });
+  // Every command's selector — and so every `vk ai` leaf, which reaches these handlers
+  // through executeOutcome — funnels through here, which is why the platform check lives
+  // at this seam rather than in the (platform-free) selector layer.
+  assertStateSupported(sel, ctx.platform);
+  return sel;
 }
 
 export function parsePoint(s: string): Point {
@@ -484,7 +519,7 @@ function cmdUi(ctx: Ctx): number {
 }
 
 async function cmdFind(ctx: Ctx): Promise<number> {
-  const sel = buildSelector(ctx.positionals[0], ctx.flags);
+  const sel = buildSelector(ctx, ctx.positionals[0]);
   const { matches, tier } = await matchWaiting(ctx, sel, { all: flagBool(ctx.flags, 'all') });
   if (flagBool(ctx.flags, 'json')) json(matches.map(toJsonShape));
   else if (!matches.length) err(`no match for '${sel.raw}'`);
@@ -540,7 +575,7 @@ async function cmdTap(ctx: Ctx): Promise<number> {
     point = pressPoint(els, target, screenOf(ctx));
     ctx.record?.note({ element: target, message: `tapped by index [${idx}]` });
   } else {
-    const sel = buildSelector(raw, ctx.flags);
+    const sel = buildSelector(ctx, raw);
     ({ element: target, tier, waitedMs, swipes, point } = await resolveTappable(ctx, sel, {
       all: flagBool(ctx.flags, 'all'),
     }));
@@ -561,7 +596,7 @@ async function cmdText(ctx: Ctx): Promise<number> {
   if (ctx.positionals.length < 2) {
     throw new CliError('Usage: verikun text <selector> <text...>  (use -- before text starting with "-")', 2);
   }
-  const sel = buildSelector(ctx.positionals[0], ctx.flags);
+  const sel = buildSelector(ctx, ctx.positionals[0]);
   const value = ctx.positionals.slice(1).join(' ');
   const { element: target, tier, waitedMs, swipes, point } = await resolveTappable(ctx, sel);
   ctx.record?.note({
@@ -641,7 +676,9 @@ async function cmdSwipe(ctx: Ctx): Promise<number> {
   let waitedMs = 0;
   const on = flagStr(ctx.flags, 'on');
   if (on) {
-    const onSel = parseSelector(on, { contains: flagBool(ctx.flags, 'contains') });
+    // Through buildSelector, not parseSelector: --on used to see only --contains, so
+    // `swipe --on X --enabled` silently ignored the modifier it was given.
+    const onSel = buildSelector(ctx, on);
     const { element, waitedMs: w } = await resolveOneWaiting(ctx, onSel);
     waitedMs = w;
     ctx.record?.note({ selector: onSel, element });
@@ -804,7 +841,7 @@ function cmdLog(ctx: Ctx): number {
 }
 
 async function cmdWait(ctx: Ctx): Promise<number> {
-  const sel = buildSelector(ctx.positionals[0], ctx.flags);
+  const sel = buildSelector(ctx, ctx.positionals[0]);
   const gone = flagBool(ctx.flags, 'gone');
   const timeout = flagNum(ctx.flags, 'timeout') ?? 10000;
   const interval = flagNum(ctx.flags, 'interval') ?? 400;
@@ -868,7 +905,7 @@ export function evalAssert(
 }
 
 async function cmdAssert(ctx: Ctx): Promise<number> {
-  const sel = buildSelector(ctx.positionals[0], ctx.flags);
+  const sel = buildSelector(ctx, ctx.positionals[0]);
   // Auto-wait subsumes the common "wait then assert": poll until the assertion
   // passes or the window elapses. `--gone` therefore waits for disappearance.
   const deadline = Date.now() + waitWindowMs(ctx.flags);
@@ -1448,6 +1485,9 @@ async function runAiTest(
       guardSettleMs: guardSettleMs(),
       runId: started.id,
       deadline,
+      // The RESOLVED platform — for --server that is the server's, which supersedes
+      // the client's --platform (leaves are gated server-side; guards run here).
+      platform,
     });
   } catch (e) {
     // An unexpected throw mid-run (e.g. an unrecoverable device error) must still
@@ -1966,6 +2006,15 @@ SELECTORS
   class:Button    type or full class name
   "Sign in"       bare string == text:"Sign in"
   Modifiers: --contains (substring), --index N (pick Nth match)
+  State:     --enabled / --selected / --checked / --focused, each with a --not-
+             form (--not-selected). Unset = don't care. Use the negative to guard
+             a toggle: tapping a picker whose options share a handler FLIPS it, so
+             an unconditional tap lands on the wrong mode and still exits 0.
+             May be written as a flag or appended to the selector string
+             ("@mode_video --not-selected") — the latter is how a \`vk ai\`
+             if-present/when/repeat guard carries one.
+             --selected and --focused are Android-only (idb reports neither);
+             on iOS they exit 3 rather than matching nothing.
 
 AUTO-WAIT (selector lookups retry until they resolve)
   Selector commands (tap, text, find, assert, swipe --on) re-poll the screen for

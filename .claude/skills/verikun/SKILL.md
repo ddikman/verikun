@@ -115,8 +115,17 @@ candidates and exits 2 rather than guess.
 
 Modifiers: `--contains` forces substring (skips the exact tier); `--index N`
 picks the Nth match (0-based) when a selector intentionally matches several;
-`--enabled` matches only a control that is **actionable right now**;
 `--no-scroll` stops an action scrolling its target into view (see below).
+
+**State modifiers** require an a11y attribute, in both polarities. Unset means
+*don't care*:
+
+| Modifier | Matches | Negative |
+|---|---|---|
+| `--enabled` | actionable right now | `--not-enabled` |
+| `--selected` | current option of a segmented control / tab / mode picker | `--not-selected` |
+| `--checked` | ticked checkbox / switch / radio | `--not-checked` |
+| `--focused` | holds input focus | `--not-focused` |
 
 Reach for `--enabled` on any button the app keeps disabled until something else
 is done — a Check/Submit/Continue that lights up only once an answer is picked
@@ -124,6 +133,25 @@ or a form validates. Such a button is *present* long before it is usable, so a
 plain presence match taps a dead control, nothing happens, and the failure
 surfaces several steps later as a puzzling timeout on whatever should have come
 next. With auto-wait, `--enabled` means "wait until it is actually pressable".
+
+Reach for the **negative** forms whenever tapping a control *toggles* it. A
+segmented control whose options share one handler flips on any tap, so an
+unconditional "tap the option I want" lands on the other one whenever it was
+already chosen — exit 0, no warning, and the rest of the run exercises the wrong
+mode. Check first, then act:
+
+```sh
+vk find "@mode_video --not-selected" --no-wait && vk tap @mode_video
+```
+
+A modifier is a flag **or** a suffix on the selector string (as above) — the
+string form is what lets a `vk ai` control node carry one, since `if-present` /
+`when` / `repeat` / `while-present` / `read` hold a bare selector with nowhere to
+put a flag: `if-present "id:mode_video --not-selected" { tap id:mode_video }`.
+
+**`--selected` and `--focused` do not exist on iOS.** `idb` emits no such key, so
+using them with `--ios` exits **3** instead of matching nothing forever.
+`--enabled` and `--checked` work on both platforms.
 
 ## Auto-wait
 

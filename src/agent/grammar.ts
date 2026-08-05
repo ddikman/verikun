@@ -110,12 +110,29 @@ SELECTORS (the engine auto-heals case/whitespace/partial, so prefer stable ident
   class:Button      type or class
   "Sign in"         bare string == text:Sign in
 
+A selector may also pin ELEMENT STATE, in both polarities:
+  --enabled  / --not-enabled     actionable right now
+  --selected / --not-selected    current option of a segmented control / tab bar / mode picker
+  --checked  / --not-checked     checkbox / switch / radio state
+  --focused  / --not-focused     holds input focus
+On a command leaf write it as a flag. On a CONTROL NODE append it to the selector string —
+that is the only place one can go, and it is what makes a state-conditional guard possible:
+  { "type":"if-present", "selector":"id:mode_video --not-selected",
+    "body":[ { "type":"command","command":"tap","positionals":["id:mode_video"],"flags":[] } ] }
+
 RULES:
 - --enabled on a tap makes it match only a control that is ACTIONABLE right now, and (with
   auto-wait) wait until it becomes so. Use it for any button that the app disables until
   something else is done — a Check/Submit/Continue that only lights up once an answer is
   selected or a form is valid. Without it the step taps a dead control, does nothing, and
   the failure surfaces later as a confusing timeout on the NEXT step.
+- A picker or toggle whose options share ONE handler FLIPS on any tap, so an unconditional
+  "tap the option you want" lands on the option you did NOT want whenever it was already
+  chosen — and its starting state is usually content-driven, so you cannot know it now.
+  Guard it: if-present "id:<option> --not-selected" { tap id:<option> }. The guard makes an
+  already-correct state a no-op instead of a flip. Unguarded, the flow completes either way
+  and the test PASSES having exercised the opposite mode — a false green, worse than a fail.
+  Same shape for a checkbox that toggles: guard with --not-checked / --checked.
 - assert is for VERIFICATION only and is terminal — never use it as a step you expect to
   fail. Put genuinely-optional UI behind if-present.
 - tap/text SCROLL THEIR TARGET INTO VIEW automatically, so "scroll down to X and tap it"

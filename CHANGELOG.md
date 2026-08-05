@@ -6,6 +6,61 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-05
+
+### Added
+- **`--selected`, `--checked`, `--focused` selector modifiers, each with a `--not-` form**
+  ([#38]) — `--not-selected`, …, joining `--enabled`, which also gains `--not-enabled`. `selected`
+  and `checked` were already parsed into `Element` and printed by `vk ui`; there was simply
+  no way to match on them. Unset means *don't care*; the filter is applied to the candidate
+  pool **before** the healing tiers, so a state-matching exact hit can never shadow a
+  state-matching partial one. Combining `--x` with `--not-x` is a usage error (exit 2).
+
+  The negative form is the load-bearing half. A segmented control whose options share one
+  handler *flips* on any tap, and its default is content-driven — so "tap the option I
+  want" lands on the other one whenever it was already chosen. Measured on the fixture:
+  `vk tap @vk_mode_video` exits 0, prints `tapped … tap,selected`, and leaves the app in
+  photo mode. The flow completes, nothing fails, and the run exercised the opposite mode —
+  worse than a red test. `if-present "id:x --not-selected" { tap id:x }` makes the
+  already-correct case a no-op instead.
+- **A selector string may carry its own state modifiers** — `"id:mode_video --not-selected"`.
+  Control nodes (`if-present`, `when`, `repeat`, `while-present`, `read`) hold a bare
+  `selector: string` with nowhere to put a flag, and a guard is exactly where the toggle
+  case needs one. Stripped only at the end of the string and only after whitespace, so
+  `text:--selected` and `text:a --selected b` stay plain values; `Selector.raw` keeps the
+  original so errors and reports echo what was written. `swipe --on` and every command
+  inherit the same parser.
+- **The `vk ai` grammar teaches all of it**, including the shared-handler toggle rule, so a
+  compiled plan can express the guard. Verified end to end: the compiler emitted
+  `{"type":"if-present","selector":"id:vk_mode_video --not-selected", …}` unprompted and
+  the plan replayed model-free at `$0`.
+- **A fourth fixture screen, `@vk_state`** (`example/flutter-app`) — a mode picker whose two
+  options share one `_toggleMode()`, plus a field that takes real input focus. It is the
+  instrument the facts below were measured with, and the device suite drives it.
+
+### Fixed
+- **`vk tap --enabled @submit` swallowed its selector.** `enabled` was missing from the
+  argv parser's `BOOLEAN` set, and a non-boolean flag consumes the next token — so the
+  selector became the flag's value and the command died with "Missing selector". Only the
+  trailing form worked. All eight new modifier names are registered too.
+- **`swipe --on <selector>` silently ignored `--index` and `--enabled`.** It built its
+  selector directly instead of going through `buildSelector`; it now honours every
+  modifier like the other selector commands.
+
+### Platform notes
+- **`--selected` / `--focused` are Android-only, and say so.** Measured against the fixture
+  on an iPhone 17 Pro simulator: a selected and an unselected segment come back identical
+  apart from label and frame. `idb ui describe-all --json` has no such key in its schema at
+  all — no accessibility traits — so no app can supply it and there is nothing to derive.
+  Using them with `--ios` therefore exits **3** with a named reason rather than matching
+  nothing: a filter that can only ever match zero elements burns the full auto-wait window
+  and then reports "No element matched selector", which is untrue about the screen and is
+  precisely the false signal these modifiers were added to prevent. Same honest degrade as
+  `clearApp` and `currentApp`. `--enabled` and `--checked` work on both platforms
+  (`checked` is derived on iOS from the element type plus `AXValue`).
+
+[#38]: https://github.com/ddikman/verikun/issues/38
+
 ## [0.15.0] - 2026-08-05
 
 ### Fixed

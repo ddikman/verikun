@@ -390,14 +390,50 @@ class:Button    simplified type ("Button") or full class ("android.widget.Button
 ```
 
 Modifiers: `--contains` makes text/desc matches substring-based; `--index N`
-selects the Nth match (0-based) when a selector intentionally matches several;
-`--enabled` matches only a control that is **actionable right now** — use it for a
-Submit/Check button the app disables until a form is valid, since such a button is
-present long before it is usable and tapping presence taps a dead control (with
-auto-wait this reads as "wait until it is pressable").
+selects the Nth match (0-based) when a selector intentionally matches several.
 If a selector for an action matches more than one element and no `--index` is
 given, the command fails with exit code 2 and lists the candidates — it never
 taps a guess.
+
+### State modifiers
+
+A selector can also require an element's a11y **state**, in both polarities:
+
+| Modifier | Matches | Negative form |
+|---|---|---|
+| `--enabled` | actionable right now | `--not-enabled` |
+| `--selected` | the current option of a segmented control / tab bar / mode picker | `--not-selected` |
+| `--checked` | a ticked checkbox / switch / radio | `--not-checked` |
+| `--focused` | the element holding input focus | `--not-focused` |
+
+Unset means *don't care*; these never narrow a selector you didn't ask them to.
+
+Reach for `--enabled` on a Submit/Check button the app disables until a form is
+valid: such a button is present long before it is usable, so tapping presence taps
+a dead control (with auto-wait this reads as "wait until it is pressable").
+
+The **negative** forms are what make a toggle drivable. A segmented control whose
+options share one handler *flips* on any tap, so "tap the option I want" lands on
+the other one whenever it was already chosen — exit 0, nothing to notice, and the
+run exercises the wrong mode. Guard it instead:
+
+```sh
+vk find "@mode_video --not-selected" --no-wait && vk tap @mode_video
+```
+
+A modifier can be written as a flag **or appended to the selector string**, as
+above. The string form exists because a `vk ai` control node (`if-present`,
+`when`, `repeat`, `while-present`, `read`) holds a bare selector with nowhere to
+put a flag — and a guard is exactly where the toggle case needs one:
+
+```
+if-present "id:mode_video --not-selected" { tap id:mode_video }
+```
+
+**`--selected` and `--focused` are Android-only.** `idb` reports no such
+attribute for iOS — not merely unset, the key does not exist in its output — so
+using them with `--ios` exits **3** rather than silently matching nothing.
+`--enabled` and `--checked` work on both.
 
 ### Auto scroll-into-view
 

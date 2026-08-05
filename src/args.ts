@@ -54,6 +54,19 @@ const BOOLEAN = new Set([
   'no-restart',
   'allow-install',
   'allow-unsafe-anonymous',
+  // Selector state modifiers (STATE_ATTRS in ui/selector.ts) and their negations.
+  // `enabled` was missing here until 0.15.0, and the omission was not cosmetic: a
+  // non-BOOLEAN flag swallows the next token, so `vk tap --enabled @submit` bound
+  // the SELECTOR as the flag's value and died with "Missing selector". Only the
+  // trailing form worked. Any new modifier must be listed here.
+  'enabled',
+  'selected',
+  'checked',
+  'focused',
+  'not-enabled',
+  'not-selected',
+  'not-checked',
+  'not-focused',
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {

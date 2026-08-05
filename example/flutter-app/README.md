@@ -19,18 +19,19 @@ Two things drive it now, and both are non-destructive:
 
 ## The app
 
-| Home | Login | Delayed load |
-|:---:|:---:|:---:|
-| ![Home screen](screenshots/home.png) | ![Login screen](screenshots/login.png) | ![Delayed load screen](screenshots/async.png) |
-| Reset anchor — `vk launch` always lands here | A prefilled field, an obscured field, a checkbox, and a submit button disabled until both fields are filled | Pick a delay, start a load, watch a spinner — the 8s preset outlasts vk's default wait window on purpose |
+| Home | Login | Delayed load | State flags |
+|:---:|:---:|:---:|:---:|
+| ![Home screen](screenshots/home.png) | ![Login screen](screenshots/login.png) | ![Delayed load screen](screenshots/async.png) | ![State flags screen](screenshots/state.png) |
+| Reset anchor — `vk launch` always lands here | A prefilled field, an obscured field, a checkbox, and a submit button disabled until both fields are filled | Pick a delay, start a load, watch a spinner — the 8s preset outlasts vk's default wait window on purpose | A mode picker whose two options share one handler, so every tap flips it — and a field that takes real input focus |
 
-Three screens, each earning its place by pinning a specific part of vk's contract:
+Four screens, each earning its place by pinning a specific part of vk's contract:
 
 | Screen | Ids | What it pins |
 |---|---|---|
-| `@vk_home` | `vk_nav_login`, `vk_nav_async` | Reset anchor — `vk launch` always lands here |
+| `@vk_home` | `vk_nav_login`, `vk_nav_async`, `vk_nav_state` | Reset anchor — `vk launch` always lands here |
 | `@vk_login` | `vk_user` (prefilled), `vk_pass` (obscured), `vk_remember`, `vk_submit` (disabled until valid), `vk_login_ok` | `password` flag + report redaction, `text --clear`, `find --enabled`, `checked` |
 | `@vk_async` | `vk_delay_1/3/8`, `vk_load`, `vk_fail`, `vk_spinner`, `vk_loading_text`, `vk_loaded`, `vk_error` | The ~5000 ms auto-wait window, `--wait`, `assert --gone`, dumping while animating |
+| `@vk_state` | `vk_mode_photo`, `vk_mode_video`, `vk_mode_status`, `vk_focus_field` | `selected` / `focused` and their `--not-` forms, and the shared-handler toggle that makes them necessary |
 
 The delays are `Future.delayed`, **not** network calls — the fixture is hermetic
 and works on a device in airplane mode.
@@ -128,11 +129,13 @@ exception, and it is there deliberately to test dumping against an animating UI.
 ## Measured Flutter facts
 
 Everything here was observed by running `vk` against this app. Verified on a
-**Pixel 3a (Android 12)**, a **Samsung SM-A415F (Android 12, Swedish locale)** and
-an **iPhone 17 Pro simulator (iOS 26.5)**, with Flutter 3.44.8.
+**Pixel 3a (Android 12)**, a **Samsung SM-A415F (Android 12, Swedish locale)**, a
+**Pixel 6 emulator (Android 14)** and an **iPhone 17 Pro simulator (iOS 26.5)**,
+with Flutter 3.44.8.
 
 Facts 6, 9, 10 and 11 are `vk` gaps rather than fixture quirks, and each links to
-the issue tracking it.
+the issue tracking it. Fact 12 is a platform limit rather than a `vk` gap — there
+is nothing for `vk` to read.
 
 ### 1. Flutter emits no semantics tree at all unless you ask for it
 
@@ -355,3 +358,64 @@ So a scroll gesture has to be **paced by distance**, not given a fixed duration:
 `vk`'s scroll-into-view targets ~0.75 px/ms for exactly this reason. A fast swipe
 also flings, which overshoots the target and — given fact 12 — removes it from the
 hierarchy, turning "scroll to it" into "it vanished".
+
+### 14. `selected` and `focused` reach Android but do not exist on iOS
+
+`@vk_state` exists to measure this. Both mode options are the same widget with the
+same label shape; the only difference is the flag.
+
+On Android (`vk ui`, Pixel 6 emulator), `Semantics(selected:)` lands as a real
+node attribute, and a tapped `TextField` reports real input focus:
+
+```
+[4] Button   @vk_mode_photo  desc="Photo" (155,472) tap
+[5] Button   @vk_mode_video  desc="Video" (411,472) tap,selected
+[6] EditText @vk_focus_field             (540,692) tap,focused
+```
+
+On iOS the same two options come back **byte-identical apart from label and
+frame**, and the focused field is indistinguishable from an unfocused one:
+
+```
+[4] Button "Photo" @vk_mode_photo (60,193) tap
+[5] Button "Video" @vk_mode_video (159,193) tap
+```
+
+This is not `vk` dropping a field. `idb ui describe-all --json` has no such key in
+its schema at all — every element carries exactly `AXFrame`, `AXLabel`,
+`AXUniqueId`, `AXValue`, `content_required`, `custom_actions`, `enabled`, `frame`,
+`help`, `role`, `role_description`, `subrole`, `title`, `type`. There are no
+accessibility traits, so no app can supply `selected` and there is nothing to
+derive it from. (`checked` is different: it *is* derivable, from `type` plus
+`AXValue`, and `@vk_remember` reports `checked` correctly on both platforms.)
+
+So `--selected` / `--focused` (and their `--not-` forms) **exit 3 on iOS** rather
+than matching nothing. A state filter the platform cannot populate would narrow the
+pool to zero, burn the full auto-wait window, and then report "No element matched
+selector" — a claim about the screen that is not true, and the exact false signal
+the modifier was added to prevent. `--enabled` and `--checked` work on both.
+
+### 15. A shared-handler toggle passes while testing the wrong thing
+
+The `@vk_state` mode picker reproduces the control that motivated `--selected`:
+**both options call one `_toggleMode()`**, so any tap flips the mode rather than
+setting it. Starting from `Mode: video`, an unconditional "make sure we are on
+video" tap does this:
+
+```
+start:  Mode: video
+$ vk tap @vk_mode_video
+tapped [5] Button @vk_mode_video desc="Video" (411,472) tap,selected   <- exit 0
+after:  Mode: photo
+```
+
+Exit 0, no heal, no warning — and the run went on to exercise the opposite mode
+from the one it claimed. The guard makes the already-correct case a no-op:
+
+```
+$ vk find "@vk_mode_video --not-selected"    # exit 1 -> skip the tap
+after:  Mode: video
+```
+
+That is why the negative form is the load-bearing half: `--selected` alone cannot
+express "leave it alone if it is already right".

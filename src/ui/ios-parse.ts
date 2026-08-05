@@ -47,6 +47,24 @@ const SCROLLABLE_TYPES = new Set(['ScrollView', 'Table', 'TableView', 'Collectio
 const CHECKABLE_TYPES = new Set(['Switch', 'Toggle', 'CheckBox', 'RadioButton']);
 const TEXT_INPUT_TYPES = new Set(['TextField', 'SecureTextField', 'SearchField', 'TextView']);
 
+/**
+ * State attributes idb does not report, so `Element` can only ever say `false`.
+ *
+ * MEASURED against the Flutter fixture's `@vk_state` screen on an iPhone 17 Pro simulator
+ * (iOS 26.5): a selected and an unselected segment came back byte-identical apart from
+ * label and frame, and a focused text field was indistinguishable from an unfocused one.
+ * The key is not merely unset — `idb ui describe-all` has no such key in its schema at all
+ * (it emits AXFrame, AXLabel, AXUniqueId, AXValue, content_required, custom_actions,
+ * enabled, frame, help, role, role_description, subrole, title, type, and nothing else),
+ * so no app can supply it and there is nothing to derive it from.
+ *
+ * Exported so `--selected` / `--focused` can be REJECTED on iOS rather than silently
+ * matching nothing — a filter that can never match is exactly the false-green failure the
+ * modifier exists to prevent. Keep this list next to the hard-coded `false`s below; if idb
+ * ever starts reporting one, delete it from here in the same change that parses it.
+ */
+export const IOS_UNREPORTED_STATE = ['selected', 'focused'] as const;
+
 function str(v: unknown): string {
   return typeof v === 'string' ? v : v == null ? '' : String(v);
 }
@@ -121,6 +139,7 @@ function buildElement(raw: RawElement): Element {
     checkable,
     checked: checkable && isTrue(raw.AXValue),
     focusable: false,
+    // `focused` and `selected` are not derivable — see IOS_UNREPORTED_STATE above.
     focused: false,
     scrollable: SCROLLABLE_TYPES.has(type),
     enabled: raw.enabled === undefined ? true : isTrue(raw.enabled),

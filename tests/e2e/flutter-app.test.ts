@@ -142,6 +142,142 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
     });
   });
 
+  describe('state modifiers', () => {
+    // `selected` and `focused` do not exist on iOS: idb emits no such key, so vk refuses
+    // the modifier (exit 3) rather than letting it match nothing forever. See measured
+    // fact 14 in example/flutter-app/README.md.
+    describe('selected', { skip: !isAndroid }, () => {
+      before(() => openScreen('state'));
+
+      test('--selected and --not-selected split the two options of a picker', () => {
+        // Both are the same widget with the same label shape; the flag is the only
+        // difference, so this is the narrowest possible check that it survives the dump.
+        assert.equal(vk(['find', '@vk_mode_video', '--selected', '--no-wait']).code, 0);
+        assert.equal(vk(['find', '@vk_mode_video', '--not-selected', '--no-wait']).code, 1);
+        assert.equal(vk(['find', '@vk_mode_photo', '--not-selected', '--no-wait']).code, 0);
+        assert.equal(vk(['find', '@vk_mode_photo', '--selected', '--no-wait']).code, 1);
+      });
+
+      test('the modifier works appended to the selector STRING, as a guard carries it', () => {
+        // A control node holds a bare `selector: string` with nowhere to put a flag, so
+        // this form is the only way an if-present guard can pin state. Same answers.
+        assert.equal(vk(['find', '@vk_mode_video --selected', '--no-wait']).code, 0);
+        assert.equal(vk(['find', '@vk_mode_video --not-selected', '--no-wait']).code, 1);
+      });
+
+      test('an unguarded tap on a shared-handler toggle passes while flipping the mode', () => {
+        // The regression this whole modifier exists for. Both options call one handler,
+        // so "make sure we are on video" as a plain tap lands on PHOTO whenever video was
+        // already selected — exit 0, no heal, nothing to notice. A false green.
+        openScreen('state');
+        assert.equal(vk(['assert', '@vk_mode_status', '--text', 'Mode: video']).code, 0);
+
+        const tapped = vk(['tap', '@vk_mode_video']);
+        assert.equal(tapped.code, 0, 'the tap itself succeeds — that is the problem');
+        assert.equal(
+          vk(['assert', '@vk_mode_status', '--text', 'Mode: photo']).code,
+          0,
+          'an unguarded tap should have flipped the mode',
+        );
+      });
+
+      test('the guard makes an already-correct state a no-op, and is idempotent', () => {
+        // The fix, run twice: the guard misses, the tap is skipped, the mode holds. Two
+        // passes matter — a guard that only worked once would still flip on a rerun.
+        openScreen('state');
+        for (const pass of [1, 2]) {
+          const guard = vk(['find', '@vk_mode_video --not-selected', '--no-wait']);
+          assert.equal(guard.code, 1, `pass ${pass}: guard should not match`);
+          assert.equal(
+            vk(['assert', '@vk_mode_status', '--text', 'Mode: video']).code,
+            0,
+            `pass ${pass}: mode drifted`,
+          );
+        }
+      });
+
+      test('the guard DOES fire when the option is not already selected', () => {
+        // The other half: a guard that never matches would pass the test above for the
+        // wrong reason, so prove it opens when it should and lands on the right mode.
+        openScreen('state');
+        assert.equal(vk(['tap', '@vk_mode_photo']).code, 0); // now Mode: photo
+        assert.equal(vk(['assert', '@vk_mode_status', '--text', 'Mode: photo']).code, 0);
+
+        assert.equal(vk(['find', '@vk_mode_video --not-selected', '--no-wait']).code, 0);
+        assert.equal(vk(['tap', '@vk_mode_video']).code, 0);
+        assert.equal(vk(['assert', '@vk_mode_status', '--text', 'Mode: video']).code, 0);
+      });
+    });
+
+    describe('focused', { skip: !isAndroid }, () => {
+      before(() => openScreen('state'));
+
+      test('--focused follows real input focus, not a hard-coded flag', () => {
+        assert.equal(
+          vk(['find', '@vk_focus_field', '--focused', '--no-wait']).code,
+          1,
+          'nothing is focused before the field is tapped',
+        );
+        assert.equal(vk(['tap', '@vk_focus_field']).code, 0);
+        assert.equal(vk(['find', '@vk_focus_field', '--focused', '--no-wait']).code, 0);
+        assert.equal(vk(['find', '@vk_mode_video', '--focused', '--no-wait']).code, 1);
+      });
+    });
+
+    describe('checked', () => {
+      before(() => openScreen('login'));
+
+      test('--checked and --not-checked track the checkbox on both platforms', () => {
+        // Unlike selected/focused this one DOES survive to iOS: ios-parse derives it from
+        // type + AXValue, and @vk_remember comes back as a CheckBox with AXValue "1".
+        assert.equal(vk(['find', '@vk_remember', '--not-checked', '--no-wait']).code, 0);
+        assert.equal(vk(['find', '@vk_remember', '--checked', '--no-wait']).code, 1);
+
+        assert.equal(vk(['tap', '@vk_remember']).code, 0);
+
+        assert.equal(vk(['find', '@vk_remember', '--checked', '--no-wait']).code, 0);
+        assert.equal(vk(['find', '@vk_remember', '--not-checked', '--no-wait']).code, 1);
+      });
+    });
+
+    describe('platform honesty', () => {
+      before(() => openScreen('state'));
+
+      test('iOS refuses --selected / --focused instead of matching nothing', { skip: isAndroid }, () => {
+        // A filter the platform cannot populate would narrow the pool to zero, burn the
+        // full auto-wait window, and then report "No element matched selector" — a claim
+        // about the screen that is not true. Exit 3 (environment), like clearApp's refusal.
+        for (const flag of ['--selected', '--not-selected', '--focused', '--not-focused']) {
+          const r = vk(['find', '@vk_mode_video', flag, '--no-wait']);
+          assert.equal(r.code, 3, `${flag} should be refused on iOS, got ${r.code}`);
+          assert.match(r.stderr + r.stdout, /does not report/);
+        }
+      });
+
+      test('the modifiers iOS CAN answer still work there', () => {
+        assert.equal(vk(['find', '@vk_mode_video', '--enabled', '--no-wait']).code, 0);
+      });
+    });
+
+    describe('argument parsing', () => {
+      before(() => openScreen('state'));
+
+      test('a state modifier before the selector does not swallow it', () => {
+        // Regression: `enabled` was missing from args.ts BOOLEAN, so a non-BOOLEAN flag
+        // consumed the next token and `vk find --enabled @x` died with "Missing selector".
+        const r = vk(['find', '--enabled', '@vk_mode_video', '--no-wait']);
+        assert.equal(r.code, 0, r.stderr);
+      });
+
+      test('contradictory modifiers are a usage error, never a guess', () => {
+        const flags = vk(['find', '@vk_mode_video', '--selected', '--not-selected', '--no-wait']);
+        assert.equal(flags.code, 2);
+        const embedded = vk(['find', '@vk_mode_video --selected --not-selected', '--no-wait']);
+        assert.equal(embedded.code, 2);
+      });
+    });
+  });
+
   describe('typing', () => {
     before(() => openScreen('login'));
 

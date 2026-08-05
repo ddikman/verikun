@@ -152,7 +152,7 @@ export function unavailable(): string | null {
  * on cold start, and a dump issued before first paint returns the PREVIOUS app's
  * hierarchy rather than an error. That cost an hour of confusion once already.
  */
-export function openScreen(screen: 'login' | 'async' | 'scroll'): void {
+export function openScreen(screen: 'login' | 'async' | 'scroll' | 'state'): void {
   const launched = vk(['launch', APP_ID]);
   if (launched.code !== 0) throw new Error(`launch failed: ${launched.stderr}`);
 
