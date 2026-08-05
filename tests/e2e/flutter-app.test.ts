@@ -1,17 +1,20 @@
 // Device end-to-end cases against the Flutter fixture in example/flutter-app.
 //
-// Run with:  VK_E2E_DEVICE=<serial> npm run test:e2e
-//            VK_E2E_PLATFORM=ios    npm run test:e2e
+// Run with:  VK_E2E_DEVICE=<serial>     npm run test:e2e
+//            VK_E2E_PLATFORM=ios        npm run test:e2e
+//            VK_E2E_AI_MODEL=codex-cli  npm run test:e2e   (opt in to the `vk ai` case)
 //
 // These need a real device and the fixture installed; `npm test` compiles them
-// but never runs them (see harness.ts).
+// but never runs them (see harness.ts). Every case here is model-free except the
+// `vk ai` one, which is why that one is behind its own env var.
 
 import { before, describe, test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { APP_ID, byId, isAndroid, openScreen, ui, unavailable, vk } from './harness';
+import type { RunState } from '../../src/run';
 
 // One probe for the whole file: with no device or no fixture, skip with a
 // diagnostic instead of producing a wall of identical failures.
@@ -509,6 +512,53 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
         return;
       }
       assert.match(r.stdout, new RegExp(APP_ID));
+    });
+  });
+
+  // --- vk ai: the archived verdict ----------------------------------------
+  //
+  // Opt-in, because unlike every other case here this one calls a MODEL. A test
+  // that fails never has its plan cached (writePlan runs only on green), so every
+  // run recompiles the prose — set VK_E2E_AI_MODEL to the model you want billed,
+  // e.g. `codex-cli` (an already-logged-in CLI, so $0 and no API key).
+  const aiModel = process.env.VK_E2E_AI_MODEL;
+
+  describe('vk ai archives an honest verdict', { skip: aiModel ? false : 'set VK_E2E_AI_MODEL to run' }, () => {
+    test('a run the engine failed is never archived as a green report', () => {
+      // Regression test for #41. A `vk ai` test can fail where no COMMAND failed —
+      // a `repeat` that never sees its target, a budget/timeout abort — and those
+      // used to reach the archive with nothing red in it, so report.xml claimed
+      // failures="0" for a test that failed. CI trusts that file.
+      //
+      // Deliberately asserts the INVARIANT, not one failure message: a failing test
+      // recompiles every run, so which failure the plan produces is not stable — but
+      // "a non-zero run is never archived green" must hold for all of them.
+      const r = vk(['ai', join('tests', 'e2e', 'fixtures', 'repeat-never-satisfied.md'), '--model', aiModel!], {
+        record: true,
+        timeoutMs: 600_000,
+      });
+      assert.notEqual(r.code, 0, `the fixture test is built to fail, but vk ai passed:\n${r.stderr}`);
+
+      // stdout is the one machine result: the path to the HTML report.
+      const runDir = dirname(r.stdout.trim());
+      assert.ok(runDir && runDir !== '.', `no report path on stdout: ${JSON.stringify(r.stdout)}`);
+
+      const suiteLine = readFileSync(join(runDir, 'report.xml'), 'utf8').split('\n')[1];
+      const failures = Number(/failures="(\d+)"/.exec(suiteLine)?.[1]);
+      const errors = Number(/errors="(\d+)"/.exec(suiteLine)?.[1]);
+      assert.ok(failures + errors > 0, `a failed run reported no failures in JUnit: ${suiteLine}`);
+
+      const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as RunState;
+      assert.ok(state.failure?.where, 'run.json carries no terminal failure');
+      assert.ok(state.failure?.reason);
+
+      const red = state.steps.filter((s) => s.status !== 'passed');
+      assert.equal(red.length, 1, 'exactly one step should carry the failure — never zero, never doubled');
+      // The archive must show what the screen looked like, not just that it broke.
+      assert.ok(red[0].failImage || red[0].failHierarchy, 'the failing step captured no evidence');
+
+      const html = readFileSync(join(runDir, 'report.html'), 'utf8');
+      assert.match(html, /This run did not pass/);
     });
   });
 });

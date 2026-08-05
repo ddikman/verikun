@@ -13,6 +13,7 @@ import {
   confineToCwd,
   assertSafeAppId,
   stateFromFlags,
+  terminalFailure,
 } from '../src/cli';
 import { resolve } from 'node:path';
 import { parseSelector } from '../src/ui/selector';
@@ -286,4 +287,51 @@ test('stateFromFlags: a contradiction is a usage error, not a silent winner', ()
     () => stateFromFlags({ selected: true, 'not-selected': true }),
     (e: unknown) => e instanceof CliError && e.exitCode === 2,
   );
+});
+
+// --- terminalFailure --------------------------------------------------------
+//
+// The single record of why a `vk ai` run died. Both the archived failure step and
+// the `[ai] …` console line are built from it, so the report and the console can
+// never disagree — and a failure the engine produced outside any command is no
+// longer invisible to the report (issue #41).
+
+const AI_OPTS = { maxCostUsd: 2, timeoutMs: 300_000 };
+
+test('terminalFailure: a passing run has no failure to record', () => {
+  assert.equal(terminalFailure({ ok: true }, AI_OPTS), null);
+});
+
+test('terminalFailure: a control-node failure carries the engine where + reason', () => {
+  const reason = "repeat stopped after 4 iteration(s) without 'id:target' ever appearing";
+  assert.deepEqual(terminalFailure({ ok: false, failure: { where: 'steps[24]', reason } }, AI_OPTS), {
+    where: 'steps[24]',
+    reason,
+    kind: 'fail',
+  });
+});
+
+test('terminalFailure: an environment abort is its own kind (it maps to exit 3, not 1)', () => {
+  const t = terminalFailure({ ok: false, abortedForEnv: true, failure: { where: 'steps[2]', reason: 'adb gone' } }, AI_OPTS);
+  assert.equal(t?.kind, 'env');
+  assert.equal(t?.reason, 'adb gone');
+});
+
+test('terminalFailure: budget and timeout aborts get a reason the engine never supplies', () => {
+  // runPlan returns these as a bare flag with NO failure object, which is exactly
+  // how an aborted run used to reach the archive with nothing to say about itself.
+  const budget = terminalFailure({ ok: false, abortedForBudget: true }, AI_OPTS);
+  assert.equal(budget?.kind, 'budget');
+  assert.match(budget?.reason ?? '', /cost ceiling \$2/);
+
+  const timeout = terminalFailure({ ok: false, abortedForTimeout: true }, AI_OPTS);
+  assert.equal(timeout?.kind, 'timeout');
+  assert.match(timeout?.reason ?? '', /run timeout \(300s\)/);
+  assert.equal(timeout?.where, 'run', 'an abort is not attributable to one node');
+});
+
+test('terminalFailure: a non-ok result with no detail at all still records something', () => {
+  const t = terminalFailure({ ok: false }, AI_OPTS);
+  assert.equal(t?.kind, 'fail');
+  assert.equal(t?.where, 'run');
 });

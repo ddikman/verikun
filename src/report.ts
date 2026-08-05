@@ -48,12 +48,39 @@ function fmtDuration(ms: number): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
 }
 
+/**
+ * The run's verdict, taken from the ENGINE rather than inferred from step statuses.
+ *
+ * A `vk ai` run can fail outside any command — a `repeat` that never sees its target,
+ * a budget/timeout abort — and those record no step, so a tally-only report declared
+ * the run green (issue #41). `Recorder.recordTerminalFailure` now writes `failure`, and
+ * `ai.ok` is the older, coarser signal we still fall back to; between them an
+ * unrecorded failure can no longer read as success.
+ */
+export function runFailure(run: RunState): { where: string; reason: string } | null {
+  if (run.failure) return run.failure;
+  if (run.ai && !run.ai.ok) return { where: 'run', reason: 'the run did not pass (no step recorded the failure)' };
+  return null;
+}
+
 function counts(run: RunState) {
   const passed = run.steps.filter((s) => s.status === 'passed').length;
   const failures = run.steps.filter((s) => s.status === 'failed').length;
   const errors = run.steps.filter((s) => s.status === 'error').length;
   const timeMs = run.steps.reduce((a, s) => a + s.durationMs, 0);
-  return { tests: run.steps.length, passed, failures, errors, timeMs };
+  // Belt and braces. Normally the terminal failure IS a step by the time we render, so
+  // this stays false; it fires only if the failure never reached the recorder, and then
+  // both renderers emit one extra entry — hence `tests` grows too, so the tally never
+  // disagrees with the testcase list it is supposed to describe.
+  const unrecorded = failures + errors === 0 && runFailure(run) !== null;
+  return {
+    tests: run.steps.length + (unrecorded ? 1 : 0),
+    passed,
+    failures: failures + (unrecorded ? 1 : 0),
+    errors,
+    timeMs,
+    unrecorded,
+  };
 }
 
 // --- JUnit ----------------------------------------------------------------
@@ -100,6 +127,16 @@ export function toJUnitXml(run: RunState): string {
     })
     .join('\n');
 
+  const f = runFailure(run);
+  const unrecordedCase =
+    c.unrecorded && f
+      ? `  <testcase name="${xmlAttr(`run did not pass (${f.where})`)}" classname="verikun.run" time="0.000">` +
+        `\n    <failure message="${xmlAttr(f.reason)}" type="AssertionFailure">${xmlText(
+          `${f.where}: ${f.reason}`,
+        )}</failure>\n  </testcase>`
+      : '';
+  const allCases = [cases, unrecordedCase].filter(Boolean).join('\n');
+
   const suiteAttrs =
     `name="${xmlAttr(run.name)}" tests="${c.tests}" failures="${c.failures}" ` +
     `errors="${c.errors}" time="${suiteTime}" timestamp="${xmlAttr(run.startedAt)}"`;
@@ -118,7 +155,7 @@ export function toJUnitXml(run: RunState): string {
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<testsuites name="verikun" tests="${c.tests}" failures="${c.failures}" errors="${c.errors}" time="${suiteTime}">\n` +
     `<testsuite ${suiteAttrs}>\n` +
-    `${cases}\n` +
+    `${allCases}\n` +
     (suiteExtras.length
       ? `  <system-out>${xmlText(suiteExtras.join('\n'))}</system-out>\n`
       : '') +
@@ -166,6 +203,9 @@ const STYLE = `
   .aibox { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:20px; font-size:13px; }
   .aibox .cost { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); margin-top:4px; }
   .aibox ul { margin:8px 0 0; padding-left:18px; }
+  .failbox { background:#fff; border:1px solid var(--fail); border-left-width:4px; border-radius:8px; padding:12px 14px; margin-bottom:20px; font-size:13px; }
+  .failbox .where { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); }
+  .failbox .why { color:var(--fail); margin-top:4px; }
 `;
 
 function aiPanelHtml(ai: NonNullable<RunState['ai']>): string {
@@ -178,6 +218,15 @@ function aiPanelHtml(ai: NonNullable<RunState['ai']>): string {
       <div><span class="k">vk ai</span> ${ai.ok ? 'passed' : 'did not pass'}${ai.modelRepairs ? ` &middot; ${ai.modelRepairs} model repair(s)` : ''}</div>
       <div class="cost">${htmlEsc(ai.cost)}</div>
       ${improvements}
+    </div>`;
+}
+
+/** The run-level failure, stated once at the top. This page is where a human looks
+ *  first, so the verdict has to be visible without reading 26 green rows. */
+function failBoxHtml(f: { where: string; reason: string }): string {
+  return `<div class="failbox">
+      <div><strong>This run did not pass.</strong> <span class="where">${htmlEsc(f.where)}</span></div>
+      <div class="why">${htmlEsc(f.reason)}</div>
     </div>`;
 }
 
@@ -437,6 +486,7 @@ ${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}
  */
 export function toHtml(run: RunState, opts: { appLog?: string } = {}): string {
   const c = counts(run);
+  const failure = runFailure(run);
   const chips = [
     `<span class="chip pass">${c.passed} passed</span>`,
     c.failures ? `<span class="chip fail">${c.failures} failed</span>` : '',
@@ -484,9 +534,27 @@ export function toHtml(run: RunState, opts: { appLog?: string } = {}): string {
   <div class="summary">
       ${chips}
   </div>
+  ${failure ? failBoxHtml(failure) : ''}
   ${run.ai ? aiPanelHtml(run.ai) : ''}
   <ol class="steps">
-    ${run.steps.map(stepHtml).join('\n    ')}
+    ${[
+      ...run.steps.map(stepHtml),
+      // Only when the failure reached no step — otherwise it is already a red row.
+      ...(c.unrecorded && failure
+        ? [
+            stepHtml({
+              index: run.steps.length,
+              command: 'ai',
+              name: `run did not pass (${failure.where})`,
+              startedAt: run.startedAt,
+              durationMs: 0,
+              status: 'failed',
+              exitCode: 1,
+              message: failure.reason,
+            }),
+          ]
+        : []),
+    ].join('\n    ')}
   </ol>${appLogPanel}
 </div>
 </body>

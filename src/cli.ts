@@ -1408,6 +1408,22 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
           else driver.clearApp(appId);
         },
         preflight: () => driver.preflight(),
+        captureFailure: async () => {
+          // Two independent tries: a screencap can succeed where a dump doesn't (and
+          // vice versa), and neither is allowed to derail recording the failure.
+          const out: { png?: Buffer; hierarchy?: Element[] } = {};
+          try {
+            out.png = driver.screenshot();
+          } catch {
+            /* device may be gone — that may be why we failed */
+          }
+          try {
+            out.hierarchy = driver.getElements({ all: false });
+          } catch {
+            /* ditto */
+          }
+          return out;
+        },
       },
       platform,
       device,
@@ -1440,11 +1456,65 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
         await pingServer(opts);
         await remote.getElements();
       },
+      // Hierarchy only: the server exposes no screenshot route, so a remote run's
+      // engine failure archives without a picture. Honest degrade over a protocol
+      // change here — tracked in #48.
+      captureFailure: async () => {
+        try {
+          return { hierarchy: await remote.getElements() };
+        } catch {
+          return {};
+        }
+      },
     },
     platform: health.platform,
     device: health.serial,
     remote: { url: server, version: health.version },
   };
+}
+
+export interface TerminalFailure {
+  where: string;
+  reason: string;
+  kind: 'fail' | 'env' | 'budget' | 'timeout';
+}
+
+/**
+ * The one terminal-failure record for a non-ok engine result — `null` when the run
+ * passed. Exported for the unit suite.
+ *
+ * Budget and timeout aborts come back from the engine as a bare flag with NO `failure`
+ * object, so their reason is composed here; `where` is `run` because the abort is not
+ * attributable to one node. Both the recorded failure and the `[ai] …` status line are
+ * built from this, so the archive and the console cannot disagree about why a run died.
+ */
+export function terminalFailure(
+  r: {
+    ok: boolean;
+    failure?: { where: string; reason: string };
+    abortedForBudget?: boolean;
+    abortedForTimeout?: boolean;
+    abortedForEnv?: boolean;
+  },
+  opts: { maxCostUsd: number; timeoutMs: number },
+): TerminalFailure | null {
+  if (r.ok) return null;
+  if (r.abortedForEnv) {
+    return { where: r.failure?.where ?? 'run', reason: r.failure?.reason ?? 'device unavailable', kind: 'env' };
+  }
+  if (r.abortedForBudget) {
+    return { where: r.failure?.where ?? 'run', reason: `cost ceiling $${opts.maxCostUsd} reached`, kind: 'budget' };
+  }
+  if (r.abortedForTimeout) {
+    return { where: 'run', reason: `run timeout (${Math.round(opts.timeoutMs / 1000)}s) reached`, kind: 'timeout' };
+  }
+  return { where: r.failure?.where ?? 'run', reason: r.failure?.reason ?? 'failed', kind: 'fail' };
+}
+
+/** The `[ai] …` console verdict for a terminal failure, phrased as it always was. */
+function terminalStatusLine(t: TerminalFailure): string {
+  if (t.kind === 'fail') return `FAIL at ${t.where}: ${t.reason}`;
+  return `ABORTED — ${t.kind === 'env' ? `environment: ${t.reason}` : t.reason}`;
 }
 
 /**
@@ -1563,6 +1633,13 @@ async function runAiTest(
     // seal the run so it is not left dangling in .verikun/run/ for the next command
     // to roll over. Then let the error map to an exit code as usual.
     Recorder.annotateRun({ ai: { ok: false, cost: cost.summaryLine(), modelRepairs: 0, improvements: [] } });
+    // No evidence capture here: a throw at this level usually IS the device dying, so
+    // the capture would fail the same way and only add noise to the error path.
+    Recorder.recordTerminalFailure({
+      where: 'run',
+      reason: (e as Error).message,
+      kind: isEnvError(e as Error) ? 'env' : 'fail',
+    });
     try {
       await prefetchArchiveLogs(backend);
       Recorder.archive();
@@ -1587,22 +1664,19 @@ async function runAiTest(
       err(`[ai] could not cache plan: ${(e as Error).message}`);
     }
   }
+  // A failure the engine produced (a control node giving up, a budget/timeout abort)
+  // never ran through a command, so nothing recorded it — without this the archive
+  // declares the failed test green. Must come BEFORE the archive that renders it.
+  const terminal = terminalFailure(result, opts);
+  if (terminal) Recorder.recordTerminalFailure(terminal, await backend.captureFailure?.());
+
   Recorder.annotateRun({
     ai: { ok: result.ok, cost: costLine, modelRepairs: result.modelRepairs, improvements: result.improvements },
   });
   await prefetchArchiveLogs(backend);
   const { dir, xmlPath, htmlPath, state } = Recorder.archive();
 
-  const status = result.ok
-    ? 'PASS'
-    : result.abortedForBudget
-      ? `ABORTED — cost ceiling $${opts.maxCostUsd} reached`
-      : result.abortedForTimeout
-        ? `ABORTED — run timeout (${Math.round(opts.timeoutMs / 1000)}s) reached`
-        : result.abortedForEnv
-          ? `ABORTED — environment: ${result.failure?.reason}`
-          : `FAIL at ${result.failure?.where}: ${result.failure?.reason}`;
-  err(`[ai] ${status} · ${costLine}`);
+  err(`[ai] ${terminal ? terminalStatusLine(terminal) : 'PASS'} · ${costLine}`);
   err(`[ai] report: ${htmlPath}`);
   if (result.improvements.length) {
     err(`[ai] ${result.improvements.length} suggested improvement(s) (also in the report):`);

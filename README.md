@@ -144,10 +144,16 @@ skips the archive dump on green runs (failures still capture).
 - **`report.html`** — a self-contained report: every step, the identifiers used,
   any screenshots taken, the screenshot + hierarchy of any failed page, a link to
   the full device log, an app-scoped log accordion when the run launched an app,
-  and any per-step logs from `vk log`.
+  and any per-step logs from `vk log`. A run that did not pass says so in a banner
+  at the top.
 - **`artifacts/logcat.txt`** — full device log for the run window (default).
 - **`artifacts/logcat-app.txt`** — app-scoped log (when a package/bundle was launched).
 - **`run.json`** — the raw recording.
+
+A `vk ai` run can also fail where no single command did — a `repeat` that never
+sees its target, a cost/timeout abort. That verdict is recorded too (as
+`run.json`'s `failure`, plus a failed step carrying the reason and a screenshot),
+so a failed test is never reported as `failures="0"` in the JUnit that CI reads.
 
 `vk run archive` exits non-zero when the run contained failures, so the same
 command both produces the report and gates CI.

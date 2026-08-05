@@ -84,6 +84,11 @@ export interface RunState {
    *  improvements (workarounds the model applied that you can fold back into the
    *  source to stabilize the test and cut future tokens). */
   ai?: { ok: boolean; cost: string; modelRepairs: number; improvements: string[] };
+  /** A terminal failure the `vk ai` ENGINE produced rather than a command — a control
+   *  node that gave up (`repeat` exhausted, `when` matched nothing), a budget/timeout
+   *  abort. Those never run through beginStep, so nothing marked the run red and the
+   *  archive declared a failed test green. The report trusts this over the step tally. */
+  failure?: { where: string; reason: string };
   steps: RunStep[];
 }
 
@@ -201,6 +206,22 @@ function loadState(dir: string): RunState | null {
     err(`[verikun] ignoring unreadable run state ${statePath(dir)} (${(e as Error).message})`);
     return null;
   }
+}
+
+/** Relative path of a step's failure screenshot. One place, because a synthetic
+ *  terminal-failure step has to land on the same convention as a recorded one. */
+const failImagePath = (index: number) => `artifacts/step-${index}-fail.png`;
+
+function writeArtifactTo(dir: string, rel: string, buf: Buffer): void {
+  mkdirSync(join(dir, 'artifacts'), { recursive: true });
+  writeFileSync(join(dir, rel), buf);
+}
+
+/** Compact hierarchy text, HEAD-capped — a failure dump is read top-down, so the
+ *  first screenful is the useful part (unlike logs, which are kept tail-first). */
+function capHierarchy(els: Element[]): string {
+  const text = formatCompact(els);
+  return text.length > HIERARCHY_CAP ? text.slice(0, HIERARCHY_CAP) + '\n…(truncated)' : text;
 }
 
 function saveState(dir: string, state: RunState): void {
@@ -545,16 +566,15 @@ export class Recorder {
   private capture(driver?: Driver, quiet = false): void {
     if (!driver) return;
     try {
-      this.writeArtifact(`artifacts/step-${this.step.index}-fail.png`, driver.screenshot());
-      this.step.failImage = `artifacts/step-${this.step.index}-fail.png`;
+      this.writeArtifact(failImagePath(this.step.index), driver.screenshot());
+      this.step.failImage = failImagePath(this.step.index);
     } catch (e) {
       // Best-effort evidence: the device may be gone (often why the step failed). Surface
       // it so a screenshot bug isn't hidden, but never let it derail failure recording.
       if (!quiet) err(`[verikun] could not capture failure screenshot (${(e as Error).message})`);
     }
     try {
-      const text = formatCompact(driver.getElements({ all: false }));
-      this.step.failHierarchy = text.length > HIERARCHY_CAP ? text.slice(0, HIERARCHY_CAP) + '\n…(truncated)' : text;
+      this.step.failHierarchy = capHierarchy(driver.getElements({ all: false }));
     } catch (e) {
       if (!quiet) err(`[verikun] could not capture failure hierarchy (${(e as Error).message})`);
     }
@@ -565,8 +585,7 @@ export class Recorder {
       this.sink[rel] = buf;
       return;
     }
-    mkdirSync(join(this.dir, 'artifacts'), { recursive: true });
-    writeFileSync(join(this.dir, rel), buf);
+    writeArtifactTo(this.dir, rel, buf);
   }
 
   private commit(): void {
@@ -764,6 +783,59 @@ export class Recorder {
     delete last.failImage;
     delete last.failHierarchy;
     if (message) last.message = message;
+    saveState(dir, state);
+  }
+
+  /**
+   * Record a terminal failure the `vk ai` ENGINE produced rather than a command — a
+   * control node that gave up (`repeat` exhausted, `when` matched no branch), a
+   * budget/timeout abort, an engine-internal throw. None of those go through
+   * beginStep, so before this existed nothing marked the run red and the archived
+   * report declared a failed test fully green (issue #41).
+   *
+   * Always records the run-level verdict. Appends a synthetic failed step ONLY when
+   * no step is already red — a leaf failure carries its own step and evidence, and
+   * counting it twice would be its own kind of lie.
+   */
+  static recordTerminalFailure(
+    failure: { where: string; reason: string; kind: 'fail' | 'env' | 'budget' | 'timeout' },
+    evidence?: { png?: Buffer; hierarchy?: Element[] },
+  ): void {
+    if (process.env.VERIKUN_NO_RUN) return;
+    const dir = activeDir();
+    const state = loadState(dir);
+    if (!state) return;
+
+    state.failure = { where: failure.where, reason: failure.reason };
+
+    if (state.steps.every((s) => s.status === 'passed')) {
+      const index = state.steps.length;
+      // An environment abort is exit 3 (the box is broken, not the app), matching
+      // what `vk ai` itself returns; everything else is an exit-1 assertion failure.
+      const env = failure.kind === 'env';
+      const step: RunStep = {
+        index,
+        command: 'ai',
+        name: `ai ${env ? 'aborted' : 'failed'} at ${failure.where}`,
+        startedAt: nowIso(),
+        durationMs: 0,
+        status: env ? 'error' : 'failed',
+        exitCode: env ? 3 : 1,
+        message: failure.reason,
+      };
+      if (evidence?.png) {
+        try {
+          writeArtifactTo(dir, failImagePath(index), evidence.png);
+          step.failImage = failImagePath(index);
+        } catch (e) {
+          err(`[verikun] could not write the failure screenshot (${(e as Error).message})`);
+        }
+      }
+      if (evidence?.hierarchy) step.failHierarchy = capHierarchy(evidence.hierarchy);
+      state.steps.push(step);
+    }
+
+    state.updatedAt = nowIso();
     saveState(dir, state);
   }
 
