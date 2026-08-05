@@ -239,3 +239,76 @@ test('validateNode: if-present may also sit at the innermost level, inside a whe
   );
   assert.equal(node.type, 'repeat');
 });
+
+// --- device steps are validated at COMPILE time ---------------------------
+//
+// Unlike every other command — where a bad selector is a runtime fact the engine can
+// heal — a device setting's key and value are knowable statically. Checking them here
+// is what makes a suite fail before the first tap rather than twenty steps in, on a
+// device it has already half-modified.
+
+const deviceLeaf = (positionals: string[]) => ({ type: 'command', command: 'device', positionals, flags: [] });
+
+test('KNOWN_COMMANDS includes device (the grammar offers it as an action)', () => {
+  assert.ok(KNOWN_COMMANDS.has('device'));
+});
+
+test('validateNode: accepts well-formed device steps', () => {
+  assert.equal(validateNode(deviceLeaf(['set', 'airplane=on']), 'x').type, 'command');
+  assert.equal(validateNode(deviceLeaf(['set', 'dark=on', 'font-scale=1.3']), 'x').type, 'command');
+  assert.equal(validateNode(deviceLeaf(['reset']), 'x').type, 'command');
+  assert.equal(validateNode(deviceLeaf(['get']), 'x').type, 'command');
+});
+
+test('validateNode: rejects a hallucinated device setting at plan-validation time', () => {
+  assert.throws(() => validateNode(deviceLeaf(['set', 'bogus=1']), 'steps[0]'), InvalidPlanError);
+  assert.throws(() => validateNode(deviceLeaf(['reset', 'bogus']), 'steps[0]'), InvalidPlanError);
+});
+
+test('validateNode: rejects an out-of-domain device value', () => {
+  assert.throws(() => validateNode(deviceLeaf(['set', 'rotation=sideways']), 'steps[0]'), InvalidPlanError);
+  assert.throws(() => validateNode(deviceLeaf(['set', 'font-scale=99']), 'steps[0]'), InvalidPlanError);
+});
+
+test('validateNode: folds the "device set" one-word spelling back into the canonical shape', () => {
+  // Observed from a real compile: `device` is the only verb with a subcommand and every
+  // other one is a single word, so the model writes the pair as one command name. That
+  // is a spelling of a real command, not a hallucination — normalize rather than fail.
+  for (const spelling of ['device set', 'device  set', 'DEVICE SET', 'device-set', 'device_set']) {
+    const node = validateNode({ type: 'command', command: spelling, positionals: ['dark=on'], flags: [] }, 'x');
+    assert.equal(node.type, 'command');
+    assert.equal((node as LeafStep).command, 'device');
+    assert.deepEqual((node as LeafStep).positionals, ['set', 'dark=on']);
+  }
+});
+
+test('validateNode: the normalization does not widen the allowlist', () => {
+  // Only real subcommands fold; anything else still hits the unknown-command guard.
+  assert.throws(
+    () => validateNode({ type: 'command', command: 'device explode', positionals: [], flags: [] }, 'x'),
+    InvalidPlanError,
+  );
+  assert.throws(
+    () => validateNode({ type: 'command', command: 'devices', positionals: [], flags: [] }, 'x'),
+    InvalidPlanError,
+  );
+});
+
+test('validateNode: a normalized device step is still value-checked', () => {
+  assert.throws(
+    () => validateNode({ type: 'command', command: 'device set', positionals: ['bogus=1'], flags: [] }, 'x'),
+    InvalidPlanError,
+  );
+});
+
+test('validateNode: rejects an unknown device subcommand', () => {
+  assert.throws(() => validateNode(deviceLeaf(['enable', 'dark=on']), 'steps[0]'), InvalidPlanError);
+  assert.throws(() => validateNode(deviceLeaf([]), 'steps[0]'), InvalidPlanError);
+});
+
+test('parsePlan: an invalid device step fails the whole plan, not just the step', () => {
+  assert.throws(
+    () => parsePlan({ version: 1, steps: [deviceLeaf(['set', 'wifi=off'])] }),
+    InvalidPlanError,
+  );
+});

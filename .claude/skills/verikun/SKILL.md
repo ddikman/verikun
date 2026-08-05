@@ -94,6 +94,37 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
   fresh-install state. Android only (`pm clear`, which also force-stops the app); iOS
   has no per-app data reset, so `clear` exits 3 there.
 
+## Change the device, not just the app
+
+Some behaviour only appears when the device changes underneath the app — the offline
+banner, the retry path, dark theme, a layout that breaks at accessibility text sizes.
+
+- `vk device set <key>=<value> ...` · `vk device get [key]` · `vk device reset` · `vk device caps`
+
+  | key | values | Android | iOS simulator |
+  |---|---|---|---|
+  | `airplane` | `on\|off` | yes | **no** — a simulator has no radio |
+  | `dark` | `on\|off` | yes | yes |
+  | `font-scale` | `0.5`–`3.0`, `default` | yes | yes (nearest Dynamic Type category) |
+  | `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` | yes | **no** |
+  | `stay-awake` | `on\|off` | yes | no-op (simulators don't sleep) |
+
+  Set several at once: `vk device set dark=on font-scale=1.3`. Each change is **verified by
+  reading it back**, so success means it actually landed — these device commands silently
+  no-op on some OEM skins. An unsupported key exits **3 before touching the device** and
+  names the manual equivalent; `vk device caps` prints the live matrix for your platform.
+
+  **Always `vk device reset` when the scenario is done.** It restores what the run changed,
+  from the snapshot taken before each change. `batch`, `ai` and `suite` reset automatically
+  even when the flow *fails* — but a bare `vk device set` from a shell stays applied until
+  you reset it, so don't leave someone's phone in airplane mode.
+
+  Two traps:
+  - **`airplane=off` brings the radio back, not the internet.** Follow it with
+    `vk assert <selector> --wait 10s`, never an immediate `tap`.
+  - **Over wireless adb, `airplane=on` is refused** (exit 2) — it would cut the connection
+    carrying your next command. Use USB, or `--allow-wireless` if you accept losing it.
+
 ## Selectors
 
 | Form | Matches |
@@ -424,6 +455,9 @@ draft-first flow.
 - **Indexes are per-snapshot.** `vk tap 3` taps `[3]` from the *latest* dump;
   prefer `@id` / `text:` selectors for stability across screens.
 - **Text starting with `-`:** put `--` first → `vk type -- "-50% off"`.
+- **`vk device set` from a plain shell stays applied.** Inside `batch`/`ai`/`suite` it is
+  restored automatically even if the flow dies, but a one-off `vk device set airplane=on`
+  is yours to `vk device reset` — don't strand someone's phone offline.
 - **One device auto-resolves.** Multiple → pass `-d <serial>` or set `VERIKUN_DEVICE`.
 - **`vk text` opens the keyboard.** Use `--enter` to submit, or `vk back` to
   dismiss it before re-inspecting (it can cover elements).
@@ -446,9 +480,10 @@ draft-first flow.
   physical devices. Interaction + hierarchy come from `idb` (`brew install
   idb-companion` + `pip install fb-idb`); simulator screenshots/launch/stop/logs
   use `xcrun simctl`. Run `vk doctor --ios` to check the toolchain. Caveats: `clear`
-  is unsupported (no per-app reset), `current` is `(unknown)`, and device logs are
-  simulator-only. iOS accessibility ids are often unset, so prefer `text:`/`desc:`
-  selectors there.
+  is unsupported (no per-app reset), `current` is `(unknown)`, device logs are
+  simulator-only, and `device set` is partial — `dark`/`font-scale` work on a simulator
+  while `airplane`/`rotation` do not exist there at all (`vk device caps --ios`). iOS
+  accessibility ids are often unset, so prefer `text:`/`desc:` selectors there.
 
 ## Worked example — verify a login flow
 

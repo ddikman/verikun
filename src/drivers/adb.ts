@@ -1,8 +1,16 @@
 import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
 import { CliError, probeFailure } from '../errors';
-import { runText, runBinary } from '../exec';
+import { runText, runBinary, sleepSync, TextResult } from '../exec';
 import { parseHierarchy, parseRotation } from '../ui/android-parse';
 import { viewportFor } from '../ui/viewport';
+import {
+  SettingKey,
+  ROTATION_AUTO,
+  canonicalFontScale,
+  rotationToUserRotation,
+  userRotationToRotation,
+} from '../device/settings';
+import { err } from '../output';
 
 const ADB = process.env.ADB || 'adb';
 const ADB_HINT = 'install the Android platform-tools (`brew install --cask android-platform-tools`), or point ADB at the binary';
@@ -95,6 +103,42 @@ export function escapeText(s: string): string {
     // `input` maps the literal token %s back to a space, so encode spaces last.
     .replace(/ /g, '%s');
 }
+
+/** How adb reaches the device. Only `tcp` rides the device's own wifi. */
+export type AdbTransport = 'usb' | 'tcp' | 'emulator';
+
+/**
+ * Classify a device serial by transport. Exported for the unit suite.
+ *
+ * Load-bearing default: an UNRECOGNIZED shape is `usb`. USB serials are the
+ * open-ended set (any vendor string), while TCP serials have exactly two forms —
+ * `host:port` and Android 11+ wireless-debugging mDNS names. This classifier only
+ * feeds a foot-gun guard, not a security boundary, so the failure we must avoid is
+ * misreading a real USB serial as wireless and blocking a legitimate run.
+ */
+export function adbTransport(serial: string): AdbTransport {
+  const s = serial.trim();
+  // An emulator is reached over a host-local console port, not through the guest's
+  // network stack, so cutting the guest's wifi cannot sever it.
+  if (/^emulator-\d+$/.test(s)) return 'emulator';
+  if (/_adb-tls-(connect|pairing)\._tcp\.?$/.test(s)) return 'tcp';
+  if (/:\d+$/.test(s)) return 'tcp';
+  return 'usb';
+}
+
+/**
+ * Would applying this setting sever adb's own link to the device? Only cutting the
+ * radios over a wireless transport does: the command would kill the channel carrying
+ * the next command, and nothing could turn it back on remotely.
+ */
+export function severanceRisk(transport: AdbTransport, key: SettingKey, value: string): boolean {
+  return transport === 'tcp' && key === 'airplane' && value === 'on';
+}
+
+/** How long a written setting has to read back before we call it refused. These are
+ *  local writes, so they land in well under a second or not at all. */
+const VERIFY_TIMEOUT_MS = 4000;
+const VERIFY_INTERVAL_MS = 200;
 
 export class AdbDriver implements Driver {
   readonly platform: Platform = 'android';
@@ -416,5 +460,210 @@ export class AdbDriver implements Driver {
     } catch {
       return '';
     }
+  }
+
+  // --- device settings ------------------------------------------------------
+  //
+  // Every device token below is a constant (the value domain is a closed enum in
+  // device/settings.ts), so no caller-supplied string reaches the device shell and
+  // no escaping gate is needed. The one non-constant, font-scale's number, has
+  // already been reduced to /^\d+(\.\d+)?$/ by the table's parse().
+
+  /** Like shell(), but keeps stderr and the exit code — needed because a refusal
+   *  ("Permission denial", "cmd: Can't find service") arrives on stderr and would
+   *  otherwise be invisible in the error we raise. */
+  private shellFull(args: string[], timeout?: number): TextResult {
+    return runText(ADB, this.withSerial(['shell', ...args]), { timeout });
+  }
+
+  /** `settings get <ns> <key>`, with Android's literal "null" (unset) mapped to null. */
+  private readSetting(ns: string, key: string): string | null {
+    const v = this.shell(['settings', 'get', ns, key]).trim();
+    return v === '' || v === 'null' ? null : v;
+  }
+
+  /** Poll a readback until it satisfies `ok`. Returns the final value (or null). */
+  private pollSetting(read: () => string | null, ok: (v: string | null) => boolean): string | null {
+    const deadline = Date.now() + VERIFY_TIMEOUT_MS;
+    let last = read();
+    while (!ok(last) && Date.now() < deadline) {
+      sleepSync(VERIFY_INTERVAL_MS);
+      last = read();
+    }
+    return last;
+  }
+
+  /** Apply a change, then prove it landed. `svc` / `cmd` / `settings put` are all
+   *  fire-and-forget and are silently ignored on some OEM skins, so the readback is
+   *  the actual contract — without it we would report success for a no-op. */
+  private applyAndVerify(
+    what: string,
+    mutate: () => TextResult,
+    read: () => string | null,
+    ok: (v: string | null) => boolean,
+    hint: string,
+  ): void {
+    const r = mutate();
+    const final = this.pollSetting(read, ok);
+    if (ok(final)) return;
+    const why = `${r.stderr}\n${r.stdout}`.replace(/\s+/g, ' ').trim();
+    throw new CliError(
+      `Failed to set ${what}: the command ran but the device still reports ${JSON.stringify(final)} ` +
+        `after ${VERIFY_TIMEOUT_MS}ms.` +
+        (why ? `\nDevice said: ${why}` : '') +
+        `\n${hint}`,
+      3,
+    );
+  }
+
+  getDeviceSetting(key: SettingKey): string | null {
+    switch (key) {
+      case 'airplane':
+        return this.readSetting('global', 'airplane_mode_on') === '1' ? 'on' : 'off';
+      case 'dark': {
+        // `cmd uimode night` prints e.g. "Night mode: no". Some builds also report
+        // "auto"/"custom", which our on|off domain cannot express — report null
+        // rather than guessing, so a snapshot declines to restore it.
+        const out = this.shell(['cmd', 'uimode', 'night']).trim().toLowerCase();
+        if (/\byes\b/.test(out)) return 'on';
+        if (/\bno\b/.test(out)) return 'off';
+        return null;
+      }
+      case 'font-scale': {
+        // Unset means Android's default of 1.0 (the setting row simply doesn't exist
+        // yet). Report the effective value, not the absence, so restore is correct.
+        const raw = this.readSetting('system', 'font_scale');
+        const n = raw === null ? 1.0 : Number(raw);
+        return Number.isFinite(n) ? canonicalFontScale(n) : null;
+      }
+      case 'rotation': {
+        if (this.readSetting('system', 'accelerometer_rotation') === '1') return ROTATION_AUTO;
+        const v = this.readSetting('system', 'user_rotation');
+        return v === null ? null : userRotationToRotation(v);
+      }
+      case 'stay-awake': {
+        // A bitmask of the charging types it applies to (1=AC, 2=USB, 4=wireless);
+        // any non-zero value means "stays on", which is all our on|off domain claims.
+        const v = this.readSetting('global', 'stay_on_while_plugged_in');
+        return v === null ? 'off' : v !== '0' ? 'on' : 'off';
+      }
+    }
+  }
+
+  setDeviceSetting(key: SettingKey, value: string): void {
+    switch (key) {
+      case 'airplane':
+        return this.setAirplane(value === 'on');
+      case 'dark':
+        return this.applyAndVerify(
+          `dark=${value}`,
+          () => this.shellFull(['cmd', 'uimode', 'night', value === 'on' ? 'yes' : 'no']),
+          () => this.getDeviceSetting('dark'),
+          (v) => v === value,
+          'Some OEM skins override night mode from their own theme engine.',
+        );
+      case 'font-scale':
+        return this.applyAndVerify(
+          `font-scale=${value}`,
+          () => this.shellFull(['settings', 'put', 'system', 'font_scale', value]),
+          () => this.getDeviceSetting('font-scale'),
+          (v) => v === value,
+          'Writing system settings requires an unrestricted adb shell.',
+        );
+      case 'rotation':
+        return this.setRotation(value);
+      case 'stay-awake':
+        return this.applyAndVerify(
+          `stay-awake=${value}`,
+          () => this.shellFull(['svc', 'power', 'stayon', value === 'on' ? 'true' : 'false']),
+          () => this.getDeviceSetting('stay-awake'),
+          (v) => v === value,
+          'Some devices restrict `svc power` while a battery-saver profile is active.',
+        );
+    }
+  }
+
+  /**
+   * Airplane mode, reconciled against the radios that can actually survive it.
+   *
+   * Android publishes `airplane_mode_toggleable_radios` — the radios a user is allowed
+   * to switch back ON while airplane mode is active (typically `bluetooth,wifi,nfc`) —
+   * and it REMEMBERS that choice. So on a phone where wifi was once re-enabled mid-
+   * flight, `airplane-mode enable` leaves wifi UP. Reporting "offline" while the app is
+   * still online would make an offline test pass for the wrong reason, which is the
+   * worst failure mode a testing tool has. So: flip the flag, then force any toggleable
+   * radio that ignored it.
+   *
+   * Only radios in that list are reconciled. Cellular is not one of them — the flag
+   * cuts it outright — and `mobile_data` is a stored user PREFERENCE rather than live
+   * radio state, so it keeps reading 1 on a SIM-less device that is plainly offline.
+   * Probing it would fail a perfectly good offline state.
+   *
+   * The inverse is symmetric: a radio we forced off by hand will not come back on its
+   * own, so leaving airplane mode re-enables it. That can turn a radio back on that the
+   * user had off before the run, so it is announced on stderr rather than done quietly.
+   */
+  private setAirplane(on: boolean): void {
+    this.applyAndVerify(
+      `airplane=${on ? 'on' : 'off'}`,
+      () => this.shellFull(['cmd', 'connectivity', 'airplane-mode', on ? 'enable' : 'disable']),
+      () => this.readSetting('global', 'airplane_mode_on'),
+      (v) => v === (on ? '1' : '0'),
+      'Airplane mode is settable via `cmd connectivity` on API 30+; older devices need root.',
+    );
+
+    // Read the toggleable list from the device rather than assuming it — it varies by
+    // build, and a device that does not let wifi survive airplane mode needs no fixup.
+    const toggleable = (this.readSetting('global', 'airplane_mode_toggleable_radios') ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase());
+    if (!toggleable.includes('wifi')) return;
+
+    // wifi_on is tri-state on some builds (2 = on, pending airplane-mode exit), so ask
+    // "is it off?" rather than comparing against a single expected value.
+    const isOff = (v: string | null) => v === null || v === '0';
+    const settled = this.pollSetting(() => this.readSetting('global', 'wifi_on'), (v) => isOff(v) === on);
+    if (isOff(settled) === on) return;
+
+    err(
+      `note: wifi was still ${on ? 'up' : 'down'} after airplane mode ${on ? 'on' : 'off'} — ` +
+        `forcing it ${on ? 'off' : 'on'} so the device state matches the request`,
+    );
+    this.applyAndVerify(
+      `wifi ${on ? 'off' : 'on'}`,
+      () => this.shellFull(['svc', 'wifi', on ? 'disable' : 'enable']),
+      () => this.readSetting('global', 'wifi_on'),
+      (v) => isOff(v) === on,
+      '`svc wifi` is refused by some OEM skins; toggle it in Settings instead.',
+    );
+  }
+
+  /** A fixed orientation also pins auto-rotate off, or the accelerometer would
+   *  immediately undo it the moment the device moves. */
+  private setRotation(value: string): void {
+    if (value === ROTATION_AUTO) {
+      return this.applyAndVerify(
+        'rotation=auto',
+        () => this.shellFull(['settings', 'put', 'system', 'accelerometer_rotation', '1']),
+        () => this.readSetting('system', 'accelerometer_rotation'),
+        (v) => v === '1',
+        'Writing system settings requires an unrestricted adb shell.',
+      );
+    }
+    this.applyAndVerify(
+      'auto-rotate off',
+      () => this.shellFull(['settings', 'put', 'system', 'accelerometer_rotation', '0']),
+      () => this.readSetting('system', 'accelerometer_rotation'),
+      (v) => v === '0',
+      'Writing system settings requires an unrestricted adb shell.',
+    );
+    const target = String(rotationToUserRotation(value));
+    this.applyAndVerify(
+      `rotation=${value}`,
+      () => this.shellFull(['settings', 'put', 'system', 'user_rotation', target]),
+      () => this.readSetting('system', 'user_rotation'),
+      (v) => v === target,
+      'Writing system settings requires an unrestricted adb shell.',
+    );
   }
 }

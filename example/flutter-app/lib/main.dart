@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
 import 'screens/async_screen.dart';
+import 'screens/device_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/scroll_screen.dart';
@@ -42,6 +43,15 @@ class TestApp extends StatelessWidget {
       title: 'vk testapp',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+      // A dark theme is what makes `vk device set dark=on` observable at all: with
+      // only a light theme, MaterialApp's default ThemeMode.system has nothing to
+      // switch to, so the device setting would land and the app would look
+      // identical — a device-settings test could then pass without proving anything.
+      darkTheme: ThemeData(
+        colorSchemeSeed: Colors.indigo,
+        brightness: Brightness.dark,
+        useMaterial3: true,
+      ),
       // Named routes, so every screen is one tap from home and a test never has
       // to navigate through another case to reach the one it wants.
       initialRoute: HomeScreen.route,
@@ -51,6 +61,7 @@ class TestApp extends StatelessWidget {
         AsyncScreen.route: (_) => const AsyncScreen(),
         ScrollScreen.route: (_) => const ScrollScreen(),
         StateScreen.route: (_) => const StateScreen(),
+        DeviceScreen.route: (_) => const DeviceScreen(),
       },
     );
   }

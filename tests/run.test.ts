@@ -25,6 +25,21 @@ test('isRecordable: inspection commands are not recorded', () => {
   }
 });
 
+test('isRecordable: device set/reset change the app\'s environment, so they record', () => {
+  // A report showing "checkout failed" without "we cut the network two steps
+  // earlier" would point the reader at the wrong culprit.
+  assert.equal(isRecordable('device', ['set', 'airplane=on']), true);
+  assert.equal(isRecordable('device', ['reset']), true);
+});
+
+test('isRecordable: device get/caps are inspection and do not record', () => {
+  // Otherwise merely asking what the platform supports would auto-start a test run —
+  // the same noise `ui`/`find` are excluded to avoid.
+  assert.equal(isRecordable('device', ['get']), false);
+  assert.equal(isRecordable('device', ['caps']), false);
+  assert.equal(isRecordable('device', []), false);
+});
+
 // --- stepName -------------------------------------------------------------
 
 test('stepName: tap by selector vs. by coordinates', () => {
@@ -40,6 +55,17 @@ test('stepName: swipe renders direction/region or explicit endpoints', () => {
   assert.equal(stepName('swipe', ['up'], {}), 'swipe up');
   assert.equal(stepName('swipe', ['up'], { on: '@list' }), 'swipe up on @list');
   assert.equal(stepName('swipe', [], { from: '0,0', to: '10,10' }), 'swipe 0,0->10,10');
+});
+
+test('stepName: device keeps the whole assignment list', () => {
+  // The default branch would render "device set", which tells a report reader
+  // nothing about what actually changed on the phone.
+  assert.equal(stepName('device', ['set', 'dark=on'], {}), 'device set dark=on');
+  assert.equal(
+    stepName('device', ['set', 'dark=on', 'rotation=landscape'], {}),
+    'device set dark=on rotation=landscape',
+  );
+  assert.equal(stepName('device', ['reset'], {}), 'device reset');
 });
 
 test('stepName: fixed-label and fallback commands', () => {

@@ -15,6 +15,17 @@ export interface TextResult {
 
 const MAX_BUFFER = 64 * 1024 * 1024; // screenshots can be a few MB
 
+/**
+ * Block the calling thread for `ms`. Needed because the Driver interface is entirely
+ * synchronous (every device call is a spawnSync), so a readback poll cannot await a
+ * timer. Uses Atomics.wait on a throwaway SharedArrayBuffer — a Node builtin, keeping
+ * with the zero-runtime-dependency rule, and cheaper than spawning `sleep`.
+ */
+export function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function describeError(cmd: string, args: string[], err: NodeJS.ErrnoException): CliError {
   if (err.code === 'ENOENT') {
     return new CliError(`'${cmd}' was not found on PATH. Is it installed and on your PATH?`, 3);

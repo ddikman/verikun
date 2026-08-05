@@ -95,6 +95,16 @@ vk screenshot                   # -> ./.verikun/screen.png
 | `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to a just-installed state (Android `pm clear`, which also force-stops the app). iOS unsupported: there is no per-app data reset. |
 | `install <app.apk\|.ipa> [--server url]` | Install a build on the device (`adb install -r` / `idb install`). With `--server`, the file is uploaded to a remote [`vk server`](#remote-devices--vk-server) started with `--allow-install` (single-file `.apk`/`.ipa`, sha256-verified). |
 
+### Device state
+| Command | Description |
+|---|---|
+| `device set <key>=<value> …` | Change the *device* the app runs on, snapshotting each original first. Keys: `airplane`, `dark`, `font-scale`, `rotation`, `stay-awake`. Every change is **verified by reading it back** — `svc`/`cmd`/`settings put` are fire-and-forget and silently no-op on some OEM skins, so trusting the exit code would report success for a change that never happened. Refuses `airplane=on` over a wireless adb link (it would cut the connection carrying the next command); `--allow-wireless` overrides. |
+| `device get [key] [--json]` | Current values; `n/a` where the platform can't answer. |
+| `device reset [key …]` | Restore what this run changed. `batch`, `ai` and `suite` also do this automatically when the flow ends **or fails**, so a dead test can't leave your phone offline or rotated. |
+| `device caps [--json]` | What the active platform supports, and the manual equivalent where it doesn't. |
+
+See [Device state](#device-state-1) for the per-platform matrix.
+
 ### Batch
 | Command | Description |
 |---|---|
@@ -608,6 +618,58 @@ at runtime, so driving a flow to a report should capture liberally around transi
 `vk ai` does this automatically (see [AI](#ai--natural-language-tests)); when driving by
 hand, `vk screenshot` around each screen change and leave the PNG in the report.
 
+## Device state
+
+Some behaviour only appears when the *device* changes underneath the app: the offline
+banner, the retry path, dark theme, a layout that breaks at accessibility text sizes,
+landscape. `vk device set` changes those, verifies each one landed, and — this is the part
+that makes it safe to point at your own phone — **puts them back**.
+
+```sh
+vk device set airplane=on                              # go offline
+vk tap @retry
+vk assert text:"No connection"
+vk device reset                                        # back online
+
+vk device set dark=on font-scale=1.3 rotation=landscape  # several at once
+vk device get --json
+vk device caps                                         # what this platform supports
+```
+
+| key | values | Android | iOS simulator | iOS device |
+|---|---|---|---|---|
+| `airplane` | `on\|off` | ✅ | ❌ no radio to switch off | ❌ |
+| `dark` | `on\|off` | ✅ | ✅ | ❌ |
+| `font-scale` | `0.5`–`3.0`, or `default` | ✅ | ✅ mapped to the nearest Dynamic Type category | ❌ |
+| `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` | ✅ | ❌ neither simctl nor idb rotates | ❌ |
+| `stay-awake` | `on\|off` | ✅ | ⊘ no-op — simulators don't sleep | ❌ |
+
+An unsupported key exits **3 before any device I/O**, naming the manual equivalent, so a
+test asking for something the platform can't do fails on the first step rather than
+half-way through a half-modified device. `vk device caps --json` is the same matrix for
+whatever platform you're pointed at.
+
+**Restore is the point.** `device set` records what each setting held *before* it changed
+it, in the run file rather than in memory — so `vk device reset` works from a later process
+too. `batch`, `ai` and `suite` restore automatically in a `finally`, which is what stops a
+test that dies between `airplane=on` and `airplane=off` from leaving your phone offline.
+A bare `vk device set` from your shell stays applied until you reset it, deliberately.
+
+Three things worth knowing:
+
+- **`airplane=on` is verified by effect, not by the flag.** Android remembers a user who
+  re-enabled wifi during a previous flight, so `airplane-mode enable` can leave wifi *up*.
+  `vk` reads the device's own `airplane_mode_toggleable_radios` — the radios that can
+  survive the flag — confirms each actually went down, and forces any survivor. Reporting
+  "offline" while the app is still online would make an offline test pass for the wrong
+  reason. (Cellular is not in that list, and `mobile_data` is a stored preference rather
+  than live radio state, so it is deliberately not probed.)
+- **`airplane=off` re-enables the radio, not the internet.** Follow it with
+  `vk assert <selector> --wait 10s` rather than tapping straight away.
+- **Wireless adb is refused for `airplane=on`.** It would cut the very link carrying the
+  next command, and nothing could turn it back on remotely. Exit 2; `--allow-wireless` if
+  you mean it.
+
 ## How it works
 
 ```
@@ -658,6 +720,10 @@ your setup with `vk doctor --ios`. `vk --ios tap`, `vk --ios ui`, etc. then work
 - `log` capture is simulator-only (via `log show`); for a physical device use
   Console.app or `idb log` directly.
 - `--tree` renders flat — idb's accessibility list has no nesting depth.
+- `device set` is partial: `dark` and `font-scale` work on a **simulator** (`simctl ui`),
+  `stay-awake` is a no-op (simulators don't sleep), and `airplane`/`rotation` are
+  unsupported — neither `simctl ui` nor `idb ui` exposes a radio or an orientation.
+  A physical device supports none of them. Run `vk device caps --ios` for the live matrix.
 
 ## Using it from an AI agent
 

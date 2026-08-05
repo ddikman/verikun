@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../widgets.dart';
 import 'async_screen.dart';
+import 'device_screen.dart';
 import 'login_screen.dart';
 import 'scroll_screen.dart';
 import 'state_screen.dart';
@@ -48,6 +49,12 @@ class HomeScreen extends StatelessWidget {
             title: 'State flags',
             subtitle: 'selected, focused, a toggle you must guard',
             route: StateScreen.route,
+          ),
+          VkNavTile(
+            id: 'vk_nav_device',
+            title: 'Device state',
+            subtitle: 'dark mode, text scale, orientation',
+            route: DeviceScreen.route,
           ),
         ],
       ),

@@ -68,6 +68,7 @@ const BOOLEAN = new Set([
   'not-selected',
   'not-checked',
   'not-focused',
+  'allow-wireless',
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
