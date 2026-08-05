@@ -1,4 +1,5 @@
 import { Bounds, Element } from '../types';
+import { isOffscreen, screenRect, viewportFor } from './viewport';
 
 // Parses uiautomator XML (from `adb shell uiautomator dump`) into normalized
 // Element[]. We hand-roll a tiny tag scanner rather than pulling in an XML
@@ -99,7 +100,23 @@ export function isInteresting(el: Element): boolean {
   return false;
 }
 
-export function parseHierarchy(xml: string, opts: { all?: boolean } = {}): Element[] {
+/**
+ * The dump's `<hierarchy rotation="N">` (Surface.ROTATION_*), or undefined if absent.
+ *
+ * `adb shell wm size` always reports the device's NATURAL orientation, so this is the
+ * only thing in the dump that says whether the coordinates are portrait or landscape.
+ * Exported so the driver can read it off the same XML it just fetched, rather than
+ * paying another round-trip to ask the device which way up it is.
+ */
+export function parseRotation(xml: string): number | undefined {
+  const m = /<hierarchy\b[^>]*\brotation="(\d+)"/.exec(xml);
+  return m ? Number(m[1]) : undefined;
+}
+
+export function parseHierarchy(
+  xml: string,
+  opts: { all?: boolean; screen?: { width: number; height: number } } = {},
+): Element[] {
   const all: Element[] = [];
   const n = xml.length;
   let i = 0;
@@ -142,8 +159,12 @@ export function parseHierarchy(xml: string, opts: { all?: boolean } = {}): Eleme
   }
 
   const result = opts.all ? all : all.filter(isInteresting);
+  // No screen size (the driver could not read one) → nothing is marked, which is
+  // exactly the behaviour before viewport awareness existed.
+  const vp = opts.screen ? screenRect(viewportFor(opts.screen, parseRotation(xml))) : undefined;
   result.forEach((el, idx) => {
     el.index = idx;
+    if (vp && isOffscreen(el.bounds, vp)) el.offscreen = true;
   });
   return result;
 }

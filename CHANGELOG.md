@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-05
+
+### Fixed
+- **`tap`/`text` no longer press a point that does not reach their target** ([#42]).
+  An element's centre is not always on the element: a row scrolled past the edge of its
+  list arrives with bounds already clipped to the display, and a sticky bottom bar is
+  drawn across the middle of whatever is under it. Pressing that point hit the *other*
+  control — and the step reported success, so the run continued from the wrong place and
+  failed several steps later on an unrelated symptom. Reproduced on a Pixel 3a: pressing
+  a row's own centre recorded the sticky bar's button, not the row.
+
+### Added
+- **Auto scroll-into-view.** `tap` and `text` now bring their target into the clear
+  before acting — into its scroll container, and out from under anything painted over
+  it — then act, appending `(scrolled into view: N swipes)` to the confirmation. "Scroll
+  down to X and tap it" is just `vk tap X`; the `repeat until X { swipe up }` idiom is no
+  longer needed to reach something below the fold (the `vk ai` grammar now says so).
+  Where the target cannot be reached at all, the action **fails with exit 1** instead of
+  tapping blind coordinates. `--no-scroll` opts out.
+- **`offscreen` marker** on elements with no pixel on screen, in `vk ui`'s output and
+  `--json`. Nothing is hidden — inspection commands (`ui`/`find`/`assert`) neither scroll
+  nor filter; only actions move the screen.
+- **`Driver.viewport()`** — `screenSize()` corrected for the dump's rotation, memoized
+  per driver instance. Every unknown degrades to "everything is visible", so a device
+  whose screen size cannot be read behaves exactly as before.
+- A **scroll screen** in the Flutter fixture (`example/flutter-app`) where every row
+  records which control actually fired, plus e2e coverage that pins the wrong-tap
+  reproduction, and two new measured facts in its README: Android's dumper hides
+  off-screen nodes and clips the rest, and a fast swipe can take the app off the screen.
+
+[#42]: https://github.com/ddikman/verikun/issues/42
+
 ## [0.14.0] - 2026-08-03
 
 ### Added

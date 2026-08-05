@@ -247,6 +247,96 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
     });
   });
 
+  // Issue #42: `tap` pressed an element's recorded centre even when that point was
+  // not on the element — hitting whatever was actually there, and reporting success.
+  // Every row here is a button that records ITS OWN id, so "the tap landed somewhere
+  // else" is an assertion rather than a screenshot argument.
+  describe('auto scroll-into-view', () => {
+    const result = (): string | undefined => {
+      const el = byId(ui(), 'vk_scroll_result');
+      return isAndroid ? el?.desc : el?.text;
+    };
+
+    /** The row whose own centre falls inside the sticky bar — the reproduction.
+     *  Which row that is depends on screen size, so it is found, not hard-coded. */
+    const rowUnderTheBar = (): { id: string; centre: string } | null => {
+      const els = ui();
+      const decoy = byId(els, 'vk_scroll_decoy');
+      if (!decoy) return null;
+      const b = decoy.bounds;
+      const hit = els.find(
+        (e) =>
+          /vk_scroll_row_\d+$/.test(e.id ?? '') &&
+          e.center.y >= b.y1 &&
+          e.center.y < b.y2 &&
+          e.center.x >= b.x1 &&
+          e.center.x < b.x2,
+      );
+      return hit ? { id: hit.id!.replace(/^.*\//, ''), centre: `${hit.center.x},${hit.center.y}` } : null;
+    };
+
+    before(() => openScreen('scroll'));
+
+    test('a row under the sticky bar is tapped on the ROW, not on the bar', () => {
+      openScreen('scroll');
+      assert.equal(result(), 'none', 'fixture did not start clean');
+      const row = rowUnderTheBar();
+      assert.ok(row, 'no row centre falls inside the decoy bar — the fixture layout changed');
+
+      // First: prove the bug is still reproducible on this device by pressing the
+      // raw coordinate the old code would have used. It must hit the bar.
+      assert.equal(vk(['tap', '--at', row.centre]).code, 0);
+      assert.equal(result(), 'decoy', `tapping ${row.centre} did not reach the bar — layout changed?`);
+
+      // Now the real thing: the same row by selector must reach the row itself.
+      openScreen('scroll');
+      const tapped = vk(['tap', `@${row.id}`]);
+      assert.equal(tapped.code, 0, `${tapped.stdout}${tapped.stderr}`);
+      assert.match(tapped.stdout, /scrolled into view/, 'the covered row should have been scrolled clear');
+      assert.equal(result(), row.id.replace('vk_scroll_', ''), 'the tap landed on something else');
+    });
+
+    test('an already-clear element is tapped with no scrolling at all', () => {
+      openScreen('scroll');
+      const tapped = vk(['tap', '@vk_scroll_row_1']);
+      assert.equal(tapped.code, 0, tapped.stderr);
+      assert.ok(!tapped.stdout.includes('scrolled into view'), 'scrolled for an element already in the clear');
+      assert.equal(result(), 'row_1');
+    });
+
+    test('a row the platform never reports is an honest not-found, never a wrong tap', () => {
+      // MEASURED on API 32 and 34: Android's dumper drops a node it considers
+      // invisible, so a row 30 screens down is not in the hierarchy at all — there is
+      // nothing to match and nothing to scroll to. vk says so and exits 1 rather than
+      // pressing coordinates; the false-green shape of #42 cannot occur here.
+      openScreen('scroll');
+      const tapped = vk(['tap', '@vk_scroll_target', '--wait', '2s']);
+      assert.equal(tapped.code, 1, 'a target that is not in the tree must not report success');
+      assert.equal(result(), 'none', 'something was tapped anyway');
+    });
+
+    test('--no-scroll refuses rather than tapping a target it cannot reach', () => {
+      openScreen('scroll');
+      const row = rowUnderTheBar();
+      assert.ok(row);
+      const tapped = vk(['tap', `@${row.id}`, '--no-scroll']);
+      // Not scrolled, so the press falls back to a point clear of the bar where one
+      // exists — what must NOT happen is the bar firing.
+      assert.notEqual(result(), 'decoy', 'a refused-to-scroll tap still hit the bar');
+      if (tapped.code !== 0) assert.match(tapped.stderr, /scrolled out of view|covered/);
+    });
+
+    test('a lazy list can only be scrolled to what it has actually built', () => {
+      // `ListView.builder` never builds the far row, so no amount of scrolling can
+      // resolve a selector for it. A plain not-found — never a wrong tap.
+      openScreen('scroll');
+      assert.equal(vk(['tap', '@vk_scroll_mode']).code, 0);
+      assert.equal(byId(ui(), 'vk_scroll_target'), undefined, 'the lazy list built the far row after all');
+      assert.equal(vk(['tap', '@vk_scroll_target', '--wait', '2s']).code, 1);
+      assert.equal(result(), 'none');
+    });
+  });
+
   describe('app lifecycle', () => {
     test('launch restarts the app back to the home screen', () => {
       openScreen('login');

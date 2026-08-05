@@ -35,6 +35,13 @@ test('formatInline: emits the full flag set in order', () => {
   assert.ok(formatInline(el).endsWith('checked,focused,pwd,selected,disabled'));
 });
 
+test('formatInline: an element scrolled out of view is shown, marked offscreen', () => {
+  // Reported rather than hidden: it IS on the screen's element tree, and an action
+  // will scroll to it. Hiding it would turn a wrong tap into a mysterious miss.
+  assert.ok(formatInline(makeEl({ text: 'Below', offscreen: true })).endsWith('offscreen'));
+  assert.ok(!formatInline(makeEl({ text: 'Below' })).includes('offscreen'));
+});
+
 test('formatInline: a checkable-but-unchecked element reads "unchecked"', () => {
   assert.ok(formatInline(makeEl({ checkable: true, checked: false })).includes('unchecked'));
 });
@@ -84,6 +91,11 @@ test('toJsonShape: includes populated text/id and truthy flags', () => {
   assert.equal(shape.text, 'Hi');
   assert.equal(shape.id, 'com.app:id/x');
   assert.equal(shape.clickable, true);
+});
+
+test('toJsonShape: offscreen appears only when true', () => {
+  assert.equal(toJsonShape(makeEl({ offscreen: true })).offscreen, true);
+  assert.equal(toJsonShape(makeEl()).offscreen, undefined);
 });
 
 test('toJsonShape: checked is reported (even when false) only for checkable elements', () => {

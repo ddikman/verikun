@@ -23,6 +23,9 @@ export function formatInline(el: Element): string {
   if (el.password) flags.push('pwd');
   if (el.selected) flags.push('selected');
   if (!el.enabled) flags.push('disabled');
+  // Shown rather than hidden: the element IS there, just scrolled away — and an
+  // action will scroll it into view. Hiding it would only make the miss mysterious.
+  if (el.offscreen) flags.push('offscreen');
   if (flags.length) parts.push(flags.join(','));
 
   return parts.join(' ');
@@ -57,5 +60,6 @@ export function toJsonShape(el: Element): Record<string, unknown> {
     password: el.password || undefined,
     enabled: el.enabled,
     selected: el.selected || undefined,
+    offscreen: el.offscreen || undefined,
   };
 }

@@ -1,7 +1,8 @@
-import { Driver, DeviceInfo, Element, Platform, ToolProbe } from '../types';
+import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
 import { CliError, probeFailure } from '../errors';
 import { runText, runBinary } from '../exec';
-import { parseHierarchy } from '../ui/android-parse';
+import { parseHierarchy, parseRotation } from '../ui/android-parse';
+import { viewportFor } from '../ui/viewport';
 
 const ADB = process.env.ADB || 'adb';
 const ADB_HINT = 'install the Android platform-tools (`brew install --cask android-platform-tools`), or point ADB at the binary';
@@ -99,6 +100,11 @@ export class AdbDriver implements Driver {
   readonly platform: Platform = 'android';
   private readonly requested?: string;
   private cachedSerial?: string;
+  /** null = asked and failed. Cached either way: getElements runs on a ~300ms poll
+   *  during auto-wait, and a broken `wm size` must not cost a round-trip every time. */
+  private cachedScreen?: { width: number; height: number } | null;
+  /** Rotation of the most recent dump — see viewport(). */
+  private lastRotation?: number;
 
   constructor(serial?: string) {
     this.requested = serial;
@@ -181,7 +187,29 @@ export class AdbDriver implements Driver {
   }
 
   getElements(opts: { all?: boolean } = {}): Element[] {
-    return parseHierarchy(this.dumpXml(), opts);
+    const xml = this.dumpXml();
+    // Read off the dump we already have: free, and it refreshes every capture, so a
+    // device rotated mid-run is handled without re-asking for the screen size.
+    this.lastRotation = parseRotation(xml);
+    return parseHierarchy(xml, { ...opts, screen: this.screenOrNull() ?? undefined });
+  }
+
+  viewport(): Viewport | null {
+    const screen = this.screenOrNull();
+    return screen ? viewportFor(screen, this.lastRotation) : null;
+  }
+
+  /** screenSize() memoized, failure included — the parser uses it to mark elements
+   *  scrolled out of view, and "we could not tell" must degrade to "all visible". */
+  private screenOrNull(): { width: number; height: number } | null {
+    if (this.cachedScreen === undefined) {
+      try {
+        this.cachedScreen = this.screenSize();
+      } catch {
+        this.cachedScreen = null;
+      }
+    }
+    return this.cachedScreen;
   }
 
   private dumpXml(): string {

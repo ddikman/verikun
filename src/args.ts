@@ -45,6 +45,7 @@ const BOOLEAN = new Set([
   'android',
   'fix',
   'no-wait',
+  'no-scroll',
   'full',
   'more',
   'show-plan',

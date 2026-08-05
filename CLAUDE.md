@@ -87,6 +87,20 @@ Load-bearing rules, mirroring auto-healing:
 
 When you add a selector-resolving command, route it through these helpers (not a raw `resolveOne`/`matchElements`) so it inherits auto-wait, and add `--no-wait` to your mental model of its fast path. The `wait` *command* is unrelated — it stays the explicit blocking poll (own `--timeout`/`--interval`, `--gone`).
 
+## Auto scroll-into-view (`ui/viewport.ts` + `cli.ts`)
+
+Same shape as auto-wait, one layer further: the geometry is pure (`ui/viewport.ts` — no device, no time), the orchestration lives in `cli.ts`, and `ui/selector.ts` is untouched. **Matching does not change**: an element out of view still matches, `vk ui` still lists it (marked `offscreen` by `formatInline`/`toJsonShape`), and only *actions* — `tap`/`text`, via `resolveTappable()` — move the screen. Inspection never has a side effect.
+
+The problem is that an element's `center` is not always a point that reaches it, and a tap on the wrong point still reports success. Two distinct causes, both handled:
+- **Cut off by its container.** `clipRegion()` walks the pre-order tree back to the nearest `scrollable` ancestor and intersects it with the screen; the element must sit fully inside *that*, not merely on screen.
+- **Covered by something painted later.** `isOccluded()` uses document order (later siblings paint on top, and the target's own subtree is contiguous after it). A covered target inside a scroll container is scrolled to the container's **middle** (`scrollPlan(..., {centre:true})`) — the one reliable way to get a touch through; outside one, `reachablePoint()` picks another point on the element instead.
+
+Load-bearing details, all measured on-device:
+- **Pace the swipe by distance** (`swipeDurationMs`, ~0.75 px/ms). The same 1118px swipe over 400ms took the app off the screen entirely on emulator API 34; over 1500ms it scrolled cleanly. A fast swipe also flings past the target.
+- **The platform is the first filter.** Android's dumper drops nodes it considers invisible and clips the rest to the display, so a fully off-screen element is usually not in the tree at all — `Element.offscreen` is mostly an iOS/other-backend signal. Do not assume it fires on Android.
+- **Every unknown degrades to "visible"**: no screen size (`driver.viewport()` → null) means no scrolling and no marking — exactly the pre-0.15 behaviour. `Element.offscreen` is optional and negative for the same reason (an element off an older `vk server` must not read as unreachable).
+- Refusing to act is reserved for an element with **no** on-screen pixel (`SelectorNotFoundError`, exit 1, so `vk ai` can repair or give up). Occlusion only ever produces a stderr warning — it is an ordering heuristic, and a wrong refusal would be worse than the tap it prevents.
+
 ## Screenshot downscaling (`image.ts`)
 
 An agent reading a screenshot pays tokens for its pixel **area**, so `cmdScreenshot` runs the raw capture through `downscalePng(buf, maxEdge)` before writing/attaching it — by default capping the longest edge at `DEFAULT_SHOT_MAX_EDGE` (700px; we seldom need more to tell what's on screen). Precedence for the cap is `--full` (skip resampling entirely) > `--max <px>` (explicit) > `--more` (the `MORE_SHOT_MAX_EDGE` 1400px preset) > `VERIKUN_SHOT_MAX_EDGE` env > the default. `image.ts` is platform-agnostic (it's image math, not device I/O — keep it that way, like `ui/*`) and dependency-free: it parses the PNG, `inflateSync`es IDAT, reverses the per-scanline filters, box-averages to the target size, and re-encodes with a None filter + `deflateSync` + a hand-rolled CRC-32. Load-bearing: it only handles 8-bit non-interlaced gray/RGB/gray-alpha/RGBA; **any other PNG (palette, 16-bit, interlaced) is returned untouched with a `reason`** so a capture is never corrupted, only left full-size. It never upscales. Failure-evidence captures in `run.ts` deliberately stay full-resolution (humans read those in the report), so route only agent-facing screenshots through the downscaler.

@@ -1,10 +1,11 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync, unlinkSync } from 'node:fs';
-import { Driver, DeviceInfo, Element, Platform, ToolProbe } from '../types';
+import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
 import { CliError, probeFailure } from '../errors';
 import { runText } from '../exec';
 import { parseIosHierarchy } from '../ui/ios-parse';
+import { viewportFor } from '../ui/viewport';
 
 // iOS driver. `xcrun simctl` / `devicectl` cover device discovery and — on a
 // simulator — screenshots, app lifecycle, and logs (no extra install needed).
@@ -146,6 +147,9 @@ export class IdbDriver implements Driver {
   private readonly requested?: string;
   private cachedSerial?: string;
   private cachedIsSim?: boolean;
+  /** null = asked and failed. Memoized because screenSize()'s fallback path runs a
+   *  SECOND full hierarchy dump, which auto-wait would otherwise pay every poll. */
+  private cachedScreen?: { width: number; height: number } | null;
 
   constructor(device?: string) {
     // 'booted' is a simctl-only alias idb can't address, so treat it as "auto-resolve".
@@ -260,7 +264,29 @@ export class IdbDriver implements Driver {
   getElements(opts: { all?: boolean } = {}): Element[] {
     // `idb ui describe-all` prints the accessibility tree as JSON (array or NDJSON);
     // parseIosHierarchy handles either.
-    return parseIosHierarchy(this.idbText(['ui', 'describe-all'], { timeout: 15000 }), opts);
+    return parseIosHierarchy(this.idbText(['ui', 'describe-all'], { timeout: 15000 }), {
+      ...opts,
+      screen: this.screenOrNull() ?? undefined,
+    });
+  }
+
+  viewport(): Viewport | null {
+    const screen = this.screenOrNull();
+    // No orientation signal from idb, so viewportFor uses the max(w,h) square: exact
+    // on the vertical axis lists scroll on, permissive across it.
+    return screen ? viewportFor(screen) : null;
+  }
+
+  /** screenSize() memoized, failure included — see AdbDriver.screenOrNull. */
+  private screenOrNull(): { width: number; height: number } | null {
+    if (this.cachedScreen === undefined) {
+      try {
+        this.cachedScreen = this.screenSize();
+      } catch {
+        this.cachedScreen = null;
+      }
+    }
+    return this.cachedScreen;
   }
 
   screenshot(): Buffer {

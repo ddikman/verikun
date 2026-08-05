@@ -115,7 +115,8 @@ candidates and exits 2 rather than guess.
 
 Modifiers: `--contains` forces substring (skips the exact tier); `--index N`
 picks the Nth match (0-based) when a selector intentionally matches several;
-`--enabled` matches only a control that is **actionable right now**.
+`--enabled` matches only a control that is **actionable right now**;
+`--no-scroll` stops an action scrolling its target into view (see below).
 
 Reach for `--enabled` on any button the app keeps disabled until something else
 is done — a Check/Submit/Continue that lights up only once an answer is picked
@@ -145,6 +146,24 @@ round-trips and tokens.
 When you *do* want to block on a condition as an explicit step (e.g. a long
 network wait beyond 5s), the `wait` command is still there with its own
 `--timeout`/`--interval`; or just bump the inline window with `--wait`.
+
+## Auto scroll-into-view
+
+**You do not need to scroll before tapping.** `tap` and `text` bring their target
+into the clear first — into its scroll container, and out from under anything
+drawn over it (a sticky bottom bar, a floating button) — then act, reporting
+`(scrolled into view: N swipes)`. So "scroll down to the card and tap it" is just
+`vk tap @card`. Reach for an explicit `swipe` only when the scrolling itself is
+the thing under test, or to make a lazy list build rows it has not built yet.
+
+- `ui` / `find` / `assert` never scroll, and hide nothing: an element with no
+  pixel on screen is listed as usual with an `offscreen` marker.
+- An element that cannot be reached is a **failure (exit 1)**, never a blind tap
+  on its coordinates. `--no-scroll` turns the scrolling off.
+- Caveat worth knowing: a control covered by something the accessibility tree
+  does not contain is invisible to any tool reading that tree. verikun warns on
+  stderr when it presses an element it believes is covered — if a tap "succeeds"
+  and nothing happens, that warning is the first thing to look for.
 
 ## Be frugal: text over images, and remember identifiers
 

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../widgets.dart';
 import 'async_screen.dart';
 import 'login_screen.dart';
+import 'scroll_screen.dart';
 
 /// The launch screen and the fixture's reset anchor.
 ///
@@ -34,6 +35,12 @@ class HomeScreen extends StatelessWidget {
             title: 'Delayed load',
             subtitle: 'auto-wait window, wait, assert gone',
             route: AsyncScreen.route,
+          ),
+          VkNavTile(
+            id: 'vk_nav_scroll',
+            title: 'Long list',
+            subtitle: 'off-screen elements, auto scroll-into-view',
+            route: ScrollScreen.route,
           ),
         ],
       ),

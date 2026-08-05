@@ -399,6 +399,30 @@ If a selector for an action matches more than one element and no `--index` is
 given, the command fails with exit code 2 and lists the candidates — it never
 taps a guess.
 
+### Auto scroll-into-view
+
+An element can be in the hierarchy without being reachable at the point a tap
+would land: scrolled past the edge of its list, or with a sticky bar drawn across
+its middle. Pressing its coordinates then hits whatever is actually there — and
+the step reports success, so the run continues from the wrong place.
+
+So **actions scroll; inspection does not**. `tap` and `text` bring their target
+into the clear first — into its scroll container, and out from under anything
+drawn over it — then act, adding `(scrolled into view: N swipes)` to the
+confirmation. "Scroll down to X and tap it" is therefore just `vk tap X`; you
+rarely need an explicit `swipe`.
+
+`ui`, `find` and `assert` never scroll and never hide anything: an element with no
+pixel on screen is listed as usual, marked `offscreen`. Where an element cannot be
+reached at all, the action **fails with exit 1** rather than pressing blind
+coordinates. `--no-scroll` opts out of the scrolling.
+
+> Note what this cannot see: a control covered by something the accessibility tree
+> does not contain (a decorative container with no label or id) is invisible to any
+> tool reading that tree. Scrolling the target clear of screen edges is what
+> avoids most of these; verikun warns on stderr when it presses an element it
+> believes is covered.
+
 ### Which selector to reach for: `@id` first, `text:` second, `desc:` never
 
 Not all four selector kinds travel equally well. If a flow has to run on both
