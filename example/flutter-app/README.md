@@ -318,3 +318,40 @@ Two practical consequences:
 - **A screen-unique `@id` degrades safely; an ambiguous `text:` does not.** Another
   point for the `@id`-first rule — here it is the difference between waiting
   correctly and silently tapping the wrong pixel.
+
+### 12. Android's dumper hides off-screen nodes and clips the ones it keeps
+
+Measured on the Pixel 3a (API 32), the Samsung (API 31) and emulator API 34, on
+`@vk_scroll`'s 40-row list: **only the rows actually on screen are in the dump.**
+Scroll down and the rows that leave the top disappear from the hierarchy entirely;
+a row 30 screens down never appears at all. What survives at an edge arrives
+already **clipped to the display** — one row came back as a 13px sliver whose
+centre sat on the navigation bar.
+
+That is the framework filtering by `isVisibleToUser()` and intersecting bounds
+with the display (`AccessibilityNodeInfoHelper.getVisibleBoundsInScreen`), and it
+has three consequences worth knowing:
+
+- The `visible-to-user` attribute is **not in the dump** — it is applied as a
+  filter, not emitted. Any plan to read it (issue #42 proposed exactly that) is a
+  dead end; `grep` the attribute across a real dump and it is absent on API 31,
+  32 and 34 alike.
+- The failure shape of #42 — an off-screen element matching a selector — mostly
+  **cannot occur on Android**. Its real form is an element that IS on screen but
+  covered, or clipped to a sliver whose centre lands on something else.
+- To reproduce off-screen nodes at all, `@vk_scroll`'s eager list needs BOTH
+  `cacheExtent` (so Flutter lays the rows out) and `clipBehavior: Clip.none` (so
+  the viewport does not clip them away). With Flutter's defaults there is nothing
+  to reproduce.
+
+### 13. A fast swipe can take the app off the screen entirely
+
+On emulator API 34, `input swipe 540 1833 540 715 400` — 1118px in 400ms, a
+perfectly ordinary-looking scroll — left the app on a completely different route.
+The identical swipe over **1500ms** scrolled the list cleanly and stopped where it
+was put.
+
+So a scroll gesture has to be **paced by distance**, not given a fixed duration:
+`vk`'s scroll-into-view targets ~0.75 px/ms for exactly this reason. A fast swipe
+also flings, which overshoots the target and — given fact 12 — removes it from the
+hierarchy, turning "scroll to it" into "it vanished".

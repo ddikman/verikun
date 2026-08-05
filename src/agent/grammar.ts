@@ -18,7 +18,7 @@ Each step is one of three node types:
                                   rerun starts FRESH (--clear also wipes data → fresh-install;
                                   --no-restart skips the force-stop, just bringing it forward)
      stop <package>               — force-stop the app
-     tap <selector>               — tap the element a selector resolves to
+     tap <selector>               — tap the element a selector resolves to (scrolls it into view first)
      text <selector> <value...>   — focus a field and type value (--clear to clear first, --enter to submit)
      type <value...>              — type into the already-focused field
      key <name> | back | home | enter
@@ -33,9 +33,9 @@ Each step is one of three node types:
    keep a flow from breaking when an extra screen sometimes appears.
 
 3. REPEAT — { "type":"repeat", "selector":<sel>, "cap":<n>, "body":[<nodes>] }
-   Repeat body UNTIL the selector appears, up to cap iterations. Use for "scroll until X
-   is visible", or "keep answering until the results screen". Always set a sane cap (e.g.
-   10). The engine also stops early if the screen stops changing. A repeat that finishes
+   Repeat body UNTIL the selector appears, up to cap iterations. Use for "keep answering
+   until the results screen" — NOT for scrolling to something that is already in the
+   hierarchy, since tap scrolls to its own target. Always set a sane cap (e.g. 10). The engine also stops early if the screen stops changing. A repeat that finishes
    without its selector ever appearing FAILS the test — it did not do its job.
 
 4. WHEN — { "type":"when", "branches":[{ "selector":<sel>, "body":[<nodes>] }, ...],
@@ -118,6 +118,11 @@ RULES:
   the failure surfaces later as a confusing timeout on the NEXT step.
 - assert is for VERIFICATION only and is terminal — never use it as a step you expect to
   fail. Put genuinely-optional UI behind if-present.
+- tap/text SCROLL THEIR TARGET INTO VIEW automatically, so "scroll down to X and tap it"
+  is just \`tap X\`. Do NOT wrap a tap in a repeat-until-visible loop to reach something
+  below the fold — that is now redundant. Emit an explicit swipe only when the SCROLLING
+  ITSELF is what the test asks for ("scroll the feed three times"), or to reveal content
+  that is not in the hierarchy until it is built (an infinite/lazy list).
 - Prefer resource-id / accessibility selectors over visible text where possible.
 - Translate the test literally and minimally: do not invent ACTION steps (tap/text/swipe/key/assert)
   the prose does not imply. The ONE exception is screenshot — insert screenshot steps liberally as
@@ -148,4 +153,7 @@ Emit ONLY an object matching the schema:
   { "decision":"repair", "step": { "type":"command","command","positionals":[...],"flags":[{"name","value"}] } }
   { "decision":"give_up", "reason": "<why no element on this screen matches the intent>" }
 Prefer a stable selector (resource-id / accessibility label) visible in the hierarchy.
-Do not invent elements that are not in the hierarchy.`;
+Do not invent elements that are not in the hierarchy.
+An element tagged \`offscreen\` is in the tree but scrolled out of view; tap/text scroll
+to their target on their own, so the fact a step failed on one means scrolling could not
+reach it — pick a different element only if one genuinely serves the same purpose.`;

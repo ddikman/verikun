@@ -93,6 +93,7 @@ export interface UiElement {
   text?: string;
   desc?: string;
   center: { x: number; y: number };
+  bounds: { x1: number; y1: number; x2: number; y2: number };
   clickable?: true;
   scrollable?: true;
   checkable?: true;
@@ -101,6 +102,8 @@ export interface UiElement {
   password?: true;
   enabled: boolean;
   selected?: true;
+  /** Absent unless the element has no pixel on screen — see toJsonShape. */
+  offscreen?: true;
 }
 
 export function ui(): UiElement[] {
@@ -149,7 +152,7 @@ export function unavailable(): string | null {
  * on cold start, and a dump issued before first paint returns the PREVIOUS app's
  * hierarchy rather than an error. That cost an hour of confusion once already.
  */
-export function openScreen(screen: 'login' | 'async'): void {
+export function openScreen(screen: 'login' | 'async' | 'scroll'): void {
   const launched = vk(['launch', APP_ID]);
   if (launched.code !== 0) throw new Error(`launch failed: ${launched.stderr}`);
 

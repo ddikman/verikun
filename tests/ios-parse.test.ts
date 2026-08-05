@@ -130,6 +130,32 @@ test('parseIosHierarchy: empty or non-JSON input yields no elements', () => {
   assert.deepEqual(parseIosHierarchy('garbage'), []);
 });
 
+// --- off-screen marking ---------------------------------------------------
+
+const SCROLLED_DUMP = JSON.stringify([
+  { type: 'Button', AXLabel: 'In view', AXUniqueId: 'near', frame: { x: 20, y: 100, width: 350, height: 44 } },
+  { type: 'Button', AXLabel: 'Below', AXUniqueId: 'far', frame: { x: 20, y: 1200, width: 350, height: 44 } },
+  { type: 'Button', AXLabel: 'Aside', AXUniqueId: 'side', frame: { x: 500, y: 100, width: 350, height: 44 } },
+]);
+
+test('parseIosHierarchy: marks an element scrolled past the bottom of the screen', () => {
+  const els = parseIosHierarchy(SCROLLED_DUMP, { screen: { width: 390, height: 844 } });
+  assert.equal(els.find((e) => e.idShort === 'near')?.offscreen, undefined);
+  assert.equal(els.find((e) => e.idShort === 'far')?.offscreen, true);
+});
+
+test('parseIosHierarchy: without a screen size nothing is marked', () => {
+  assert.ok(parseIosHierarchy(SCROLLED_DUMP).every((e) => e.offscreen === undefined));
+});
+
+test('parseIosHierarchy: is deliberately permissive across the unknown axis', () => {
+  // idb reports no orientation, so the viewport is the max(w,h) square — an element
+  // beyond the portrait WIDTH is left alone rather than risk stranding it in
+  // landscape. Asserted so the conservatism is a decision, not an accident.
+  const els = parseIosHierarchy(SCROLLED_DUMP, { screen: { width: 390, height: 844 } });
+  assert.equal(els.find((e) => e.idShort === 'side')?.offscreen, undefined);
+});
+
 // --- isInteresting --------------------------------------------------------
 
 test('isInteresting: zero-area nodes are never interesting', () => {

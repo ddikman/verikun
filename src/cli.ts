@@ -4,9 +4,25 @@ import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
-import { Driver, DeviceInfo, Element, Platform, Point, ToolProbe } from './types';
+import { Bounds, Driver, DeviceInfo, Element, Platform, Point, ToolProbe } from './types';
 import { parseSelector, matchElements, resolveOne, Selector, MatchTier, MatchResult } from './ui/selector';
 import { formatCompact, formatTree, formatInline, toJsonShape } from './ui/format';
+import {
+  Direction,
+  DEFAULT_SWIPE_FRACTION,
+  clipRegion,
+  isFullyVisible,
+  isOccluded,
+  isOffscreen,
+  screenRect,
+  reachablePoint,
+  scrollPlan,
+  scrollSurface,
+  swipeDurationMs,
+  swipeVector,
+  tapPoint,
+  visibleFraction,
+} from './ui/viewport';
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
 import { Recorder, isRecordable, RunStep } from './run';
 import { downscalePng } from './image';
@@ -138,7 +154,7 @@ async function resolveOneWaiting(
   ctx: Ctx,
   sel: Selector,
   opts: { all?: boolean } = {},
-): Promise<{ element: Element; tier: MatchTier; waitedMs: number }> {
+): Promise<{ element: Element; tier: MatchTier; waitedMs: number; elements: Element[] }> {
   const windowMs = waitWindowMs(ctx.flags);
   const start = Date.now();
   const deadline = start + windowMs;
@@ -146,7 +162,10 @@ async function resolveOneWaiting(
     const els = ctx.driver.getElements(opts);
     if (matchElements(els, sel).matches.length >= 1) {
       const { element, tier } = resolveOne(els, sel); // 1 → resolved; >1 → throws ambiguity
-      return { element, tier, waitedMs: Date.now() - start };
+      // The snapshot rides along: scroll-into-view needs the scrollable containers
+      // from the SAME dump the element came from, and re-capturing to find them
+      // would both cost a round-trip and risk describing a screen that moved on.
+      return { element, tier, waitedMs: Date.now() - start, elements: els };
     }
     if (Date.now() >= deadline) {
       const waited = windowMs > 0 ? ` after ${(windowMs / 1000).toFixed(1)}s` : '';
@@ -156,6 +175,180 @@ async function resolveOneWaiting(
     }
     await sleep(pollStep(ctx.flags, deadline));
   }
+}
+
+// --- Auto scroll-into-view --------------------------------------------------
+// An element's centre is not always a point that reaches it, and a tap on the
+// wrong point still reported success — so the run carried on from the wrong place
+// and failed several steps later on an unrelated symptom (issue #42). Actions
+// therefore bring their target into the clear first, the same contract as
+// Playwright's scrollIntoViewIfNeeded.
+//
+// MEASURED, and it is not only the obvious case: Android's dumper already drops
+// nodes it considers invisible and clips the rest to the display, so the usual
+// shape is an element that IS on screen — a row cut off by its list, or one with a
+// sticky bar drawn across its middle. Both are handled by asking the question
+// against `clipRegion()` (screen ∩ scroll container) and `isOccluded()` (what is
+// painted after it), not against the screen alone.
+//
+// Load-bearing split, mirroring auto-wait: ACTIONS scroll, INSPECTION does not.
+// `ui`/`find`/`assert` report an element exactly as it is (tagged `offscreen` when
+// it has no pixel on screen) — hiding it would turn a wrong tap into a mysterious
+// miss — while `tap`/`text` refuse to press a point that would hit something else.
+//
+// Scrolling only ever happens when the alternative is a wrong tap, so a target
+// already in the clear costs nothing: no extra dump, no swipe.
+
+const SCROLL_INTO_VIEW_MAX = 10;
+/** Let the scroll settle before re-dumping — a mid-fling hierarchy reads as a stall. */
+const SCROLL_SETTLE_MS = 500;
+/** Movement below this is measurement noise, not progress. */
+const NO_PROGRESS_PX = 8;
+/** Consecutive non-moving swipes before we accept the list will not go further. */
+const NO_PROGRESS_STRIKES = 2;
+
+/** A short note appended to action output when the target had to be scrolled to. */
+export function scrollNote(swipes: number): string {
+  return swipes > 0 ? ` (scrolled into view: ${swipes} swipe${swipes === 1 ? '' : 's'})` : '';
+}
+
+/** Swipe until `target` sits fully inside its clip region, or we run out of room. */
+async function scrollIntoView(
+  ctx: Ctx,
+  sel: Selector,
+  target: Element,
+  elements: Element[],
+  screen: Bounds,
+  opts: { all?: boolean } = {},
+): Promise<{ element: Element; swipes: number; elements: Element[] }> {
+  let current = target;
+  let snapshot = elements;
+  let swipes = 0;
+  let stalled = 0;
+
+  while (swipes < SCROLL_INTO_VIEW_MAX && stalled < NO_PROGRESS_STRIKES) {
+    // Re-derived every iteration: scrolling can change which container holds the
+    // element, and a stale clip would aim the next swipe at the wrong box.
+    const clip = clipRegion(snapshot, current, screen);
+    const axis =
+      Math.abs(current.center.y - (clip.y1 + clip.y2) / 2) >= Math.abs(current.center.x - (clip.x1 + clip.x2) / 2)
+        ? 'y'
+        : 'x';
+    // A covered element is scrolled to the MIDDLE of its container even though it is
+    // technically in view: a sticky bar overlaps the edges of a list, and moving the
+    // target away from them is the one reliable way to get a touch through to it.
+    const centre = isOccluded(snapshot, current, tapPoint(current, screen));
+    const plan = scrollPlan(current.bounds, scrollSurface(snapshot, current, screen, axis), clip, { centre });
+    if (!plan) break; // in view, or no swipe big enough to be worth making
+
+    ctx.driver.swipe(plan.from.x, plan.from.y, plan.to.x, plan.to.y, swipeDurationMs(plan.distance));
+    swipes++;
+    await sleep(SCROLL_SETTLE_MS);
+
+    const before = current.bounds;
+    snapshot = ctx.driver.getElements(opts);
+    // An empty tree is a bad read, not a screen (the device returns partial dumps
+    // mid-transition) — retry rather than conclude the element is gone.
+    if (snapshot.length === 0) continue;
+    if (matchElements(snapshot, sel).matches.length === 0) {
+      // Android drops a node that scrolls out of view, so overshooting LOSES the
+      // target rather than leaving it visibly off-position. Give the last swipe back
+      // (half of it, to land between the two) and look once more before giving up.
+      const mid = { x: Math.round((plan.from.x + plan.to.x) / 2), y: Math.round((plan.from.y + plan.to.y) / 2) };
+      ctx.driver.swipe(plan.to.x, plan.to.y, mid.x, mid.y, swipeDurationMs(plan.distance / 2));
+      await sleep(SCROLL_SETTLE_MS);
+      snapshot = ctx.driver.getElements(opts);
+      if (matchElements(snapshot, sel).matches.length === 0) {
+        throw new SelectorNotFoundError(
+          `'${sel.raw}' left the hierarchy while being scrolled into view (after ${swipes} swipe(s)) — ` +
+            'a lazy list may have recycled it. Run `verikun ui` to inspect the current screen.',
+        );
+      }
+    }
+    current = resolveOne(snapshot, sel).element; // >1 → ambiguity, exit 2, as everywhere else
+    const moved = Math.abs(
+      plan.axis === 'y' ? current.bounds.y1 - before.y1 : current.bounds.x1 - before.x1,
+    );
+    stalled = moved < NO_PROGRESS_PX ? stalled + 1 : 0;
+  }
+  return { element: current, swipes, elements: snapshot };
+}
+
+interface ActionTarget {
+  element: Element;
+  tier: MatchTier | null;
+  waitedMs: number;
+  swipes: number;
+  /** Where to press: inside the element's visible part, and clear of anything drawn
+   *  over it where we can find such a point. */
+  point: Point;
+}
+
+/** The screen as a rectangle, or null on a device whose size could not be read. */
+function screenOf(ctx: Ctx): Bounds | null {
+  const vp = ctx.driver.viewport();
+  return vp ? screenRect(vp) : null;
+}
+
+/** The point to press for `el`, preferring one nothing else is drawn over. Falls back
+ *  to the visible centre — an ordering-based guess must never block a real tap. */
+function pressPoint(els: Element[], el: Element, screen: Bounds | null): Point {
+  if (!screen) return el.center;
+  return reachablePoint(els, el, screen) ?? tapPoint(el, screen);
+}
+
+/** Say so when the element we are about to press is only partly on screen, or is
+ *  covered by something drawn over it — both mean the touch may not reach it. */
+function reachWarning(els: Element[], el: Element, screen: Bounds | null): void {
+  if (!screen) return;
+  if (!isFullyVisible(el.bounds, screen)) {
+    err(`(only ${Math.round(visibleFraction(el.bounds, screen) * 100)}% of ${formatInline(el)} is on screen)`);
+  }
+  if (!reachablePoint(els, el, screen)) {
+    err(`(${formatInline(el)} is covered by another element — the tap may land on whatever is on top)`);
+  }
+}
+
+/**
+ * Resolve a selector to something that can actually be pressed: wait for it, scroll it
+ * into view when it is not fully inside its scroll container, and fail loudly rather
+ * than tap blind.
+ *
+ * When the screen size is unknown this is exactly the old behaviour — resolve and
+ * press the element's centre.
+ */
+async function resolveTappable(ctx: Ctx, sel: Selector, opts: { all?: boolean } = {}): Promise<ActionTarget> {
+  const { element, tier, waitedMs, elements } = await resolveOneWaiting(ctx, sel, opts);
+  const screen = screenOf(ctx);
+  const clip = screen ? clipRegion(elements, element, screen) : null;
+  // Scroll when the element is cut off by its container, and also when something is
+  // drawn over the point we would press — but only if it HAS a container to scroll
+  // (clip !== screen). Swiping the whole screen at a covered toolbar button would be
+  // a random gesture, and the point-picking fallback below handles that case.
+  const covered =
+    !!screen && !!clip && clip !== screen && isOccluded(elements, element, tapPoint(element, screen));
+  if (!screen || !clip || (isFullyVisible(element.bounds, clip) && !covered)) {
+    reachWarning(elements, element, screen);
+    return { element, tier, waitedMs, swipes: 0, point: pressPoint(elements, element, screen) };
+  }
+
+  const scrolled = flagBool(ctx.flags, 'no-scroll')
+    ? { element, swipes: 0, elements }
+    : await scrollIntoView(ctx, sel, element, elements, screen, opts);
+
+  if (isOffscreen(scrolled.element.bounds, screen)) {
+    const why = flagBool(ctx.flags, 'no-scroll')
+      ? '--no-scroll is set'
+      : scrolled.swipes === 0
+        ? 'no scrollable container could move it'
+        : `${scrolled.swipes} swipe(s) did not bring it into view`;
+    throw new SelectorNotFoundError(
+      `'${sel.raw}' is in the screen's element tree but scrolled out of view (${why}), so tapping it ` +
+        'would press whatever is at those coordinates instead. Run `verikun ui` to inspect the current screen.',
+    );
+  }
+  reachWarning(scrolled.elements, scrolled.element, screen);
+  return { ...scrolled, tier, waitedMs, point: pressPoint(scrolled.elements, scrolled.element, screen) };
 }
 
 // ---------------------------------------------------------------------------
@@ -326,21 +519,41 @@ async function cmdTap(ctx: Ctx): Promise<number> {
   let target: Element;
   let tier: MatchTier | null = null;
   let waitedMs = 0;
+  let swipes = 0;
+  let point: Point;
   if (isBareIndex) {
     const els = ctx.driver.getElements({ all: flagBool(ctx.flags, 'all') });
     const idx = Number(raw);
     const found = els.find((e) => e.index === idx);
     if (!found) throw new CliError(`No element with index [${idx}] on the current screen. Run \`verikun ui\`.`, 1);
+    // An index names a row of one specific dump, and scrolling renumbers every row —
+    // so this path cannot scroll. Refuse instead of pressing coordinates off-screen.
+    if (found.offscreen) {
+      throw new CliError(
+        `Element [${idx}] ${formatInline(found)} is scrolled out of view. Tap it by selector ` +
+          `(e.g. \`verikun tap @${found.idShort || 'id'}\`) so verikun can scroll it into view first.`,
+        1,
+      );
+    }
     target = found;
+    reachWarning(els, target, screenOf(ctx));
+    point = pressPoint(els, target, screenOf(ctx));
     ctx.record?.note({ element: target, message: `tapped by index [${idx}]` });
   } else {
     const sel = buildSelector(raw, ctx.flags);
-    ({ element: target, tier, waitedMs } = await resolveOneWaiting(ctx, sel, { all: flagBool(ctx.flags, 'all') }));
-    ctx.record?.note({ selector: sel, tier, element: target });
+    ({ element: target, tier, waitedMs, swipes, point } = await resolveTappable(ctx, sel, {
+      all: flagBool(ctx.flags, 'all'),
+    }));
+    ctx.record?.note({
+      selector: sel,
+      tier,
+      element: target,
+      message: swipes > 0 ? `scrolled into view (${swipes} swipe(s)) and tapped` : undefined,
+    });
   }
 
-  ctx.driver.tap(target.center.x, target.center.y);
-  out(`tapped ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}`);
+  ctx.driver.tap(point.x, point.y);
+  out(`tapped ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}${scrollNote(swipes)}`);
   return 0;
 }
 
@@ -350,7 +563,7 @@ async function cmdText(ctx: Ctx): Promise<number> {
   }
   const sel = buildSelector(ctx.positionals[0], ctx.flags);
   const value = ctx.positionals.slice(1).join(' ');
-  const { element: target, tier, waitedMs } = await resolveOneWaiting(ctx, sel);
+  const { element: target, tier, waitedMs, swipes, point } = await resolveTappable(ctx, sel);
   ctx.record?.note({
     selector: sel,
     tier,
@@ -358,7 +571,7 @@ async function cmdText(ctx: Ctx): Promise<number> {
     message: target.password ? 'typed «redacted»' : `typed ${JSON.stringify(value)}`,
   });
 
-  ctx.driver.tap(target.center.x, target.center.y);
+  ctx.driver.tap(point.x, point.y);
   // Wait for field to be focused after tap
   await sleep(100);
   if (flagBool(ctx.flags, 'clear') && target.text) {
@@ -373,7 +586,9 @@ async function cmdText(ctx: Ctx): Promise<number> {
   ctx.driver.pressKey('backspace');
   ctx.driver.inputText(value);
   if (flagBool(ctx.flags, 'enter')) ctx.driver.pressKey('enter');
-  out(`typed ${JSON.stringify(value)} into ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}`);
+  out(
+    `typed ${JSON.stringify(value)} into ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}${scrollNote(swipes)}`,
+  );
   return 0;
 }
 
@@ -436,34 +651,11 @@ async function cmdSwipe(ctx: Ctx): Promise<number> {
     region = { x1: 0, y1: 0, x2: width, y2: height };
   }
 
-  const cx = Math.floor((region.x1 + region.x2) / 2);
-  const cy = Math.floor((region.y1 + region.y2) / 2);
-  const frac = Math.min(Math.max(flagNum(ctx.flags, 'distance') ?? 0.6, 0.1), 0.95);
-  const dx = Math.floor(((region.x2 - region.x1) * frac) / 2);
-  const dy = Math.floor(((region.y2 - region.y1) * frac) / 2);
-
-  let a: Point;
-  let b: Point;
-  switch (dir) {
-    case 'up':
-      a = { x: cx, y: cy + dy };
-      b = { x: cx, y: cy - dy };
-      break;
-    case 'down':
-      a = { x: cx, y: cy - dy };
-      b = { x: cx, y: cy + dy };
-      break;
-    case 'left':
-      a = { x: cx + dx, y: cy };
-      b = { x: cx - dx, y: cy };
-      break;
-    case 'right':
-      a = { x: cx - dx, y: cy };
-      b = { x: cx + dx, y: cy };
-      break;
-    default:
-      throw new CliError(`Unknown direction '${dir}' (use up|down|left|right)`, 2);
+  if (dir !== 'up' && dir !== 'down' && dir !== 'left' && dir !== 'right') {
+    throw new CliError(`Unknown direction '${dir}' (use up|down|left|right)`, 2);
   }
+  const frac = Math.min(Math.max(flagNum(ctx.flags, 'distance') ?? DEFAULT_SWIPE_FRACTION, 0.1), 0.95);
+  const { from: a, to: b } = swipeVector(region, dir as Direction, frac);
   ctx.driver.swipe(a.x, a.y, b.x, b.y, duration);
   ctx.record?.note({ message: `swiped ${dir}${on ? ` on ${on}` : ''}` });
   out(`swiped ${dir}${waitNote(waitedMs)}`);
@@ -1784,6 +1976,15 @@ AUTO-WAIT (selector lookups retry until they resolve)
   the screen); VERIKUN_GUARD_SETTLE_MS tunes it, 0 = old single-shot probe.
   Ambiguity is never waited on (the elements are already there). The \`wait\`
   command stays for explicit polling, including --gone, with --timeout/--interval.
+
+AUTO-SCROLL (actions bring their target into view)
+  \`tap\` / \`text\` first scroll their target into the clear — inside its scroll
+  container, and out from under anything drawn over it (a sticky bar) — then act,
+  so "scroll down then tap X" is just \`tap X\`. \`ui\` / \`find\` / \`assert\` never
+  scroll and hide nothing: an element with no pixel on screen is listed as usual,
+  marked \`offscreen\`. One that cannot be reached fails with exit 1 rather than
+  being tapped at coordinates that would hit something else.
+  --no-scroll    act where the element is; do not scroll to it
 
 GLOBAL FLAGS
   -d, --device <serial>   target a specific device (or VERIKUN_DEVICE / ANDROID_SERIAL)

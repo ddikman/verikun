@@ -16,6 +16,12 @@ export interface Point {
   y: number;
 }
 
+/** The on-screen rectangle, in the same coordinate space as `Element.bounds`. */
+export interface Viewport {
+  width: number;
+  height: number;
+}
+
 /** A single node in the UI hierarchy, normalized across platforms. */
 export interface Element {
   /** Sequential position within the produced (filtered) list — stable for one snapshot. */
@@ -33,8 +39,16 @@ export interface Element {
   /** content-desc / accessibility label. */
   desc: string;
   bounds: Bounds;
-  /** Center of bounds — the point used for taps. */
+  /** Center of bounds. Where a tap lands unless the element straddles a screen edge —
+   *  see `tapPoint()` in ui/viewport.ts. */
   center: Point;
+  /** Scrolled entirely outside the screen: in the tree, but nothing of it is visible.
+   *
+   *  OPTIONAL AND NEGATIVE on purpose. An Element that never had a viewport applied —
+   *  a test fixture, or one deserialized from an older `vk server` — must read as
+   *  VISIBLE, so a missing screen size can only restore the previous behaviour and
+   *  never make a real element look unreachable. Set only when known to be true. */
+  offscreen?: boolean;
   /** Nesting depth in the original tree (for --tree rendering). */
   depth: number;
   clickable: boolean;
@@ -102,6 +116,17 @@ export interface Driver {
   /** Raw PNG bytes of the current screen. */
   screenshot(): Buffer;
   screenSize(): { width: number; height: number };
+  /**
+   * The screen rectangle the CURRENT hierarchy's coordinates live in — i.e.
+   * `screenSize()` corrected for orientation — or null when it cannot be determined.
+   *
+   * Separate from `screenSize()` because that one reports the device's NATURAL size
+   * (`wm size` does not swap in landscape), while every geometric question about an
+   * element — is it on screen, where does a tap land, which way do we scroll — has to
+   * be asked in the dump's own coordinate space. Null is a real answer and means
+   * "assume everything is visible": a wrong viewport would strand reachable elements.
+   */
+  viewport(): Viewport | null;
   tap(x: number, y: number): void;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): void;
   /** Type into the currently focused field. */

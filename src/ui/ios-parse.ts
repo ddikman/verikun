@@ -1,4 +1,5 @@
 import { Bounds, Element } from '../types';
+import { isOffscreen, screenRect, viewportFor } from './viewport';
 
 // Parses `idb ui describe-all --json` output into the same normalized Element[]
 // the Android XML parser produces, so the selector / format / command layers stay
@@ -144,11 +145,18 @@ export function isInteresting(el: Element): boolean {
   return false;
 }
 
-export function parseIosHierarchy(jsonText: string, opts: { all?: boolean } = {}): Element[] {
+export function parseIosHierarchy(
+  jsonText: string,
+  opts: { all?: boolean; screen?: { width: number; height: number } } = {},
+): Element[] {
   const all = parseIdbJson(jsonText).map(buildElement);
   const result = opts.all ? all : all.filter(isInteresting);
+  // idb reports no orientation, so viewportFor falls back to the max(w,h) square —
+  // exact vertically (the axis lists scroll on), deliberately permissive across.
+  const vp = opts.screen ? screenRect(viewportFor(opts.screen)) : undefined;
   result.forEach((el, idx) => {
     el.index = idx;
+    if (vp && isOffscreen(el.bounds, vp)) el.offscreen = true;
   });
   return result;
 }
