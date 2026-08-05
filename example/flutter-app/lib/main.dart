@@ -5,6 +5,7 @@ import 'screens/async_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/scroll_screen.dart';
+import 'screens/state_screen.dart';
 
 /// LOAD-BEARING. Flutter only builds a semantics tree while some client holds a
 /// handle — normally TalkBack (Android) or VoiceOver (iOS). Without one,
@@ -49,6 +50,7 @@ class TestApp extends StatelessWidget {
         LoginScreen.route: (_) => const LoginScreen(),
         AsyncScreen.route: (_) => const AsyncScreen(),
         ScrollScreen.route: (_) => const ScrollScreen(),
+        StateScreen.route: (_) => const StateScreen(),
       },
     );
   }

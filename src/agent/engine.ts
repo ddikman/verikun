@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { Element } from '../types';
+import { Element, Platform } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
+import { assertStateSupported } from '../ui/state-support';
 import { SelectorNotFoundError, AmbiguousSelectorError, isEnvError } from '../errors';
 import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
@@ -59,6 +60,10 @@ export interface EngineDeps {
   /** Epoch-ms wall-clock deadline for the whole run; once passed, the engine aborts
    *  between steps, loop iterations, and repairs (bounds a runaway plan). */
   deadline?: number;
+  /** Target platform, used only to reject a control-node selector whose state modifier
+   *  the platform cannot report. Leaves are already covered by the CLI's buildSelector;
+   *  a guard's selector is parsed here and would otherwise read as "absent". */
+  platform?: Platform;
 }
 
 export interface EngineResult {
@@ -284,6 +289,10 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
       deps.log(`[ai] guard selector '${selector}' did not parse (${(e as Error).message}) — treating as not present`);
       return false;
     }
+    // Outside the catch on purpose. A guard pinning state this platform cannot report
+    // would match nothing forever, so "not present" is a lie that silently skips the
+    // body — the plan is unrunnable HERE and must say so, not quietly do nothing.
+    if (deps.platform) assertStateSupported(sel, deps.platform);
     const deadline = Date.now() + Math.max(0, settleMs);
     // A non-zero window must buy at least one SECOND look, independent of the clock.
     // Measured on emulator-5554: one uiautomator dump costs ~2.4s, which already exceeds
@@ -464,6 +473,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     } catch (e) {
       return { status: 'fail', where, reason: `read selector '${selector}' did not parse: ${(e as Error).message}` };
     }
+    if (deps.platform) assertStateSupported(sel, deps.platform);
     // Same patience as a conditional guard: the value may not have rendered yet.
     const deadline = Date.now() + Math.max(0, guardSettleMs);
     let looks = 0;

@@ -12,6 +12,7 @@ import {
   chooseLogOpts,
   confineToCwd,
   assertSafeAppId,
+  stateFromFlags,
 } from '../src/cli';
 import { resolve } from 'node:path';
 import { parseSelector } from '../src/ui/selector';
@@ -251,4 +252,38 @@ test('evalAssert: --text still matches plain text, and still reports what it saw
   const miss = evalAssert(els, sel, { text: 'Away' });
   assert.equal(miss.pass, false);
   assert.match(miss.reason, /Home/); // the observed value is still in the failure message
+});
+
+// --- stateFromFlags (the tri-state trap) ----------------------------------
+// These modifiers are tri-state: "must be" / "must not be" / "don't care". flagBool()
+// returns FALSE for an absent flag, so passing it straight through — which is what the
+// original --enabled wiring did — would silently mean "must be disabled, unselected,
+// unchecked and unfocused" on every selector of every command.
+
+test('stateFromFlags: an absent flag is undefined, never false', () => {
+  const state = stateFromFlags({});
+  assert.equal(state.enabled, undefined);
+  assert.equal(state.selected, undefined);
+  assert.equal(state.checked, undefined);
+  assert.equal(state.focused, undefined);
+});
+
+test('stateFromFlags: --x is true and --not-x is false', () => {
+  assert.equal(stateFromFlags({ selected: true }).selected, true);
+  assert.equal(stateFromFlags({ 'not-selected': true }).selected, false);
+  assert.equal(stateFromFlags({ checked: true }).checked, true);
+  assert.equal(stateFromFlags({ 'not-focused': true }).focused, false);
+});
+
+test('stateFromFlags: reads the plan-emitted string form too', () => {
+  // A `vk ai` leaf arrives as {"name":"selected","value":"true"} and bypasses argv
+  // parsing entirely, so the string must mean the same as the boolean.
+  assert.equal(stateFromFlags({ selected: 'true' }).selected, true);
+});
+
+test('stateFromFlags: a contradiction is a usage error, not a silent winner', () => {
+  assert.throws(
+    () => stateFromFlags({ selected: true, 'not-selected': true }),
+    (e: unknown) => e instanceof CliError && e.exitCode === 2,
+  );
 });

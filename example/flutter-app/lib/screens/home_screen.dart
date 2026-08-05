@@ -4,6 +4,7 @@ import '../widgets.dart';
 import 'async_screen.dart';
 import 'login_screen.dart';
 import 'scroll_screen.dart';
+import 'state_screen.dart';
 
 /// The launch screen and the fixture's reset anchor.
 ///
@@ -41,6 +42,12 @@ class HomeScreen extends StatelessWidget {
             title: 'Long list',
             subtitle: 'off-screen elements, auto scroll-into-view',
             route: ScrollScreen.route,
+          ),
+          VkNavTile(
+            id: 'vk_nav_state',
+            title: 'State flags',
+            subtitle: 'selected, focused, a toggle you must guard',
+            route: StateScreen.route,
           ),
         ],
       ),

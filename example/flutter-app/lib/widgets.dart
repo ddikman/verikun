@@ -45,6 +45,7 @@ Widget _vkNode({
   bool? enabled,
   bool? textField,
   bool? obscured,
+  bool? selected,
 }) {
   return MergeSemantics(
     child: Semantics(
@@ -54,6 +55,7 @@ Widget _vkNode({
       enabled: enabled,
       textField: textField,
       obscured: obscured,
+      selected: selected,
       child: child,
     ),
   );
@@ -161,6 +163,60 @@ class VkCheckbox extends StatelessWidget {
         title: Text(label),
         value: value,
         onChanged: (v) => onChanged(v ?? false),
+      ),
+    );
+  }
+}
+
+/// One option of a two-option mode picker — the fixture for `selected`.
+///
+/// Deliberately faithful to the app that motivated it: **both options call the
+/// same handler**, so a tap *flips* the mode rather than setting it. Landing on
+/// a known mode therefore requires knowing the current one, which is precisely
+/// what `--selected` / `--not-selected` exist to express.
+///
+/// This shape is the reason the modifier matters. An unguarded tap here exits 0
+/// and leaves the app in the *opposite* mode, so the flow completes and the test
+/// passes while having exercised the wrong thing — a false green, which is worse
+/// than a red one. `@vk_mode_status` is what makes that observable.
+///
+/// A plain `GestureDetector` rather than a `ChoiceChip` on purpose: the fixture
+/// is a ruler, so the only `selected` in the tree should be the one written
+/// here, not one a Material widget also contributes.
+class VkModeOption extends StatelessWidget {
+  const VkModeOption({
+    super.key,
+    required this.id,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String id;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return _vkNode(
+      id: id,
+      button: true,
+      selected: selected,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+          decoration: BoxDecoration(
+            color: selected ? scheme.primary : scheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(color: selected ? scheme.onPrimary : scheme.onSurface),
+          ),
+        ),
       ),
     );
   }

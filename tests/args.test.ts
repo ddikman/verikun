@@ -94,3 +94,16 @@ test('flagNum: throws CliError(2) on a non-numeric value', () => {
     (e: unknown) => e instanceof CliError && e.exitCode === 2,
   );
 });
+
+test('parseArgs: a leading state modifier does not swallow the selector', () => {
+  // Regression: `enabled` was absent from BOOLEAN, and a non-BOOLEAN flag consumes the
+  // next token — so `vk tap --enabled @submit` bound the SELECTOR as the flag value and
+  // died with "Missing selector". Only the trailing form worked.
+  for (const flag of ['--enabled', '--selected', '--checked', '--focused',
+                      '--not-enabled', '--not-selected', '--not-checked', '--not-focused']) {
+    const r = parseArgs(['tap', flag, '@submit']);
+    assert.equal(r.command, 'tap');
+    assert.deepEqual(r.positionals, ['@submit'], `${flag} swallowed the selector`);
+    assert.equal(r.flags[flag.replace(/^--/, '')], true);
+  }
+});
