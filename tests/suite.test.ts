@@ -519,6 +519,21 @@ test('cmdSuite: --retries does not retry a budget abort', async () => {
   });
 });
 
+test('cmdSuite: --retries does not retry a thrown non-recoverable error', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 2);
+    const { deps, ran, probeCount } = harness({
+      files: 2,
+      onTest: (n) => (n === 1 ? new Error('could not read the test file') : aiResult()),
+      preflight: broken, // would abort if thrown errors were treated as retryable env blips
+    });
+    const code = await cmdSuite(dir, { retries: '3' }, deps);
+    assert.equal(code, 1);
+    assert.deepEqual(ran, ['01-t.md', '02-t.md'], 'the thrown failure is recorded once, then the suite moves on');
+    assert.equal(probeCount(), 0, 'non-env throws are not re-probed or retried');
+  });
+});
+
 test('cmdSuite: --retries resets the app between attempts when --app reset is wired', async () => {
   await inTempCwd(async (root) => {
     const dir = suiteDir(root, 1);
