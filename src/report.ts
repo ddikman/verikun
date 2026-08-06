@@ -133,6 +133,7 @@ const STYLE = `
   .summary { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom: 20px; }
   .chip { font-weight:600; font-size:13px; padding:4px 10px; border-radius:999px; color:#fff; }
   .chip.pass{background:var(--pass)} .chip.fail{background:var(--fail)} .chip.err{background:var(--err)}
+  .chip.warn{background:var(--err)}
   .chip.muted{ background:#eaeef2; color:var(--muted); }
   ol.steps { list-style:none; margin:0; padding:0; }
   li.step { background:#fff; border:1px solid var(--line); border-left-width:4px; border-radius:8px; margin-bottom:10px; padding:12px 14px; }
@@ -202,6 +203,17 @@ function stepHtml(s: RunStep): string {
 // rather than verikun growing in-core upload plugins. Bump schemaVersion on any
 // breaking change to the shape.
 
+/** One archived attempt of a suite test — kept when `--retries` re-ran the file. */
+export interface SuiteAttempt {
+  /** Archived run id under .verikun/runs/ ('' when the attempt never started a run). */
+  id: string;
+  ok: boolean;
+  durationMs: number;
+  costUsd: number;
+  /** Failure summary when not ok. */
+  failure?: string;
+}
+
 export interface SuiteTestResult {
   /** Archived run id — the directory name under .verikun/runs/. */
   id: string;
@@ -219,6 +231,14 @@ export interface SuiteTestResult {
   modelRepairs: number;
   /** Terminal failure summary when not ok (assert failure, drift, budget/timeout abort). */
   failure?: string;
+  /**
+   * Prior attempts when `--retries` re-ran this test. The primary `id` is the final
+   * (winning or last-failed) run; these rows keep the failed archives visible so a
+   * flake that later passed does not erase its red evidence.
+   */
+  attempts?: SuiteAttempt[];
+  /** True when this test passed only after one or more failed attempts. */
+  flaky?: boolean;
 }
 
 export interface SuiteRun {
@@ -241,6 +261,11 @@ export interface SuiteRun {
    * dashboard never reports a not-run test as a regression.
    */
   aborted?: { reason: string; notRun: string[] };
+  /**
+   * Soft signals that did not fail the suite — today: tests that passed only after a
+   * retry (flake recovered). Additive; schemaVersion stays 1.
+   */
+  warnings?: string[];
 }
 
 export interface SuiteTotals {
@@ -276,10 +301,27 @@ const SUITE_STYLE = `
   table.tests td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
   table.tests a { color:inherit; }
   .fail-reason { color:var(--fail); font-size:12px; margin-top:2px; }
+  .flake-note { color:var(--err); font-size:12px; margin-top:2px; }
+  .attempts { margin-top:4px; font-size:12px; color:var(--muted); }
+  .attempts a { color:var(--fail); }
   .aborted { background:#fff4e5; border:1px solid #f0b429; border-radius:8px; padding:12px 14px; margin:0 0 14px; font-size:13px; }
   .aborted strong { color:#8a5300; }
   .aborted ul { margin:6px 0 0; padding-left:20px; color:var(--muted); }
+  .warnings { background:#fff8c5; border:1px solid #d4a72c; border-radius:8px; padding:12px 14px; margin:0 0 14px; font-size:13px; }
+  .warnings strong { color:#7d4e00; }
+  .warnings ul { margin:6px 0 0; padding-left:20px; color:var(--muted); }
 `;
+
+function suiteAttemptLinks(attempts: SuiteAttempt[], linkBase: string): string {
+  const links = attempts
+    .map((a, i) => {
+      const label = `attempt ${i + 1}`;
+      if (!a.id) return htmlEsc(label);
+      return `<a href="${htmlEsc(`${linkBase}runs/${encodeURIComponent(a.id)}/report.html`)}">${htmlEsc(label)}</a>`;
+    })
+    .join(', ');
+  return `<div class="attempts">prior failed: ${links}</div>`;
+}
 
 function suiteTestRow(t: SuiteTestResult, linkBase: string): string {
   // A test that errored before its run started (id '') has no report to link.
@@ -287,9 +329,13 @@ function suiteTestRow(t: SuiteTestResult, linkBase: string): string {
     ? `<a href="${htmlEsc(`${linkBase}runs/${encodeURIComponent(t.id)}/report.html`)}">${htmlEsc(t.name)}</a>`
     : htmlEsc(t.name);
   const failure = t.failure ? `<div class="fail-reason">${htmlEsc(t.failure)}</div>` : '';
+  const flake = t.flaky ? `<div class="flake-note">passed on retry (flake)</div>` : '';
+  const prior = t.attempts?.length ? suiteAttemptLinks(t.attempts, linkBase) : '';
+  const status = t.flaky ? 'FLAKY' : t.ok ? 'PASS' : 'FAIL';
+  const statusClass = t.ok ? 'passed' : 'failed';
   return `  <tr>
-    <td><span class="st ${t.ok ? 'passed' : 'failed'}">${t.ok ? 'PASS' : 'FAIL'}</span></td>
-    <td>${label}${failure}</td>
+    <td><span class="st ${statusClass}">${status}</span></td>
+    <td>${label}${flake}${failure}${prior}</td>
     <td class="num">${t.passedSteps}/${t.steps}${t.failedSteps ? ` (${t.failedSteps} failed)` : ''}</td>
     <td class="num">${t.modelRepairs || ''}</td>
     <td class="num">$${t.costUsd.toFixed(4)}</td>
@@ -305,9 +351,11 @@ function suiteTestRow(t: SuiteTestResult, linkBase: string): string {
 export function toSuiteHtml(suite: SuiteRun, opts: { linkBase?: string } = {}): string {
   const linkBase = opts.linkBase ?? '../../';
   const t = suite.totals;
+  const flaky = suite.tests.filter((x) => x.flaky).length;
   const chips = [
     `<span class="chip pass">${t.passed} passed</span>`,
     t.failed ? `<span class="chip fail">${t.failed} failed</span>` : '',
+    flaky ? `<span class="chip warn">${flaky} flaky</span>` : '',
     suite.aborted ? `<span class="chip fail">ABORTED</span>` : '',
     `<span class="chip muted">${t.tests} tests &middot; ${t.steps} steps &middot; ${fmtDuration(t.durationMs)} &middot; $${t.costUsd.toFixed(4)}</span>`,
   ]
@@ -327,6 +375,15 @@ ${
 }  </div>
 `
     : '';
+
+  const warningsBanner =
+    suite.warnings?.length
+      ? `  <div class="warnings">
+    <strong>Warnings</strong>
+    <ul>${suite.warnings.map((w) => `<li>${htmlEsc(w)}</li>`).join('')}</ul>
+  </div>
+`
+      : '';
 
   const metaBits = [
     `<code>${htmlEsc(suite.id)}</code>`,
@@ -351,7 +408,7 @@ ${
   <div class="summary">
       ${chips}
   </div>
-${abortedBanner}  <table class="tests">
+${abortedBanner}${warningsBanner}  <table class="tests">
     <thead><tr><th></th><th>Test</th><th>Steps</th><th>Repairs</th><th>Cost</th><th>Duration</th></tr></thead>
     <tbody>
 ${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}

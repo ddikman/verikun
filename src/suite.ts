@@ -11,11 +11,11 @@
 
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
-import { Flags, flagStr, flagBool } from './args';
+import { Flags, flagStr, flagBool, flagNum } from './args';
 import { CliError, isEnvError } from './errors';
 import { artifactDir, err, json, out } from './output';
 import { runId, uniqueDir, RunState } from './run';
-import { SuiteRun, SuiteTestResult, suiteTotals, toSuiteIndexJson, toSuiteHtml } from './report';
+import { SuiteRun, SuiteTestResult, SuiteAttempt, suiteTotals, toSuiteIndexJson, toSuiteHtml } from './report';
 import { VERSION } from './version';
 
 /** What one `vk ai` test run returns to its caller — produced by cli.ts's runAiTest,
@@ -139,6 +139,67 @@ export function toSuiteResult(file: string, r: AiRunResult, durationMs: number):
   };
 }
 
+/** Compact one attempt for the `attempts` evidence array (pure). */
+export function toSuiteAttempt(r: SuiteTestResult): SuiteAttempt {
+  return {
+    id: r.id,
+    ok: r.ok,
+    durationMs: r.durationMs,
+    costUsd: r.costUsd,
+    ...(r.failure ? { failure: r.failure } : {}),
+  };
+}
+
+/**
+ * Merge a sequence of attempt rows into the final suite row: primary `id` is the last
+ * attempt (winning green, or last red), cost/duration/repairs sum across attempts, and
+ * prior attempts are retained as flake evidence.
+ */
+export function mergeSuiteAttempts(attempts: SuiteTestResult[]): SuiteTestResult {
+  if (attempts.length === 0) throw new Error('mergeSuiteAttempts: empty');
+  const last = attempts[attempts.length - 1];
+  if (attempts.length === 1) return last;
+  const round = (n: number) => Number(n.toFixed(4));
+  const prior = attempts.slice(0, -1).map(toSuiteAttempt);
+  const flaky = last.ok && prior.some((a) => !a.ok);
+  return {
+    ...last,
+    durationMs: attempts.reduce((a, t) => a + t.durationMs, 0),
+    costUsd: round(attempts.reduce((a, t) => a + t.costUsd, 0)),
+    modelRepairs: attempts.reduce((a, t) => a + t.modelRepairs, 0),
+    attempts: prior,
+    ...(flaky ? { flaky: true } : {}),
+  };
+}
+
+// What --retries will and won't spend an attempt on. The bias is deliberate and
+// asymmetric: a retry costs one test, while giving up costs the whole suite plus a
+// human rerunning it. So the rule is *retry unless a rerun provably cannot change the
+// outcome* — the two predicates below are the only "provably" cases, everything else
+// (flaky selector, wedged app, a wobbling network to `vk server`) earns another go.
+
+/** Budget aborts won't heal on retry: each attempt gets its own cost ceiling, so a
+ *  rerun just re-aborts at the same place having spent the money twice. */
+function isRetryable(r: AiRunResult): boolean {
+  return !r.ok && !r.abortedForBudget;
+}
+
+/** A thrown USAGE error (exit 2) is the one throw a rerun cannot change — an unreadable
+ *  test file, a payload the server refuses, a flag it doesn't understand. Everything
+ *  else, including every environment error, is retried while attempts remain. */
+function isRetryableThrow(e: unknown): boolean {
+  return !(e instanceof CliError && e.exitCode === 2);
+}
+
+function parseRetries(flags: Flags): number {
+  const n = flagNum(flags, 'retries');
+  if (n === undefined) return 0;
+  if (!Number.isInteger(n) || n < 0) {
+    throw new CliError(`--retries must be a non-negative integer, got '${n}'`, 2);
+  }
+  return n;
+}
+
 export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): Promise<number> {
   const dir = resolve(process.cwd(), dirArg);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) {
@@ -149,66 +210,138 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
     throw new CliError(`suite: no test files (*.md) in '${dirArg}'`, 2);
   }
 
+  const retries = parseRetries(flags);
   const suiteId = runId();
   const name = flagStr(flags, 'name') || basename(dir);
   const startedAt = new Date().toISOString();
-  err(`[suite] '${name}': ${files.length} test(s) from ${dirArg} (${deps.platform}${deps.device ? ` · ${deps.device}` : ''})`);
+  err(
+    `[suite] '${name}': ${files.length} test(s) from ${dirArg} (${deps.platform}${deps.device ? ` · ${deps.device}` : ''})${
+      retries > 0 ? ` · up to ${retries} retry(ies) on failure` : ''
+    }`,
+  );
 
   const results: SuiteTestResult[] = [];
+  const warnings: string[] = [];
   let aborted: { reason: string; notRun: string[] } | undefined;
+
+  async function resetApp(label: string): Promise<string | undefined> {
+    // Returns the abort reason when the suite should stop (confirmed env break during reset).
+    if (!deps.reset) return undefined;
+    try {
+      await deps.reset();
+      err(`[suite] app state reset${label}`);
+      return undefined;
+    } catch (e) {
+      // A reset that failed because the BOX is broken means nothing after it is
+      // trustworthy — but only if a re-probe agrees. Otherwise surface and continue:
+      // a flaky reset should not zero out the whole suite, and the test itself will
+      // fail loudly if the stale state actually matters.
+      const broken = isEnvError(e) ? await stillBroken(deps) : undefined;
+      if (broken) return broken;
+      err(`[suite] reset failed (${(e as Error).message}) — continuing`);
+      return undefined;
+    }
+  }
+
+  /** A confirmed env break with attempts left: say so, pause, and let the loop retry.
+   *  The pause matters — the failures this rides out (a server restart, a wifi drop, a
+   *  USB re-enumeration) clear in seconds, and retrying into the same dead socket
+   *  immediately would burn every attempt inside the outage. */
+  async function noteEnvRetry(file: string, attempt: number, reason: string): Promise<void> {
+    const warn = `${file}: environment error on attempt ${attempt + 1} (${reason}) — retried`;
+    warnings.push(warn);
+    err(`[suite] WARN ${warn}`);
+    await sleep((deps.probeRetryMs ?? PROBE_RETRY_MS) * (attempt + 1));
+  }
+
   for (let i = 0; i < files.length && !aborted; i++) {
     const file = files[i];
     err(`[suite] ── (${i + 1}/${files.length}) ${file} ──`);
-    if (deps.reset) {
+
+    const attemptRows: SuiteTestResult[] = [];
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      // The last attempt is where a retryable failure becomes the verdict: a confirmed
+      // env break aborts the suite, anything else stands as this test's failed row.
+      const lastAttempt = attempt === retries;
+      if (attempt > 0) err(`[suite] retry ${attempt}/${retries} for ${file}`);
+
+      // Re-isolate before EVERY attempt — between tests and between retries alike.
+      const resetBreak = await resetApp(attempt > 0 ? ' (retry)' : '');
+      if (resetBreak) {
+        if (!lastAttempt) {
+          await noteEnvRetry(file, attempt, `reset failed: ${resetBreak}`);
+          continue;
+        }
+        // With no attempt row this test never ran, so notRun starts at the CURRENT file.
+        aborted = {
+          reason: `reset failed: ${resetBreak}`,
+          notRun: files.slice(attemptRows.length ? i + 1 : i),
+        };
+        break;
+      }
+
+      const t0 = Date.now();
       try {
-        await deps.reset();
-        err('[suite] app state reset');
+        const r = await deps.runTest(join(dir, file));
+        attemptRows.push(toSuiteResult(file, r, Date.now() - t0));
+        if (r.abortedForEnv) {
+          const broken = await stillBroken(deps);
+          if (broken) {
+            if (!lastAttempt) {
+              // Even a CONFIRMED break is worth an attempt: the probe window is a couple
+              // of seconds, which a server restart outlives — and aborting costs the run.
+              await noteEnvRetry(file, attempt, broken);
+              continue;
+            }
+            aborted = { reason: broken, notRun: files.slice(i + 1) };
+            break;
+          }
+          // Transient env blip: retryable like any other failure.
+        }
+        if (r.ok || !isRetryable(r) || lastAttempt) break;
       } catch (e) {
-        // A reset that failed because the BOX is broken means nothing after it is
-        // trustworthy — but only if a re-probe agrees. Otherwise surface and continue:
-        // a flaky reset should not zero out the whole suite, and the test itself will
-        // fail loudly if the stale state actually matters.
+        // A test that THREW (device gone, server unreachable, bad file) still becomes a
+        // failed row — one broken test must not vaporize the suite report for the tests
+        // that already ran. Out of attempts, a confirmed env break stops the suite.
+        const msg = e instanceof Error ? e.message : String(e);
+        err(`[suite] ${file} errored: ${msg}`);
+        attemptRows.push({
+          id: '',
+          file,
+          name: basename(file, extname(file)),
+          ok: false,
+          durationMs: Date.now() - t0,
+          costUsd: 0,
+          steps: 0,
+          passedSteps: 0,
+          failedSteps: 0,
+          modelRepairs: 0,
+          failure: msg.split('\n')[0],
+        });
         const broken = isEnvError(e) ? await stillBroken(deps) : undefined;
-        if (broken) {
-          // This test never ran, so it gets no row — notRun starts at the CURRENT file.
-          aborted = { reason: `reset failed: ${broken}`, notRun: files.slice(i) };
+        if (lastAttempt) {
+          if (broken) aborted = { reason: broken, notRun: files.slice(i + 1) };
           break;
         }
-        err(`[suite] reset failed (${(e as Error).message}) — continuing`);
+        if (!isRetryableThrow(e)) break;
+        if (broken) await noteEnvRetry(file, attempt, broken);
       }
     }
-    const t0 = Date.now();
-    try {
-      const r = await deps.runTest(join(dir, file));
-      results.push(toSuiteResult(file, r, Date.now() - t0));
-      // The test itself reported an environment abort (exit 3 mid-plan). Same rule:
-      // fatal only if the box is still broken. This test HAS a row and a real report,
-      // so notRun starts after it.
-      if (r.abortedForEnv) {
-        const broken = await stillBroken(deps);
-        if (broken) aborted = { reason: broken, notRun: files.slice(i + 1) };
-      }
-    } catch (e) {
-      // A test that THREW (device gone, server unreachable, bad file) still becomes a
-      // failed row — one broken test must not vaporize the suite report for the tests
-      // that already ran. But if it threw because the environment is gone, stop.
-      const msg = e instanceof Error ? e.message : String(e);
-      err(`[suite] ${file} errored: ${msg}`);
-      results.push({
-        id: '',
-        file,
-        name: basename(file, extname(file)),
-        ok: false,
-        durationMs: Date.now() - t0,
-        costUsd: 0,
-        steps: 0,
-        passedSteps: 0,
-        failedSteps: 0,
-        modelRepairs: 0,
-        failure: msg.split('\n')[0],
-      });
-      const broken = isEnvError(e) ? await stillBroken(deps) : undefined;
-      if (broken) aborted = { reason: broken, notRun: files.slice(i + 1) };
+
+    if (attemptRows.length === 0) {
+      // Every attempt was blocked by a failing reset, so the test never ran and gets no
+      // row — `aborted.notRun` (set above) already names it. Nothing to merge.
+      break;
+    }
+
+    const merged = mergeSuiteAttempts(attemptRows);
+    results.push(merged);
+    if (merged.flaky) {
+      const n = merged.attempts?.length ?? 0;
+      const warn = `${file} passed on retry after ${n} failed attempt${n === 1 ? '' : 's'}`;
+      warnings.push(warn);
+      err(`[suite] WARN ${warn}`);
     }
   }
   if (aborted) {
@@ -227,6 +360,7 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
     totals: suiteTotals(results),
     tests: results,
     ...(aborted ? { aborted } : {}),
+    ...(warnings.length ? { warnings } : {}),
   };
 
   // .verikun/suites/<id>/ sits beside .verikun/runs/<id>/, so index.html reaches a
@@ -238,7 +372,11 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
 
   const t = suite.totals;
   err(`[suite] ${t.passed}/${t.tests} passed · ${t.steps} steps · $${t.costUsd.toFixed(4)} · ${(t.durationMs / 1000).toFixed(1)}s`);
-  for (const r of results) err(`  ${r.ok ? 'PASS' : 'FAIL'} ${r.file}${r.failure ? ` — ${r.failure}` : ''}`);
+  for (const r of results) {
+    const tag = r.flaky ? 'FLAKY' : r.ok ? 'PASS' : 'FAIL';
+    err(`  ${tag} ${r.file}${r.failure ? ` — ${r.failure}` : r.flaky ? ' — passed on retry' : ''}`);
+  }
+  if (warnings.length) err(`[suite] ${warnings.length} warning(s)`);
   err(`[suite] overview: ${join(outDir, 'index.html')}`);
 
   if (flagBool(flags, 'json')) json(suite);
@@ -246,6 +384,7 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
 
   // The CI gate: any failed test fails the invocation (mirrors `vk run archive`). An
   // environment abort exits 3 instead, so CI can tell "the runner is broken" from "the
-  // app regressed" — the whole point of stopping early.
+  // app regressed" — the whole point of stopping early. A flake that recovered is ok
+  // (exit 0) with a warning — that is the whole point of --retries.
   return aborted ? 3 : t.failed > 0 ? 1 : 0;
 }

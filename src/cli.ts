@@ -1636,7 +1636,7 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
 
 async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<number> {
   const dirArg = positionals[0];
-  if (!dirArg) throw new CliError('Usage: verikun suite <dir> [--app <id>] [--server url] [--name n] [--json]', 2);
+  if (!dirArg) throw new CliError('Usage: verikun suite <dir> [--app <id>] [--server url] [--name n] [--retries n] [--json]', 2);
   const opts = parseAiOptions(flags);
   // Pre-flight the provider BEFORE touching any device/server: every test needs it
   // to compile (on a cache miss) or to repair at runtime.
@@ -1962,14 +1962,19 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       codex-cli | cursor-cli.
 
 SUITE (run a directory of natural-language tests as one gated suite)
-  suite <dir> [--app <id>] [--name n] [--json]  (+ all \`ai\` flags, incl. --server)
+  suite <dir> [--app <id>] [--name n] [--retries n] [--json]
+                                      (+ all \`ai\` flags, incl. --server)
                                       Run every *.md in <dir> (lexicographic order —
                                       prefix 01-, 02- to sequence; README.md skipped)
                                       through \`vk ai\`. With --app, app data is reset
-                                      between tests (iOS: force-stop). Writes a suite
-                                      overview to ./.verikun/suites/<id>/{index.json,
-                                      index.html} linking each test's report. Exits 1
-                                      if any test failed — the CI gate.
+                                      between tests (iOS: force-stop). --retries N
+                                      re-runs a failed test up to N times; a later
+                                      pass recovers the suite (exit 0) and surfaces a
+                                      warning, keeping failed-attempt evidence in the
+                                      report. Writes a suite overview to
+                                      ./.verikun/suites/<id>/{index.json, index.html}
+                                      linking each test's report. Exits 1 if any test
+                                      failed — the CI gate.
 
 SERVER (expose a locally-connected device to remote verikun clients)
   server [--bind addr] [--port n] [--auth-key k] [--allow-install]
