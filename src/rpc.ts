@@ -38,10 +38,23 @@ export interface ExecResponse {
   step?: RunStep;
   /** Artifact files the step references (screenshots), rel path → base64 bytes. */
   artifacts?: Record<string, string>;
+  /** Device-clock marker (`MM-DD HH:MM:SS.mmm`) sampled at this exec, so the
+   *  caller's run can set `logStart` (ephemeral recording never persists it). */
+  logStart?: string;
 }
 
 export interface ElementsResponse {
   elements: Element[];
+}
+
+export interface LogsRequest {
+  lines?: number;
+  since?: string;
+  appId?: string;
+}
+
+export interface LogsResponse {
+  logs: string;
 }
 
 export interface HealthResponse {
@@ -109,6 +122,9 @@ export interface ExecBackend {
   exec(command: string, positionals: string[], flags: Record<string, string>): Promise<{ code: number; error?: Error }>;
   /** Live hierarchy for engine control-flow guards and repair context. */
   getElements(): Element[] | Promise<Element[]>;
+  /** One-shot device-log snapshot (archive-time capture / diagnostics). Optional:
+   *  older remotes without `/v1/logs` simply omit it and archive proceeds without. */
+  getLogs?(opts?: { lines?: number; since?: string; appId?: string }): string | Promise<string>;
   /** Install an app build (`vk install`). */
   install(appPath: string): Promise<void> | void;
   /** Reset app state between suite tests (clear on Android; honest degrade to stop on iOS). */

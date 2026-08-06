@@ -364,16 +364,17 @@ device. To expose a device from THIS machine: `vk server --allow-install`
 Every action is **recorded into a test run** — one auto-starts on your first
 action, no setup needed. Each command becomes a step with its timing, the
 selector + identifier it resolved through, and pass/fail. When a step fails, `vk`
-automatically captures a screenshot **and** the UI hierarchy of that page. To
-also get the device logs (the crash/stack trace), run `vk log <package>` after
-the failure — that step records the logs into the same run, so they appear in
-the report next to the failure.
+automatically captures a screenshot **and** the UI hierarchy of that page.
+`vk run archive` also captures a bounded device-log dump into
+`artifacts/logcat.txt` by default (session-scoped). You can still run
+`vk log <package>` mid-run to attach a snapshot to a step. Opt out on green
+runs with `--no-logs` / `VERIKUN_NO_LOGS` (failures still capture).
 
 - `vk run status` — the current run's steps and outcomes
-- `vk run archive [name]` — finish the run: writes a **JUnit XML** + a
-  self-contained **HTML report** (screenshots, captured hierarchies, and the
-  identifiers used) to `./.verikun/runs/<id>/`, and exits non-zero if any step
-  failed — so it gates CI
+- `vk run archive [name] [--no-logs]` — finish the run: writes a **JUnit XML** + a
+  self-contained **HTML report** (screenshots, captured hierarchies, device log,
+  and the identifiers used) to `./.verikun/runs/<id>/`, and exits non-zero if any
+  step failed — so it gates CI
 - `vk run clear` — discard the run, no report
 - `vk run start [name]` — begin a fresh named run explicitly (optional)
 

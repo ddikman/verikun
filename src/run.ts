@@ -73,6 +73,9 @@ export interface RunState {
   /** Device-clock marker (logcat `MM-DD HH:MM:SS.mmm`) captured at the session's
    *  first step, so `vk log` can exclude logs from before the run started. */
   logStart?: string;
+  /** Relative path to the device-log artifact captured at archive time
+   *  (`artifacts/logcat.txt`). Prefer this over inlining logs into run.json. */
+  logFile?: string;
   /** Set by `vk ai`: the token/cost line, repair count, and the suggested test
    *  improvements (workarounds the model applied that you can fold back into the
    *  source to stabilize the test and cut future tokens). */
@@ -109,6 +112,47 @@ export function isRecordable(command: string): boolean {
 
 const HIERARCHY_CAP = 24000; // chars of failure hierarchy kept inline in run.json
 const LOG_CAP = 50000; // chars of device logs kept inline in run.json (tail-kept)
+/** Max chars written to the archive-time `artifacts/logcat.txt` (tail-kept). Larger
+ *  than the per-step LOG_CAP because the file is not inlined into run.json. */
+const LOG_FILE_CAP = 512_000;
+/** When no session `logStart` marker exists, archive captures this many trailing lines. */
+const ARCHIVE_LOG_LINES = 5000;
+
+export const RUN_LOG_ARTIFACT = 'artifacts/logcat.txt';
+
+export interface ArchiveLogOpts {
+  /** `vk run archive --no-logs` — skip on green runs (failures still capture). */
+  noLogs?: boolean;
+  /** Sync fetcher (local driver). Called only when capture is wanted and no
+   *  logFile is attached yet. Remote callers pre-attach via attachArchiveLogs. */
+  fetchLogs?: (window: { since?: string; lines?: number }) => string;
+}
+
+/** Whether archive-time device-log capture should run. Default on; `--no-logs` /
+ *  `VERIKUN_NO_LOGS` opts out of *green* runs only — a failed run always captures
+ *  (best-effort), because that is when the log is load-bearing. Exported for tests. */
+export function wantsArchiveLogs(hasFailures: boolean, noLogsFlag = false): boolean {
+  if (hasFailures) return true;
+  if (noLogsFlag) return false;
+  if (process.env.VERIKUN_NO_LOGS) return false;
+  return true;
+}
+
+/** Window passed to `getLogs` at archive time: session-scoped when `logStart` is
+ *  known, otherwise a bounded trailing dump. Exported for tests. */
+export function archiveLogWindow(state: Pick<RunState, 'logStart'>): { since?: string; lines?: number } {
+  if (state.logStart) return { since: state.logStart };
+  return { lines: ARCHIVE_LOG_LINES };
+}
+
+function truncateLogFile(text: string): string {
+  if (text.length <= LOG_FILE_CAP) return text;
+  return '…(truncated)\n' + text.slice(-LOG_FILE_CAP);
+}
+
+function runHasFailures(state: RunState): boolean {
+  return state.steps.some((s) => s.status !== 'passed');
+}
 
 // --- paths & persistence --------------------------------------------------
 
@@ -206,6 +250,15 @@ export function rolloverReason(state: RunState, serial: string | undefined, sess
   return null;
 }
 
+/** Whether the incoming step's driver is safe to use for archive-time logs of the
+ *  run being sealed. On a device-change rollover the driver is already pointed at
+ *  the *new* serial — pulling logcat from it would attribute the wrong device's
+ *  output to the old run. Idle/session rollover on the same device is fine.
+ *  Exported for tests. */
+export function rolloverLogsSameDevice(runDevice: string | undefined, newSerial: string | undefined): boolean {
+  return !runDevice || !newSerial || runDevice === newSerial;
+}
+
 export function stepName(command: string, positionals: string[], flags: Record<string, string | boolean>): string {
   const p = positionals;
   const at = typeof flags['at'] === 'string' ? (flags['at'] as string) : undefined;
@@ -275,7 +328,14 @@ export class Recorder {
       const reason = rolloverReason(state, serial, session);
       if (reason) {
         try {
-          const dest = Recorder.seal(state, dir);
+          // Only reuse this step's driver when it still targets the run's device.
+          // A device-change rollover must not write the new device's logcat into
+          // the old run's archive (vk run archive binds a driver to state.device).
+          const fetchLogs =
+            driver && rolloverLogsSameDevice(state.device, serial)
+              ? (window: { since?: string; lines?: number }) => driver.getLogs(window)
+              : undefined;
+          const dest = Recorder.seal(state, dir, { fetchLogs });
           err(`[verikun] previous run '${state.name}' (${state.steps.length} step(s)) auto-closed → ${dest} (${reason}); starting a fresh run`);
           state = null;
           rolledOver = true;
@@ -480,8 +540,11 @@ export class Recorder {
     saveState(this.dir, this.state);
   }
 
-  /** Finalize a run: write reports next to it, then move it into ./.verikun/runs/<id>/. */
-  private static seal(state: RunState, dir: string): string {
+  /** Finalize a run: optionally capture device logs, write reports next to it, then
+   *  move it into ./.verikun/runs/<id>/. Log capture is best-effort — a device that
+   *  is gone (often why the run failed) must never prevent sealing the report. */
+  private static seal(state: RunState, dir: string, opts: ArchiveLogOpts = {}): string {
+    Recorder.maybeCaptureArchiveLogs(state, dir, opts);
     state.finishedAt = nowIso();
     state.updatedAt = nowIso();
     saveState(dir, state);
@@ -491,6 +554,36 @@ export class Recorder {
     const dest = uniqueDir(join(archiveBase(), state.id));
     renameSync(dir, dest);
     return dest;
+  }
+
+  /** Write (or overwrite) the archive-time log artifact on the ACTIVE run without
+   *  sealing. Used by remote (`--server`) callers that fetch logs asynchronously
+   *  before `archive()`. Truncates to LOG_FILE_CAP, tail-kept. */
+  static attachArchiveLogs(text: string): void {
+    const dir = activeDir();
+    const state = loadState(dir);
+    if (!state) return;
+    Recorder.writeArchiveLog(state, dir, text);
+    saveState(dir, state);
+  }
+
+  private static writeArchiveLog(state: RunState, dir: string, text: string): void {
+    const body = truncateLogFile(text);
+    mkdirSync(join(dir, 'artifacts'), { recursive: true });
+    writeFileSync(join(dir, RUN_LOG_ARTIFACT), body);
+    state.logFile = RUN_LOG_ARTIFACT;
+  }
+
+  private static maybeCaptureArchiveLogs(state: RunState, dir: string, opts: ArchiveLogOpts): void {
+    if (state.logFile) return; // already attached (e.g. remote pre-fetch)
+    if (!wantsArchiveLogs(runHasFailures(state), opts.noLogs)) return;
+    if (!opts.fetchLogs) return;
+    try {
+      const text = opts.fetchLogs(archiveLogWindow(state));
+      if (text !== undefined && text !== null) Recorder.writeArchiveLog(state, dir, text);
+    } catch (e) {
+      err(`[verikun] could not capture archive device logs (${(e as Error).message})`);
+    }
   }
 
   /** One-line context summary for `vk run status`. */
@@ -524,11 +617,13 @@ export class Recorder {
    * a local one. Re-indexes the step, writes its artifact buffers under the new
    * index, and rewrites the step's artifact references to match. Creates an
    * implicit run first if none is active (parity with beginStep's auto-start).
+   * `ctx.logStart` (device-clock marker from the server) is recorded on the first
+   * splice so archive-time / `vk log` scoping works the same as a local run.
    */
   static appendForeignStep(
     step: RunStep,
     artifacts: Record<string, Buffer> = {},
-    ctx: { platform?: string; device?: string } = {},
+    ctx: { platform?: string; device?: string; logStart?: string } = {},
   ): void {
     if (process.env.VERIKUN_NO_RUN) return;
     const dir = activeDir();
@@ -547,6 +642,10 @@ export class Recorder {
       };
       err('[verikun] recording test run (implicit) — archive: `vk run archive` · discard: `vk run clear`');
     }
+
+    // Anchor the log window from the server's device clock (beginEphemeralStep
+    // never persists state, so the marker has to travel on the wire).
+    if (!state.logStart && ctx.logStart) state.logStart = ctx.logStart;
 
     const index = state.steps.length;
     const spliced: RunStep = { ...step, index };
@@ -622,8 +721,10 @@ export class Recorder {
     return existing;
   }
 
-  /** Write JUnit + HTML reports and move the run into ./.verikun/runs/<id>/. */
-  static archive(name?: string): { dir: string; xmlPath: string; htmlPath: string; state: RunState } {
+  /** Write JUnit + HTML reports and move the run into ./.verikun/runs/<id>/.
+   *  By default captures a bounded device-log tail into `artifacts/logcat.txt`
+   *  (see wantsArchiveLogs / ArchiveLogOpts). */
+  static archive(name?: string, opts: ArchiveLogOpts = {}): { dir: string; xmlPath: string; htmlPath: string; state: RunState } {
     const dir = activeDir();
     if (!existsSync(statePath(dir))) {
       throw new CliError('No active test run to archive. Run an action first, or `vk run start`.', 1);
@@ -632,7 +733,7 @@ export class Recorder {
     if (!state) throw new CliError('Active run state is unreadable (.verikun/run/run.json is corrupt).', 3);
 
     if (name) state.name = name;
-    const dest = Recorder.seal(state, dir);
+    const dest = Recorder.seal(state, dir, opts);
     return { dir: dest, xmlPath: join(dest, 'report.xml'), htmlPath: join(dest, 'report.html'), state };
   }
 }

@@ -132,6 +132,17 @@ test('toHtml: a log step renders its logs in a <details> block', () => {
   assert.ok(html.includes('FATAL EXCEPTION'));
 });
 
+test('toHtml: archive-time logFile is linked from the run meta', () => {
+  const html = toHtml({ ...SAMPLE, logFile: 'artifacts/logcat.txt' });
+  assert.ok(html.includes('href="artifacts/logcat.txt"'));
+  assert.ok(html.includes('device log'));
+});
+
+test('toJUnitXml: archive-time logFile is noted in the suite system-out', () => {
+  const xml = toJUnitXml({ ...SAMPLE, logFile: 'artifacts/logcat.txt' });
+  assert.ok(xml.includes('device log: artifacts/logcat.txt'));
+});
+
 // --- vk ai panel ----------------------------------------------------------
 
 function aiRun(): RunState {

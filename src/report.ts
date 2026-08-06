@@ -104,17 +104,23 @@ export function toJUnitXml(run: RunState): string {
     `name="${xmlAttr(run.name)}" tests="${c.tests}" failures="${c.failures}" ` +
     `errors="${c.errors}" time="${suiteTime}" timestamp="${xmlAttr(run.startedAt)}"`;
 
+  const suiteExtras: string[] = [];
+  if (run.logFile) suiteExtras.push(`device log: ${run.logFile}`);
+  if (run.ai) {
+    suiteExtras.push(
+      'vk ai: ' +
+        run.ai.cost +
+        (run.ai.improvements.length ? '\nSuggested improvements:\n' + run.ai.improvements.join('\n') : ''),
+    );
+  }
+
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<testsuites name="verikun" tests="${c.tests}" failures="${c.failures}" errors="${c.errors}" time="${suiteTime}">\n` +
     `<testsuite ${suiteAttrs}>\n` +
     `${cases}\n` +
-    (run.ai
-      ? `  <system-out>${xmlText(
-          'vk ai: ' +
-            run.ai.cost +
-            (run.ai.improvements.length ? '\nSuggested improvements:\n' + run.ai.improvements.join('\n') : ''),
-        )}</system-out>\n`
+    (suiteExtras.length
+      ? `  <system-out>${xmlText(suiteExtras.join('\n'))}</system-out>\n`
       : '') +
     `</testsuite>\n</testsuites>\n`
   );
@@ -437,6 +443,7 @@ export function toHtml(run: RunState): string {
     `started ${htmlEsc(run.startedAt)}`,
     run.finishedAt ? `finished ${htmlEsc(run.finishedAt)}` : '',
     run.implicit ? 'implicit run' : '',
+    run.logFile ? `<a href="${htmlEsc(run.logFile)}">device log</a>` : '',
   ].filter(Boolean);
 
   return `<!doctype html>

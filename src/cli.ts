@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve, basename, sep } from 'node:path';
+import { resolve, basename, sep, join } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
@@ -34,7 +34,7 @@ import {
   visibleFraction,
 } from './ui/viewport';
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
-import { Recorder, isRecordable, RunStep } from './run';
+import { Recorder, isRecordable, RunStep, archiveLogWindow, wantsArchiveLogs } from './run';
 import { downscalePng } from './image';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
 import { lintPlan } from './agent/lint';
@@ -1018,15 +1018,43 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
     case 'archive':
     case 'finish':
     case 'save': {
-      const { dir, xmlPath, htmlPath, state } = Recorder.archive(positionals[1]);
+      const noLogs = flagBool(flags, 'no-logs');
+      // Best-effort: archive-time log capture needs a device. Prefer the run's
+      // bound serial/platform so a multi-device host hits the right one. A
+      // missing/broken toolchain must not prevent sealing the report.
+      let fetchLogs: ((window: { since?: string; lines?: number }) => string) | undefined;
+      const active = Recorder.status();
+      const hasFailures = !!active?.steps.some((s) => s.status !== 'passed');
+      if (wantsArchiveLogs(hasFailures, noLogs)) {
+        try {
+          const plat =
+            active?.platform === 'ios' || active?.platform === 'android'
+              ? (active.platform as Platform)
+              : platform;
+          const driver = getDriver(plat, active?.device || device);
+          fetchLogs = (window) => driver.getLogs(window);
+        } catch (e) {
+          err(`[verikun] archive log capture unavailable (${(e as Error).message})`);
+        }
+      }
+      const { dir, xmlPath, htmlPath, state } = Recorder.archive(positionals[1], { noLogs, fetchLogs });
       const { passed, failed } = tally(state.steps);
       if (asJson) {
-        json({ archived: dir, report: htmlPath, junit: xmlPath, steps: state.steps.length, passed, failed });
+        json({
+          archived: dir,
+          report: htmlPath,
+          junit: xmlPath,
+          steps: state.steps.length,
+          passed,
+          failed,
+          ...(state.logFile ? { logFile: state.logFile } : {}),
+        });
       } else {
         out(dir); // primary result: the archived run directory
         err(`archived '${state.name}': ${state.steps.length} step(s), ${passed} passed, ${failed} failed/error`);
         err(`  JUnit: ${xmlPath}`);
         err(`  HTML:  ${htmlPath}`);
+        if (state.logFile) err(`  Logs:  ${join(dir, state.logFile)}`);
       }
       // Exit non-zero when the run contained failures, so CI can gate on it.
       return failed > 0 ? 1 : 0;
@@ -1370,6 +1398,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       backend: {
         exec: (command, positionals, f) => executeOutcome(command, positionals, f, driver),
         getElements: () => driver.getElements(),
+        getLogs: (opts) => driver.getLogs(opts),
         install: (appPath) => driver.install(appPath),
         reset: (appId) => {
           assertSafeAppId(appId);
@@ -1389,8 +1418,10 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     url: server,
     authKey: flagStr(flags, 'auth-key') || process.env.VERIKUN_SERVER_AUTH_KEY || undefined,
     // Each remote step is spliced into the local active run so the archived report
-    // is identical to a local run's.
-    onStep: (step, artifacts) => Recorder.appendForeignStep(step, artifacts, runCtx),
+    // is identical to a local run's. logStart travels from the server's device clock
+    // so archive-time / vk log scoping works without a local driver.
+    onStep: (step, artifacts, logStart) =>
+      Recorder.appendForeignStep(step, artifacts, { ...runCtx, logStart }),
   };
   const health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
   runCtx = { platform: health.platform, device: health.serial };
@@ -1413,6 +1444,26 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     device: health.serial,
     remote: { url: server, version: health.version },
   };
+}
+
+/**
+ * Best-effort archive-time device-log capture via an ExecBackend (local driver or
+ * remote `/v1/logs`). Writes `artifacts/logcat.txt` onto the active run so a later
+ * `Recorder.archive()` finds `logFile` already set. Never throws — a gone device
+ * must not prevent sealing the report.
+ */
+async function prefetchArchiveLogs(backend: ExecBackend, noLogs = false): Promise<void> {
+  const state = Recorder.status();
+  if (!state || state.logFile) return;
+  const hasFailures = state.steps.some((s) => s.status !== 'passed');
+  if (!wantsArchiveLogs(hasFailures, noLogs)) return;
+  if (!backend.getLogs) return;
+  try {
+    const text = await backend.getLogs(archiveLogWindow(state));
+    Recorder.attachArchiveLogs(text);
+  } catch (e) {
+    err(`[verikun] could not capture archive device logs (${(e as Error).message})`);
+  }
 }
 
 /**
@@ -1465,6 +1516,7 @@ async function runAiTest(
   if (existing && existing.steps.length > 0) {
     // Seal the pre-existing run into the archive instead of letting start(force=true)
     // discard it — a manual in-progress run should never be silently lost.
+    await prefetchArchiveLogs(backend);
     const sealed = Recorder.archive();
     err(`[ai] archived the active run ('${existing.name}', ${existing.steps.length} step(s)) → ${sealed.dir}`);
   }
@@ -1495,6 +1547,7 @@ async function runAiTest(
     // to roll over. Then let the error map to an exit code as usual.
     Recorder.annotateRun({ ai: { ok: false, cost: cost.summaryLine(), modelRepairs: 0, improvements: [] } });
     try {
+      await prefetchArchiveLogs(backend);
       Recorder.archive();
     } catch (sealErr) {
       // Best-effort seal in an error path; surface a failure (the run state may itself be
@@ -1520,6 +1573,7 @@ async function runAiTest(
   Recorder.annotateRun({
     ai: { ok: result.ok, cost: costLine, modelRepairs: result.modelRepairs, improvements: result.improvements },
   });
+  await prefetchArchiveLogs(backend);
   const { dir, xmlPath, htmlPath, state } = Recorder.archive();
 
   const status = result.ok
@@ -1813,18 +1867,28 @@ export async function executeForServer(
   flags: Flags,
   driver: Driver,
   platform: Platform,
-): Promise<{ code: number; error?: Error; step?: RunStep; artifacts?: Record<string, Buffer> }> {
+): Promise<{ code: number; error?: Error; step?: RunStep; artifacts?: Record<string, Buffer>; logStart?: string }> {
   let serial: string | undefined;
   try {
     serial = driver.resolvedSerial();
   } catch {
     /* surfaced by the command handler below */
   }
+  // Sample the device clock up front so the caller's run can set logStart (the
+  // ephemeral recorder never persists RunState). Best-effort — empty/unavailable
+  // just means archive / vk log fall back to last-N.
+  let logStart: string | undefined;
+  try {
+    const t = driver.deviceTime();
+    if (t) logStart = t;
+  } catch {
+    /* device clock unavailable */
+  }
   const recorder = Recorder.beginEphemeralStep(command, positionals, flags, platform, serial);
   const ctx: Ctx = { driver, platform, device: serial, positionals, flags, record: recorder };
   const outcome = await runRecorded(command, ctx, recorder, driver);
   const { step, artifacts } = recorder.takeEphemeral();
-  return { ...outcome, step, artifacts };
+  return { ...outcome, step, artifacts, ...(logStart ? { logStart } : {}) };
 }
 
 /**
@@ -1997,7 +2061,10 @@ ENVIRONMENT
 TEST RUNS (actions are recorded; a run auto-starts on first action)
   run start [name] [--force]          Begin a named run (else one starts implicitly)
   run status                          Show the active run, its device/session, and steps
-  run archive [name]                  Write JUnit + HTML report, move to ./.verikun/runs/<id>/
+  run archive [name] [--no-logs]      Write JUnit + HTML report, move to ./.verikun/runs/<id>/
+                                      Captures artifacts/logcat.txt by default (session-scoped);
+                                      --no-logs / VERIKUN_NO_LOGS skips on green runs (failures
+                                      still capture). Capture is best-effort and never blocks archive.
   run clear                           Discard the active run with no report
   An implicit run auto-closes (archives) and rolls over on a device change, a
   VERIKUN_SESSION change, or VERIKUN_RUN_IDLE_MIN minutes idle (default 30; 0 off).

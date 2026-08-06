@@ -20,6 +20,7 @@ import {
   ExecResponse,
   ElementsResponse,
   HealthResponse,
+  LogsResponse,
   RpcErrorBody,
   rebuildError,
 } from '../rpc';
@@ -28,8 +29,9 @@ export interface RemoteOpts {
   /** Server base URL, e.g. http://127.0.0.1:8391 (a trailing '/' is tolerated). */
   url: string;
   authKey?: string;
-  /** Receives each exec'd step + its artifact buffers for splicing into the local run. */
-  onStep?: (step: RunStep, artifacts: Record<string, Buffer>) => void;
+  /** Receives each exec'd step + its artifact buffers for splicing into the local run.
+   *  `logStart` is the server's device-clock marker (optional on older servers). */
+  onStep?: (step: RunStep, artifacts: Record<string, Buffer>, logStart?: string) => void;
 }
 
 // Per-call ceilings. exec is generous: a single leaf may legitimately block for its
@@ -130,7 +132,7 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): E
 
   const execRaw = async (req: ExecRequest, record: boolean): Promise<{ code: number; error?: Error }> => {
     const res = await t.postJson<ExecResponse>('/v1/exec', req, EXEC_TIMEOUT_MS);
-    if (record && res.step) opts.onStep?.(res.step, decodeArtifacts(res.artifacts));
+    if (record && res.step) opts.onStep?.(res.step, decodeArtifacts(res.artifacts), res.logStart);
     return { code: res.code, error: res.error ? rebuildError(res.error) : undefined };
   };
 
@@ -140,6 +142,11 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): E
     async getElements(): Promise<Element[]> {
       const res = await t.postJson<ElementsResponse>('/v1/elements', {}, ELEMENTS_TIMEOUT_MS);
       return res.elements;
+    },
+
+    async getLogs(logOpts = {}): Promise<string> {
+      const res = await t.postJson<LogsResponse>('/v1/logs', logOpts, ELEMENTS_TIMEOUT_MS);
+      return res.logs ?? '';
     },
 
     async install(appPath: string): Promise<void> {
