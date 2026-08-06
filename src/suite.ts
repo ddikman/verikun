@@ -172,9 +172,23 @@ export function mergeSuiteAttempts(attempts: SuiteTestResult[]): SuiteTestResult
   };
 }
 
-/** Budget aborts won't heal on retry; confirmed env aborts stop the suite instead. */
+// What --retries will and won't spend an attempt on. The bias is deliberate and
+// asymmetric: a retry costs one test, while giving up costs the whole suite plus a
+// human rerunning it. So the rule is *retry unless a rerun provably cannot change the
+// outcome* — the two predicates below are the only "provably" cases, everything else
+// (flaky selector, wedged app, a wobbling network to `vk server`) earns another go.
+
+/** Budget aborts won't heal on retry: each attempt gets its own cost ceiling, so a
+ *  rerun just re-aborts at the same place having spent the money twice. */
 function isRetryable(r: AiRunResult): boolean {
   return !r.ok && !r.abortedForBudget;
+}
+
+/** A thrown USAGE error (exit 2) is the one throw a rerun cannot change — an unreadable
+ *  test file, a payload the server refuses, a flag it doesn't understand. Everything
+ *  else, including every environment error, is retried while attempts remain. */
+function isRetryableThrow(e: unknown): boolean {
+  return !(e instanceof CliError && e.exitCode === 2);
 }
 
 function parseRetries(flags: Flags): number {
@@ -229,28 +243,42 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
     }
   }
 
+  /** A confirmed env break with attempts left: say so, pause, and let the loop retry.
+   *  The pause matters — the failures this rides out (a server restart, a wifi drop, a
+   *  USB re-enumeration) clear in seconds, and retrying into the same dead socket
+   *  immediately would burn every attempt inside the outage. */
+  async function noteEnvRetry(file: string, attempt: number, reason: string): Promise<void> {
+    const warn = `${file}: environment error on attempt ${attempt + 1} (${reason}) — retried`;
+    warnings.push(warn);
+    err(`[suite] WARN ${warn}`);
+    await sleep((deps.probeRetryMs ?? PROBE_RETRY_MS) * (attempt + 1));
+  }
+
   for (let i = 0; i < files.length && !aborted; i++) {
     const file = files[i];
     err(`[suite] ── (${i + 1}/${files.length}) ${file} ──`);
-    const resetBreak = await resetApp('');
-    if (resetBreak) {
-      // This test never ran, so it gets no row — notRun starts at the CURRENT file.
-      aborted = { reason: `reset failed: ${resetBreak}`, notRun: files.slice(i) };
-      break;
-    }
 
     const attemptRows: SuiteTestResult[] = [];
 
     for (let attempt = 0; attempt <= retries; attempt++) {
-      if (attempt > 0) {
-        err(`[suite] retry ${attempt}/${retries} for ${file}`);
-        // Re-isolate before a retry the same way we do between tests.
-        const retryResetBreak = await resetApp(' (retry)');
-        if (retryResetBreak) {
-          // Confirmed env break mid-retry: keep what we have so far as the row, then abort.
-          aborted = { reason: `reset failed: ${retryResetBreak}`, notRun: files.slice(i + 1) };
-          break;
+      // The last attempt is where a retryable failure becomes the verdict: a confirmed
+      // env break aborts the suite, anything else stands as this test's failed row.
+      const lastAttempt = attempt === retries;
+      if (attempt > 0) err(`[suite] retry ${attempt}/${retries} for ${file}`);
+
+      // Re-isolate before EVERY attempt — between tests and between retries alike.
+      const resetBreak = await resetApp(attempt > 0 ? ' (retry)' : '');
+      if (resetBreak) {
+        if (!lastAttempt) {
+          await noteEnvRetry(file, attempt, `reset failed: ${resetBreak}`);
+          continue;
         }
+        // With no attempt row this test never ran, so notRun starts at the CURRENT file.
+        aborted = {
+          reason: `reset failed: ${resetBreak}`,
+          notRun: files.slice(attemptRows.length ? i + 1 : i),
+        };
+        break;
       }
 
       const t0 = Date.now();
@@ -260,17 +288,22 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
         if (r.abortedForEnv) {
           const broken = await stillBroken(deps);
           if (broken) {
-            // Confirmed env break — do not retry; abort after this row.
+            if (!lastAttempt) {
+              // Even a CONFIRMED break is worth an attempt: the probe window is a couple
+              // of seconds, which a server restart outlives — and aborting costs the run.
+              await noteEnvRetry(file, attempt, broken);
+              continue;
+            }
             aborted = { reason: broken, notRun: files.slice(i + 1) };
             break;
           }
           // Transient env blip: retryable like any other failure.
         }
-        if (r.ok || !isRetryable(r) || attempt === retries) break;
+        if (r.ok || !isRetryable(r) || lastAttempt) break;
       } catch (e) {
         // A test that THREW (device gone, server unreachable, bad file) still becomes a
         // failed row — one broken test must not vaporize the suite report for the tests
-        // that already ran. But if it threw because the environment is gone, stop.
+        // that already ran. Out of attempts, a confirmed env break stops the suite.
         const msg = e instanceof Error ? e.message : String(e);
         err(`[suite] ${file} errored: ${msg}`);
         attemptRows.push({
@@ -287,18 +320,18 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
           failure: msg.split('\n')[0],
         });
         const broken = isEnvError(e) ? await stillBroken(deps) : undefined;
-        if (broken) {
-          aborted = { reason: broken, notRun: files.slice(i + 1) };
+        if (lastAttempt) {
+          if (broken) aborted = { reason: broken, notRun: files.slice(i + 1) };
           break;
         }
-        if (attempt === retries) break;
-        // Non-env throw (or transient env): retry when retries remain.
+        if (!isRetryableThrow(e)) break;
+        if (broken) await noteEnvRetry(file, attempt, broken);
       }
     }
 
     if (attemptRows.length === 0) {
-      // Reset aborted before the first attempt — no row for this file (handled above).
-      // Mid-retry reset abort with zero rows shouldn't happen (attempt > 0 implies a prior row).
+      // Every attempt was blocked by a failing reset, so the test never ran and gets no
+      // row — `aborted.notRun` (set above) already names it. Nothing to merge.
       break;
     }
 

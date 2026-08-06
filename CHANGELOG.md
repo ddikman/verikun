@@ -13,8 +13,17 @@ All notable changes to this project are documented here. The format is based on
   transient flake can recover the suite instead of reding CI. A later pass exits
   `0` and surfaces a warning (`flaky` + prior `attempts` on the test row, suite
   `warnings` in the manifest/HTML); failed-attempt archives stay linked. Default
-  `0` keeps today's gate. Confirmed environment aborts and budget aborts are not
-  retried.
+  `0` keeps today's gate.
+
+  The bias is deliberately toward retrying: an attempt costs one test, while giving
+  up costs the whole suite plus a human rerunning it. So an **environment break is
+  retried too** — a `vk server` connection dropping or a device re-enumerating
+  outlives the two-probe health window, and with attempts left the suite waits
+  (short backoff, one `warnings` entry per blip) rather than aborting. Only two
+  failures are never retried, because a rerun provably cannot change them: a **budget
+  abort** (each attempt gets its own ceiling) and a **usage error** (exit `2` — an
+  unreadable test file, a payload the server refuses). Once the attempts are gone, a
+  still-broken environment aborts with exit `3` exactly as before.
 
 [#43]: https://github.com/ddikman/verikun/issues/43
 

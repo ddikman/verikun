@@ -331,13 +331,16 @@ vk suite tests/ --app com.example.app        # reset app data between tests
   test's report); **exit 1 if any test failed** — so it gates CI directly.
 - **`--retries N`** (default `0`) re-runs a failed test up to N times. A later
   pass recovers the suite (exit `0`) and surfaces a warning — failed-attempt
-  archives stay linked via `attempts` / suite `warnings`. Confirmed environment
-  aborts and budget aborts are not retried.
+  archives stay linked via `attempts` / suite `warnings`. An **environment break is
+  retried too** (a dropped `--server` connection, a device re-enumerating), with a
+  short backoff and a warning per blip; only a **budget abort** and a **usage error**
+  (exit `2`) are never retried, since a rerun cannot change either.
 - **A broken *environment* does stop it: exit `3`.** If a test dies from an environment
-  error the toolchain is re-probed; only if it's still broken does the suite abort (so a
-  one-off flaky dump doesn't kill the run). The tests that never ran are listed in
-  `index.json`'s `aborted.notRun` and in the HTML banner — they are **not** counted as
-  failures. So `3` = fix the machine and rerun; `1` = a real regression to investigate.
+  error the toolchain is re-probed; only if it's still broken — and no retries remain —
+  does the suite abort (so a one-off flaky dump doesn't kill the run). The tests that
+  never ran are listed in `index.json`'s `aborted.notRun` and in the HTML banner — they
+  are **not** counted as failures. So `3` = fix the machine and rerun; `1` = a real
+  regression to investigate.
 
 ## Drive a remote device (--server)
 

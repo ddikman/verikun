@@ -292,14 +292,24 @@ vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote devi
   passes, the suite exits `0` and the flake is a **warning**, not a hard failure.
   Failed attempt archives stay linked from the suite overview (`attempts` on the
   test row + a `warnings` list on the manifest), so flakiness remains visible.
-  Cost and duration sum across attempts. Confirmed environment aborts and budget
-  aborts are not retried.
-- **But a broken *environment* does stop it.** If a test dies from an environment
-  error (exit 3 — tool gone, device unplugged, server unreachable), the toolchain is
-  re-probed; only if it is *still* broken does the suite abort. That re-probe matters:
-  a transient `uiautomator` dump failure also exits 3, and shouldn't vaporize a
-  20-test run. Continuing on a genuinely dead box just produces one identical red row
-  per remaining test — noise that reads exactly like a mass regression.
+  Cost and duration sum across attempts.
+- **What earns a retry:** anything that might come out differently — a flaky
+  selector, a wedged app, and **a broken environment**, including a `vk server`
+  connection dropping mid-suite. The bias is intentional: an attempt costs one test,
+  giving up costs the whole suite plus a human rerunning it. Environment retries wait
+  a little longer each time (an outage that survives the health probe usually needs
+  seconds, not milliseconds) and each one lands in `warnings`, so riding out a wobble
+  is never silent. Exactly two failures are never retried, because a rerun cannot
+  change them: a **budget abort** (each attempt gets its own ceiling, so it would just
+  re-abort having spent twice) and a **usage error** (exit `2` — an unreadable test
+  file, a payload the server refuses).
+- **But a broken *environment* does stop it, once the attempts are gone.** If a test
+  dies from an environment error (exit 3 — tool gone, device unplugged, server
+  unreachable), the toolchain is re-probed; only if it is *still* broken **and** no
+  retries remain does the suite abort. That re-probe matters: a transient
+  `uiautomator` dump failure also exits 3, and shouldn't vaporize a 20-test run.
+  Continuing on a genuinely dead box just produces one identical red row per remaining
+  test — noise that reads exactly like a mass regression.
 - **The suite writes an overview** to `./.verikun/suites/<id>/`:
   - **`index.json`** — a stable, `schemaVersion`ed manifest: per-test pass/fail,
     steps, model repairs, cost, duration, and the run id, plus suite totals. This

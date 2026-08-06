@@ -6,7 +6,7 @@ import { basename, join } from 'node:path';
 import { cmdSuite, sortTestFiles, listTestFiles, toSuiteResult, mergeSuiteAttempts, AiRunResult, SuiteDeps } from '../src/suite';
 import { RunState, RunStep } from '../src/run';
 import { SuiteRun } from '../src/report';
-import { envError } from '../src/errors';
+import { envError, usageError } from '../src/errors';
 
 // --- sortTestFiles ----------------------------------------------------------
 
@@ -492,17 +492,61 @@ test('cmdSuite: --retries exhausted still exits 1 and keeps all attempt evidence
   });
 });
 
-test('cmdSuite: --retries does not retry a confirmed env abort', async () => {
+test('cmdSuite: --retries spends its attempts on a confirmed env break before aborting', async () => {
+  // The probe window is a couple of seconds — shorter than a server restart or a wifi
+  // drop. With attempts left, riding it out costs one test; giving up costs the suite.
   await inTempCwd(async (root) => {
     const dir = suiteDir(root, 3);
     const { deps, ran } = harness({
       files: 3,
-      onTest: (n) => (n === 1 ? envFailedRun() : aiResult()),
+      onTest: () => (ran[ran.length - 1] === '01-t.md' ? envFailedRun() : aiResult()),
       preflight: broken,
     });
+    const code = await cmdSuite(dir, { retries: '2' }, deps);
+    assert.equal(code, 3, 'still an environment abort, just a later one');
+    assert.deepEqual(ran, ['01-t.md', '01-t.md', '01-t.md'], 'initial + 2 retries, then abort');
+  });
+});
+
+test('cmdSuite: --retries rides out an env break that clears — the suite carries on', async () => {
+  // The `--server` case: the network wobbles for longer than the probe window, then
+  // comes back. Aborting there would mean rerunning every test that already passed.
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 2);
+    // Both probes fail (so the break is CONFIRMED, not a blip), then the server is back
+    // by the time the retry runs.
+    let brokenProbes = 2;
+    const { deps, ran } = harness({
+      files: 2,
+      onTest: (n) => (n === 1 ? envFailedRun() : aiResult()),
+      preflight: () => {
+        if (brokenProbes-- > 0) throw envError('cannot reach verikun server at http://host:4400 (fetch failed)');
+      },
+    });
+    const outDir = join(root, '.verikun', 'suites');
+    const code = await cmdSuite(dir, { retries: '1' }, deps);
+    assert.equal(code, 0, 'the outage never became a suite failure');
+    assert.deepEqual(ran, ['01-t.md', '01-t.md', '02-t.md']);
+    const suite = readManifest(join(outDir, readdirSync(outDir)[0]));
+    assert.ok(
+      suite.warnings?.some((w) => /environment error on attempt 1/.test(w) && /retried/.test(w)),
+      'the outage is visible as a warning, not silently swallowed',
+    );
+  });
+});
+
+test('cmdSuite: --retries does not retry a usage error — a rerun cannot change it', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 2);
+    const { deps, ran, probeCount } = harness({
+      files: 2,
+      onTest: () => (ran[ran.length - 1] === '01-t.md' ? usageError("suite: cannot read '01-t.md'") : aiResult()),
+      preflight: broken, // never consulted: a usage error is not an environment question
+    });
     const code = await cmdSuite(dir, { retries: '3' }, deps);
-    assert.equal(code, 3);
-    assert.equal(ran.length, 1, 'no retries on a confirmed env break');
+    assert.equal(code, 1, 'a failed row, not an abort');
+    assert.deepEqual(ran, ['01-t.md', '02-t.md'], 'the unreadable file is attempted once');
+    assert.equal(probeCount(), 0);
   });
 });
 
