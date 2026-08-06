@@ -268,12 +268,9 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
         }
         if (r.ok || !isRetryable(r) || attempt === retries) break;
       } catch (e) {
-        // A test that THREW (device gone, server unreachable, bad file, compile/setup
-        // problem) still becomes a failed row — one broken test must not vaporize the
-        // suite report for the tests that already ran. But a thrown error is not the
-        // kind of in-band test failure `--retries` is meant to recover: rerunning a
-        // setup/usage/env exception is just repeated damage. Only a returned failed
-        // AiRunResult is considered retryable above.
+        // A test that THREW (device gone, server unreachable, bad file) still becomes a
+        // failed row — one broken test must not vaporize the suite report for the tests
+        // that already ran. But if it threw because the environment is gone, stop.
         const msg = e instanceof Error ? e.message : String(e);
         err(`[suite] ${file} errored: ${msg}`);
         attemptRows.push({
@@ -294,9 +291,8 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
           aborted = { reason: broken, notRun: files.slice(i + 1) };
           break;
         }
-        // Non-env throws and transient env throws both become one failed attempt, then
-        // the suite carries on to the next file without retrying this one.
-        break;
+        if (attempt === retries) break;
+        // Non-env throw (or transient env): retry when retries remain.
       }
     }
 
