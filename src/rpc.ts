@@ -51,6 +51,8 @@ export interface LogsRequest {
   lines?: number;
   since?: string;
   appId?: string;
+  /** When true with appId, drivers must not fall back to a system-wide dump. */
+  scopedOnly?: boolean;
 }
 
 export interface LogsResponse {
@@ -124,7 +126,7 @@ export interface ExecBackend {
   getElements(): Element[] | Promise<Element[]>;
   /** One-shot device-log snapshot (archive-time capture / diagnostics). Optional:
    *  older remotes without `/v1/logs` simply omit it and archive proceeds without. */
-  getLogs?(opts?: { lines?: number; since?: string; appId?: string }): string | Promise<string>;
+  getLogs?(opts?: { lines?: number; since?: string; appId?: string; scopedOnly?: boolean }): string | Promise<string>;
   /** Install an app build (`vk install`). */
   install(appPath: string): Promise<void> | void;
   /** Reset app state between suite tests (clear on Android; honest degrade to stop on iOS). */

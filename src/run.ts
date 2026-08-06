@@ -73,9 +73,13 @@ export interface RunState {
   /** Device-clock marker (logcat `MM-DD HH:MM:SS.mmm`) captured at the session's
    *  first step, so `vk log` can exclude logs from before the run started. */
   logStart?: string;
-  /** Relative path to the device-log artifact captured at archive time
-   *  (`artifacts/logcat.txt`). Prefer this over inlining logs into run.json. */
+  /** App under test (package / bundle id), set from launch/open/stop/clear. Used
+   *  to scope the archive-time app log accordion without a Flutter-specific filter. */
+  appId?: string;
+  /** Relative path to the full device-log artifact (`artifacts/logcat.txt`). */
   logFile?: string;
+  /** Relative path to the app-scoped log artifact (`artifacts/logcat-app.txt`). */
+  appLogFile?: string;
   /** Set by `vk ai`: the token/cost line, repair count, and the suggested test
    *  improvements (workarounds the model applied that you can fold back into the
    *  source to stabilize the test and cut future tokens). */
@@ -119,13 +123,25 @@ const LOG_FILE_CAP = 512_000;
 const ARCHIVE_LOG_LINES = 5000;
 
 export const RUN_LOG_ARTIFACT = 'artifacts/logcat.txt';
+export const RUN_APP_LOG_ARTIFACT = 'artifacts/logcat-app.txt';
+
+const APP_LIFECYCLE = new Set(['launch', 'open', 'stop', 'clear']);
+
+export interface LogFetchOpts {
+  since?: string;
+  lines?: number;
+  appId?: string;
+  /** When set with appId, drivers must not fall back to a system-wide dump. */
+  scopedOnly?: boolean;
+}
 
 export interface ArchiveLogOpts {
   /** `vk run archive --no-logs` — skip on green runs (failures still capture). */
   noLogs?: boolean;
-  /** Sync fetcher (local driver). Called only when capture is wanted and no
-   *  logFile is attached yet. Remote callers pre-attach via attachArchiveLogs. */
-  fetchLogs?: (window: { since?: string; lines?: number }) => string;
+  /** Sync fetcher (local driver). Called for the full device dump and, when an
+   *  appId is known, again with `{ appId, scopedOnly: true }` for the accordion.
+   *  Remote callers pre-attach via attachArchiveLogs. */
+  fetchLogs?: (opts: LogFetchOpts) => string;
 }
 
 /** Whether archive-time device-log capture should run. Default on; `--no-logs` /
@@ -143,6 +159,21 @@ export function wantsArchiveLogs(hasFailures: boolean, noLogsFlag = false): bool
 export function archiveLogWindow(state: Pick<RunState, 'logStart'>): { since?: string; lines?: number } {
   if (state.logStart) return { since: state.logStart };
   return { lines: ARCHIVE_LOG_LINES };
+}
+
+/** Package / bundle id the run exercised, if we can tell. Prefer an explicit
+ *  `state.appId` (set on launch/open/stop/clear); otherwise recover from those
+ *  steps' names. Exported for tests. */
+export function inferRunAppId(state: Pick<RunState, 'appId' | 'steps'>): string | undefined {
+  if (state.appId && /^[A-Za-z0-9._-]+$/.test(state.appId)) return state.appId;
+  for (let i = state.steps.length - 1; i >= 0; i--) {
+    const s = state.steps[i];
+    if (!APP_LIFECYCLE.has(s.command)) continue;
+    // stepName is `launch com.foo` / `clear com.foo` (no flags in the name).
+    const m = /^(?:launch|open|stop|clear)\s+([A-Za-z0-9._-]+)\s*$/.exec(s.name);
+    if (m) return m[1];
+  }
+  return undefined;
 }
 
 function truncateLogFile(text: string): string {
@@ -333,7 +364,7 @@ export class Recorder {
           // the old run's archive (vk run archive binds a driver to state.device).
           const fetchLogs =
             driver && rolloverLogsSameDevice(state.device, serial)
-              ? (window: { since?: string; lines?: number }) => driver.getLogs(window)
+              ? (opts: LogFetchOpts) => driver.getLogs(opts)
               : undefined;
           const dest = Recorder.seal(state, dir, { fetchLogs });
           err(`[verikun] previous run '${state.name}' (${state.steps.length} step(s)) auto-closed → ${dest} (${reason}); starting a fresh run`);
@@ -364,6 +395,12 @@ export class Recorder {
       // Backfill identity once it becomes known (e.g. a run started without a device).
       if (!state.device && (serial || deviceReq)) state.device = serial || deviceReq;
       if (!state.session && session) state.session = session;
+    }
+
+    // Remember the app under test from lifecycle commands so archive can scope
+    // the accordion log without requiring a separate flag.
+    if (APP_LIFECYCLE.has(command) && positionals[0] && /^[A-Za-z0-9._-]+$/.test(positionals[0])) {
+      state.appId = positionals[0];
     }
 
     // Anchor the log window at the session's first step (covers both implicit
@@ -549,50 +586,76 @@ export class Recorder {
     state.updatedAt = nowIso();
     saveState(dir, state);
     writeFileSync(join(dir, 'report.xml'), toJUnitXml(state));
-    // Embed the archive log in the HTML accordion (kept out of run.json). Missing
-    // file is fine — capture is best-effort / opt-out.
-    let deviceLog: string | undefined;
-    if (state.logFile) {
+    // Accordion embeds the *app*-scoped dump (readable); the full device dump stays
+    // a file link in the meta row. Missing file is fine — capture is best-effort.
+    let appLog: string | undefined;
+    if (state.appLogFile) {
       try {
-        deviceLog = readFileSync(join(dir, state.logFile), 'utf8');
+        appLog = readFileSync(join(dir, state.appLogFile), 'utf8');
       } catch {
-        /* report still writes; the file link in meta may 404 */
+        /* report still writes */
       }
     }
-    writeFileSync(join(dir, 'report.html'), toHtml(state, { deviceLog }));
+    writeFileSync(join(dir, 'report.html'), toHtml(state, { appLog }));
     mkdirSync(archiveBase(), { recursive: true });
     const dest = uniqueDir(join(archiveBase(), state.id));
     renameSync(dir, dest);
     return dest;
   }
 
-  /** Write (or overwrite) the archive-time log artifact on the ACTIVE run without
-   *  sealing. Used by remote (`--server`) callers that fetch logs asynchronously
-   *  before `archive()`. Truncates to LOG_FILE_CAP, tail-kept. */
-  static attachArchiveLogs(text: string): void {
+  /** Write archive-time log artifacts on the ACTIVE run without sealing. Used by
+   *  remote (`--server`) callers that fetch asynchronously before `archive()`.
+   *  Pass `full` / `app` only for the pieces you have — omitted sides are left alone. */
+  static attachArchiveLogs(full?: string, app?: string): void {
     const dir = activeDir();
     const state = loadState(dir);
     if (!state) return;
-    Recorder.writeArchiveLog(state, dir, text);
+    if (full !== undefined) {
+      Recorder.writeArchiveLog(state, dir, full, RUN_LOG_ARTIFACT, 'logFile');
+    }
+    if (app !== undefined && app !== '') {
+      if (!state.appId) state.appId = inferRunAppId(state);
+      Recorder.writeArchiveLog(state, dir, app, RUN_APP_LOG_ARTIFACT, 'appLogFile');
+    }
     saveState(dir, state);
   }
 
-  private static writeArchiveLog(state: RunState, dir: string, text: string): void {
+  private static writeArchiveLog(
+    state: RunState,
+    dir: string,
+    text: string,
+    rel: string,
+    field: 'logFile' | 'appLogFile',
+  ): void {
     const body = truncateLogFile(text);
     mkdirSync(join(dir, 'artifacts'), { recursive: true });
-    writeFileSync(join(dir, RUN_LOG_ARTIFACT), body);
-    state.logFile = RUN_LOG_ARTIFACT;
+    writeFileSync(join(dir, rel), body);
+    state[field] = rel;
   }
 
   private static maybeCaptureArchiveLogs(state: RunState, dir: string, opts: ArchiveLogOpts): void {
-    if (state.logFile) return; // already attached (e.g. remote pre-fetch)
     if (!wantsArchiveLogs(runHasFailures(state), opts.noLogs)) return;
     if (!opts.fetchLogs) return;
-    try {
-      const text = opts.fetchLogs(archiveLogWindow(state));
-      if (text !== undefined && text !== null) Recorder.writeArchiveLog(state, dir, text);
-    } catch (e) {
-      err(`[verikun] could not capture archive device logs (${(e as Error).message})`);
+    const window = archiveLogWindow(state);
+    if (!state.logFile) {
+      try {
+        const text = opts.fetchLogs(window);
+        if (text !== undefined && text !== null) {
+          Recorder.writeArchiveLog(state, dir, text, RUN_LOG_ARTIFACT, 'logFile');
+        }
+      } catch (e) {
+        err(`[verikun] could not capture archive device logs (${(e as Error).message})`);
+      }
+    }
+    const appId = inferRunAppId(state);
+    if (appId) state.appId = appId;
+    if (appId && !state.appLogFile) {
+      try {
+        const text = opts.fetchLogs({ ...window, appId, scopedOnly: true });
+        if (text) Recorder.writeArchiveLog(state, dir, text, RUN_APP_LOG_ARTIFACT, 'appLogFile');
+      } catch (e) {
+        err(`[verikun] could not capture archive app logs (${(e as Error).message})`);
+      }
     }
   }
 
@@ -656,6 +719,13 @@ export class Recorder {
     // Anchor the log window from the server's device clock (beginEphemeralStep
     // never persists state, so the marker has to travel on the wire).
     if (!state.logStart && ctx.logStart) state.logStart = ctx.logStart;
+
+    // Mirror local beginStep: remember the app from lifecycle steps so archive
+    // can scope the accordion without a local launch having set state.appId.
+    if (APP_LIFECYCLE.has(step.command)) {
+      const m = /^(?:launch|open|stop|clear)\s+([A-Za-z0-9._-]+)\s*$/.exec(step.name);
+      if (m) state.appId = m[1];
+    }
 
     const index = state.steps.length;
     const spliced: RunStep = { ...step, index };

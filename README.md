@@ -142,11 +142,11 @@ skips the archive dump on green runs (failures still capture).
   for failed assertions, `<error>` for environment errors, and the resolved
   identifier in `<system-out>`. Drops straight into CI.
 - **`report.html`** — a self-contained report: every step, the identifiers used,
-  any screenshots taken, the screenshot + hierarchy of any failed page, the
-  archive-time device log in a bottom accordion, and any per-step logs from
-  `vk log`.
-- **`artifacts/logcat.txt`** — bounded device log for the run window (default);
-  also embedded in `report.html`.
+  any screenshots taken, the screenshot + hierarchy of any failed page, a link to
+  the full device log, an app-scoped log accordion when the run launched an app,
+  and any per-step logs from `vk log`.
+- **`artifacts/logcat.txt`** — full device log for the run window (default).
+- **`artifacts/logcat-app.txt`** — app-scoped log (when a package/bundle was launched).
 - **`run.json`** — the raw recording.
 
 `vk run archive` exits non-zero when the run contained failures, so the same

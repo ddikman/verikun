@@ -138,25 +138,29 @@ test('toHtml: archive-time logFile is linked from the run meta', () => {
   assert.ok(html.includes('device log'));
 });
 
-test('toHtml: archive-time deviceLog renders in a bottom accordion', () => {
+test('toHtml: app-scoped log renders in a bottom accordion (not the full device dump)', () => {
   const html = toHtml(
-    { ...SAMPLE, logFile: 'artifacts/logcat.txt' },
-    { deviceLog: '08-06 12:00:00.000 I ActivityManager: hello from logcat' },
+    { ...SAMPLE, logFile: 'artifacts/logcat.txt', appLogFile: 'artifacts/logcat-app.txt', appId: 'dev.verikun.testapp' },
+    { appLog: 'I flutter: Signed in' },
   );
   assert.ok(html.includes('class="run-log"'));
-  assert.ok(html.includes('<summary>Device log'));
-  assert.ok(html.includes('ActivityManager: hello from logcat'));
-  // Accordion sits after the steps list.
+  assert.ok(html.includes('<summary>App log for dev.verikun.testapp'));
+  assert.ok(html.includes('href="artifacts/logcat-app.txt"'));
+  assert.ok(html.includes('I flutter: Signed in'));
+  // Full device dump stays a meta link, not the accordion body.
+  assert.ok(html.includes('>device log</a>'));
   assert.ok(html.indexOf('</ol>') < html.indexOf('class="run-log"'));
 });
 
-test('toHtml: empty/absent deviceLog omits the accordion', () => {
+test('toHtml: empty/absent appLog omits the accordion', () => {
   assert.ok(!toHtml(SAMPLE).includes('class="run-log"'));
-  assert.ok(!toHtml(SAMPLE, { deviceLog: '' }).includes('class="run-log"'));
+  assert.ok(!toHtml(SAMPLE, { appLog: '' }).includes('class="run-log"'));
+  // Device file alone is not enough — accordion is app-scoped only.
+  assert.ok(!toHtml({ ...SAMPLE, logFile: 'artifacts/logcat.txt' }).includes('class="run-log"'));
 });
 
-test('toHtml: deviceLog body is HTML-escaped', () => {
-  const html = toHtml(SAMPLE, { deviceLog: '<script>alert(1)</script> & more' });
+test('toHtml: appLog body is HTML-escaped', () => {
+  const html = toHtml(SAMPLE, { appLog: '<script>alert(1)</script> & more' });
   assert.ok(html.includes('&lt;script&gt;'));
   assert.ok(!html.includes('<script>alert(1)</script>'));
   assert.ok(html.includes('&amp; more'));

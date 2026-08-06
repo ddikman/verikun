@@ -356,7 +356,7 @@ export class AdbDriver implements Driver {
     return focus ? focus[1] : '(unknown)';
   }
 
-  getLogs(opts: { lines?: number; appId?: string; since?: string } = {}): string {
+  getLogs(opts: { lines?: number; appId?: string; since?: string; scopedOnly?: boolean } = {}): string {
     // One-shot dump: -d (and -t) make logcat EXIT. NEVER add -f/follow — it would
     // stream forever and hang until the spawnSync timeout. The default buffers
     // (main,system,crash) already include crash traces, so no -b needed.
@@ -379,13 +379,32 @@ export class AdbDriver implements Driver {
       args.push('-t', String(n));
     }
     if (opts.appId) {
-      // Scope to the app's process when it's alive. If pidof is empty the app
-      // isn't running (likely crashed) — fall through to a system-wide dump so
-      // the FATAL EXCEPTION, still in the crash buffer, is not missed.
-      const pid = this.shell(['pidof', opts.appId]).trim().split(/\s+/)[0];
-      if (pid) args.push(`--pid=${pid}`);
+      // Prefer --uid: it survives process death/restart (crash traces stay under the
+      // package's uid). Fall back to --pid for a live process when uid isn't known.
+      // When neither works: vk log falls through to system-wide so a FATAL EXCEPTION
+      // isn't missed; archive accordion passes scopedOnly to keep the dump empty.
+      const uid = this.packageUid(opts.appId);
+      if (uid) {
+        args.push(`--uid=${uid}`);
+      } else {
+        const pid = this.shell(['pidof', opts.appId]).trim().split(/\s+/)[0];
+        if (pid) args.push(`--pid=${pid}`);
+        else if (opts.scopedOnly) return '';
+      }
     }
     return this.shell(args, 15000);
+  }
+
+  /** Android userId for an installed package, or '' if unknown. Used to scope
+   *  logcat across process restarts (unlike pidof, which only sees a live process). */
+  private packageUid(appId: string): string {
+    try {
+      const out = this.shell(['dumpsys', 'package', appId], 10000);
+      const m = /\buserId=(\d+)\b/.exec(out);
+      return m?.[1] ?? '';
+    } catch {
+      return '';
+    }
   }
 
   deviceTime(): string {

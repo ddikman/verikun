@@ -431,11 +431,11 @@ ${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}
 }
 
 /**
- * @param opts.deviceLog  archive-time logcat body to embed at the bottom (kept out
- *                        of RunState / run.json on purpose — pass the file contents
- *                        when writing report.html).
+ * @param opts.appLog  app-scoped logcat body for the bottom accordion (kept out
+ *                     of RunState / run.json — pass the file contents when writing
+ *                     report.html). The full device dump stays a meta-row file link.
  */
-export function toHtml(run: RunState, opts: { deviceLog?: string } = {}): string {
+export function toHtml(run: RunState, opts: { appLog?: string } = {}): string {
   const c = counts(run);
   const chips = [
     `<span class="chip pass">${c.passed} passed</span>`,
@@ -455,13 +455,17 @@ export function toHtml(run: RunState, opts: { deviceLog?: string } = {}): string
     run.logFile ? `<a href="${htmlEsc(run.logFile)}">device log</a>` : '',
   ].filter(Boolean);
 
-  // Bottom accordion: the full archive dump, so the HTML report is self-contained
-  // without scrolling past every step to find a mid-run `vk log` attachment.
-  const deviceLogPanel =
-    opts.deviceLog !== undefined && opts.deviceLog !== ''
+  // Bottom accordion: app-scoped dump only. The noisy full device log stays a
+  // download via the meta link — same shape on every framework (package/uid scope).
+  const appLabel = run.appId ? ` for ${htmlEsc(run.appId)}` : '';
+  const appFileLink = run.appLogFile
+    ? ` (<a href="${htmlEsc(run.appLogFile)}">${htmlEsc(run.appLogFile)}</a>)`
+    : '';
+  const appLogPanel =
+    opts.appLog !== undefined && opts.appLog !== ''
       ? `\n  <details class="run-log">
-    <summary>Device log${run.logFile ? ` (<a href="${htmlEsc(run.logFile)}">${htmlEsc(run.logFile)}</a>)` : ''}</summary>
-    <pre>${htmlEsc(opts.deviceLog)}</pre>
+    <summary>App log${appLabel}${appFileLink}</summary>
+    <pre>${htmlEsc(opts.appLog)}</pre>
   </details>`
       : '';
 
@@ -483,7 +487,7 @@ export function toHtml(run: RunState, opts: { deviceLog?: string } = {}): string
   ${run.ai ? aiPanelHtml(run.ai) : ''}
   <ol class="steps">
     ${run.steps.map(stepHtml).join('\n    ')}
-  </ol>${deviceLogPanel}
+  </ol>${appLogPanel}
 </div>
 </body>
 </html>

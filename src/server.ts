@@ -224,6 +224,7 @@ export function buildServer(config: ServerConfig): Server {
       ...(lines !== undefined ? { lines } : {}),
       ...(parsed.since ? { since: parsed.since } : {}),
       ...(appId ? { appId } : {}),
+      ...(parsed.scopedOnly ? { scopedOnly: true } : {}),
     });
     const payload: LogsResponse = { logs };
     sendJson(res, 200, payload);

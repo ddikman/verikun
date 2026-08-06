@@ -157,16 +157,18 @@ test('archive: fetchLogs writes artifacts/logcat.txt and sets logFile', () => {
   rec.finish(0);
   Recorder.appendForeignStep(rec.takeEphemeral().step, {});
 
-  const calls: { since?: string; lines?: number }[] = [];
+  const calls: { since?: string; lines?: number; appId?: string; scopedOnly?: boolean }[] = [];
   const sealed = Recorder.archive(undefined, {
-    fetchLogs: (window) => {
-      calls.push(window);
+    fetchLogs: (opts) => {
+      calls.push(opts);
       return '08-06 12:00:01.000 I ActivityManager: hello from logcat';
     },
   });
 
+  // No launch in the run → full dump only (no app-scoped second fetch).
   assert.equal(calls.length, 1);
   assert.equal(sealed.state.logFile, 'artifacts/logcat.txt');
+  assert.equal(sealed.state.appLogFile, undefined);
   const logPath = join(sealed.dir, 'artifacts', 'logcat.txt');
   assert.ok(existsSync(logPath));
   assert.ok(readFileSync(logPath, 'utf8').includes('ActivityManager'));
@@ -174,6 +176,37 @@ test('archive: fetchLogs writes artifacts/logcat.txt and sets logFile', () => {
   assert.equal(runJson.logFile, 'artifacts/logcat.txt');
   // The log body must NOT be inlined into run.json (that was the whole point).
   assert.ok(!JSON.stringify(runJson).includes('ActivityManager'));
+  // Accordion is app-scoped — absent without an appId.
+  assert.ok(!readFileSync(join(sealed.dir, 'report.html'), 'utf8').includes('class="run-log"'));
+});
+
+test('archive: with a launch step, also writes app-scoped logcat-app.txt into the accordion', () => {
+  Recorder.start('with-app', 'android', 'SERIAL1', true);
+  const launch = Recorder.beginEphemeralStep('launch', ['dev.verikun.testapp'], {}, 'android');
+  launch.finish(0);
+  Recorder.appendForeignStep(launch.takeEphemeral().step, {});
+
+  const calls: { appId?: string; scopedOnly?: boolean }[] = [];
+  const sealed = Recorder.archive(undefined, {
+    fetchLogs: (opts) => {
+      calls.push(opts);
+      if (opts.appId) return 'I flutter: app only';
+      return 'I ActivityManager: full device';
+    },
+  });
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls.some((c) => !c.appId));
+  assert.ok(calls.some((c) => c.appId === 'dev.verikun.testapp' && c.scopedOnly === true));
+  assert.equal(sealed.state.logFile, 'artifacts/logcat.txt');
+  assert.equal(sealed.state.appLogFile, 'artifacts/logcat-app.txt');
+  assert.equal(sealed.state.appId, 'dev.verikun.testapp');
+  assert.equal(readFileSync(join(sealed.dir, 'artifacts', 'logcat.txt'), 'utf8'), 'I ActivityManager: full device');
+  assert.equal(readFileSync(join(sealed.dir, 'artifacts', 'logcat-app.txt'), 'utf8'), 'I flutter: app only');
+  const html = readFileSync(join(sealed.dir, 'report.html'), 'utf8');
+  assert.ok(html.includes('App log for dev.verikun.testapp'));
+  assert.ok(html.includes('I flutter: app only'));
+  assert.ok(!html.includes('I ActivityManager: full device'), 'full dump stays out of the accordion');
 });
 
 test('archive: --no-logs skips a green run', () => {
@@ -224,7 +257,7 @@ test('archive: a throwing fetchLogs never derails sealing', () => {
   assert.equal(sealed.state.logFile, undefined);
 });
 
-test('attachArchiveLogs: pre-seeds logFile so archive skips fetchLogs', () => {
+test('attachArchiveLogs: pre-seeds logFile so archive skips the full fetch', () => {
   Recorder.start('pre', 'android', undefined, true);
   const rec = Recorder.beginEphemeralStep('tap', ['@x'], {}, 'android');
   rec.finish(0);
@@ -250,8 +283,8 @@ test('archive: scopes fetchLogs to logStart when present', () => {
 
   let seen: { since?: string; lines?: number } | undefined;
   Recorder.archive(undefined, {
-    fetchLogs: (window) => {
-      seen = window;
+    fetchLogs: (opts) => {
+      seen = opts;
       return 'ok';
     },
   });

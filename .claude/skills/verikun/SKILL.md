@@ -365,10 +365,12 @@ Every action is **recorded into a test run** — one auto-starts on your first
 action, no setup needed. Each command becomes a step with its timing, the
 selector + identifier it resolved through, and pass/fail. When a step fails, `vk`
 automatically captures a screenshot **and** the UI hierarchy of that page.
-`vk run archive` also captures a bounded device-log dump into
-`artifacts/logcat.txt` by default (session-scoped). You can still run
-`vk log <package>` mid-run to attach a snapshot to a step. Opt out on green
-runs with `--no-logs` / `VERIKUN_NO_LOGS` (failures still capture).
+`vk run archive` also captures a session-scoped device-log dump into
+`artifacts/logcat.txt` by default, plus an app-scoped dump into
+`artifacts/logcat-app.txt` (shown in the HTML accordion) when the run launched
+an app. You can still run `vk log <package>` mid-run to attach a snapshot to a
+step. Opt out on green runs with `--no-logs` / `VERIKUN_NO_LOGS` (failures still
+capture).
 
 - `vk run status` — the current run's steps and outcomes
 - `vk run archive [name] [--no-logs]` — finish the run: writes a **JUnit XML** + a

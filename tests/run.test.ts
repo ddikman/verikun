@@ -8,6 +8,7 @@ import {
   RunState,
   wantsArchiveLogs,
   archiveLogWindow,
+  inferRunAppId,
 } from '../src/run';
 
 // --- isRecordable ---------------------------------------------------------
@@ -140,4 +141,18 @@ test('archiveLogWindow: prefers session since, else a bounded trailing dump', ()
   const noMarker = archiveLogWindow({});
   assert.equal(noMarker.since, undefined);
   assert.ok(typeof noMarker.lines === 'number' && noMarker.lines! > 0);
+});
+test('inferRunAppId: prefers state.appId, else the latest lifecycle step', () => {
+  assert.equal(inferRunAppId({ appId: 'com.explicit', steps: [] }), 'com.explicit');
+  assert.equal(
+    inferRunAppId({
+      steps: [
+        { index: 0, command: 'launch', name: 'launch com.first', startedAt: '', durationMs: 0, status: 'passed', exitCode: 0 },
+        { index: 1, command: 'tap', name: 'tap @x', startedAt: '', durationMs: 0, status: 'passed', exitCode: 0 },
+        { index: 2, command: 'launch', name: 'launch com.second', startedAt: '', durationMs: 0, status: 'passed', exitCode: 0 },
+      ],
+    }),
+    'com.second',
+  );
+  assert.equal(inferRunAppId({ steps: [] }), undefined);
 });

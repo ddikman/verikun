@@ -34,7 +34,7 @@ import {
   visibleFraction,
 } from './ui/viewport';
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
-import { Recorder, isRecordable, RunStep, archiveLogWindow, wantsArchiveLogs } from './run';
+import { Recorder, isRecordable, RunStep, archiveLogWindow, wantsArchiveLogs, inferRunAppId } from './run';
 import { downscalePng } from './image';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
 import { lintPlan } from './agent/lint';
@@ -1022,7 +1022,7 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
       // Best-effort: archive-time log capture needs a device. Prefer the run's
       // bound serial/platform so a multi-device host hits the right one. A
       // missing/broken toolchain must not prevent sealing the report.
-      let fetchLogs: ((window: { since?: string; lines?: number }) => string) | undefined;
+      let fetchLogs: ((opts: { since?: string; lines?: number; appId?: string; scopedOnly?: boolean }) => string) | undefined;
       const active = Recorder.status();
       const hasFailures = !!active?.steps.some((s) => s.status !== 'passed');
       if (wantsArchiveLogs(hasFailures, noLogs)) {
@@ -1032,7 +1032,7 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
               ? (active.platform as Platform)
               : platform;
           const driver = getDriver(plat, active?.device || device);
-          fetchLogs = (window) => driver.getLogs(window);
+          fetchLogs = (opts) => driver.getLogs(opts);
         } catch (e) {
           err(`[verikun] archive log capture unavailable (${(e as Error).message})`);
         }
@@ -1055,6 +1055,7 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
         err(`  JUnit: ${xmlPath}`);
         err(`  HTML:  ${htmlPath}`);
         if (state.logFile) err(`  Logs:  ${join(dir, state.logFile)}`);
+        if (state.appLogFile) err(`  App:   ${join(dir, state.appLogFile)}`);
       }
       // Exit non-zero when the run contained failures, so CI can gate on it.
       return failed > 0 ? 1 : 0;
@@ -1454,13 +1455,27 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
  */
 async function prefetchArchiveLogs(backend: ExecBackend, noLogs = false): Promise<void> {
   const state = Recorder.status();
-  if (!state || state.logFile) return;
+  if (!state) return;
   const hasFailures = state.steps.some((s) => s.status !== 'passed');
   if (!wantsArchiveLogs(hasFailures, noLogs)) return;
   if (!backend.getLogs) return;
+  // Skip only when both artifacts are already attached (e.g. a prior prefetch).
+  if (state.logFile && state.appLogFile) return;
+  const window = archiveLogWindow(state);
   try {
-    const text = await backend.getLogs(archiveLogWindow(state));
-    Recorder.attachArchiveLogs(text);
+    const full = state.logFile ? undefined : await backend.getLogs(window);
+    const appId = inferRunAppId(state);
+    let app: string | undefined;
+    if (appId && !state.appLogFile) {
+      try {
+        app = await backend.getLogs({ ...window, appId, scopedOnly: true });
+      } catch (e) {
+        err(`[verikun] could not capture archive app logs (${(e as Error).message})`);
+      }
+    }
+    if (full !== undefined || (app !== undefined && app !== '')) {
+      Recorder.attachArchiveLogs(full, app);
+    }
   } catch (e) {
     err(`[verikun] could not capture archive device logs (${(e as Error).message})`);
   }
@@ -1521,6 +1536,8 @@ async function runAiTest(
     err(`[ai] archived the active run ('${existing.name}', ${existing.steps.length} step(s)) → ${sealed.dir}`);
   }
   const started = Recorder.start(`ai: ${basename(file)}`, platform, device, true);
+  // Prefer --package when the prose never launches by id (rare but possible).
+  if (opts.pkg) Recorder.annotateRun({ appId: opts.pkg });
 
   // Suppress per-step `out()` so stdout stays the one final result; progress -> stderr.
   const prevQuiet = setOutputQuiet(true);
