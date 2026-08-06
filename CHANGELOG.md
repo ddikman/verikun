@@ -14,7 +14,7 @@ All notable changes to this project are documented here. The format is based on
   `artifacts/logcat.txt` without requiring an explicit `vk log` step. Opt out on
   green runs with `--no-logs` or `VERIKUN_NO_LOGS`; failed runs still capture.
   Capture is best-effort and never blocks sealing the report. Linked from
-  `report.html` / noted in `report.xml`.
+  `report.html` (and embedded in a bottom accordion there) / noted in `report.xml`.
 - **`logStart` over `--server`** ([#56]) — `/v1/exec` returns the device-clock
   marker and `/v1/logs` serves archive-time dumps, so remote CI archives scope
   logs the same way a local run does.

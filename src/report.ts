@@ -157,6 +157,10 @@ const STYLE = `
   .msg.fail { color:var(--fail); }
   img.shot { display:block; margin-top:10px; max-width:300px; max-height:520px; border:1px solid var(--line); border-radius:6px; }
   details { margin-top:8px; }
+  details.run-log { margin-top:20px; background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 14px; }
+  details.run-log > summary { font-weight:600; color:#1f2328; }
+  details.run-log > summary a { font-weight:400; }
+  details.run-log pre { max-height:480px; }
   summary { cursor:pointer; color:var(--muted); font-size:13px; }
   pre { background:#0d1117; color:#e6edf3; padding:12px; border-radius:6px; overflow:auto; font-size:12px; line-height:1.45; max-height:360px; }
   .aibox { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:20px; font-size:13px; }
@@ -426,7 +430,12 @@ ${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}
 `;
 }
 
-export function toHtml(run: RunState): string {
+/**
+ * @param opts.deviceLog  archive-time logcat body to embed at the bottom (kept out
+ *                        of RunState / run.json on purpose — pass the file contents
+ *                        when writing report.html).
+ */
+export function toHtml(run: RunState, opts: { deviceLog?: string } = {}): string {
   const c = counts(run);
   const chips = [
     `<span class="chip pass">${c.passed} passed</span>`,
@@ -446,6 +455,16 @@ export function toHtml(run: RunState): string {
     run.logFile ? `<a href="${htmlEsc(run.logFile)}">device log</a>` : '',
   ].filter(Boolean);
 
+  // Bottom accordion: the full archive dump, so the HTML report is self-contained
+  // without scrolling past every step to find a mid-run `vk log` attachment.
+  const deviceLogPanel =
+    opts.deviceLog !== undefined && opts.deviceLog !== ''
+      ? `\n  <details class="run-log">
+    <summary>Device log${run.logFile ? ` (<a href="${htmlEsc(run.logFile)}">${htmlEsc(run.logFile)}</a>)` : ''}</summary>
+    <pre>${htmlEsc(opts.deviceLog)}</pre>
+  </details>`
+      : '';
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -464,7 +483,7 @@ export function toHtml(run: RunState): string {
   ${run.ai ? aiPanelHtml(run.ai) : ''}
   <ol class="steps">
     ${run.steps.map(stepHtml).join('\n    ')}
-  </ol>
+  </ol>${deviceLogPanel}
 </div>
 </body>
 </html>

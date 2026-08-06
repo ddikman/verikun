@@ -549,7 +549,17 @@ export class Recorder {
     state.updatedAt = nowIso();
     saveState(dir, state);
     writeFileSync(join(dir, 'report.xml'), toJUnitXml(state));
-    writeFileSync(join(dir, 'report.html'), toHtml(state));
+    // Embed the archive log in the HTML accordion (kept out of run.json). Missing
+    // file is fine — capture is best-effort / opt-out.
+    let deviceLog: string | undefined;
+    if (state.logFile) {
+      try {
+        deviceLog = readFileSync(join(dir, state.logFile), 'utf8');
+      } catch {
+        /* report still writes; the file link in meta may 404 */
+      }
+    }
+    writeFileSync(join(dir, 'report.html'), toHtml(state, { deviceLog }));
     mkdirSync(archiveBase(), { recursive: true });
     const dest = uniqueDir(join(archiveBase(), state.id));
     renameSync(dir, dest);

@@ -138,6 +138,30 @@ test('toHtml: archive-time logFile is linked from the run meta', () => {
   assert.ok(html.includes('device log'));
 });
 
+test('toHtml: archive-time deviceLog renders in a bottom accordion', () => {
+  const html = toHtml(
+    { ...SAMPLE, logFile: 'artifacts/logcat.txt' },
+    { deviceLog: '08-06 12:00:00.000 I ActivityManager: hello from logcat' },
+  );
+  assert.ok(html.includes('class="run-log"'));
+  assert.ok(html.includes('<summary>Device log'));
+  assert.ok(html.includes('ActivityManager: hello from logcat'));
+  // Accordion sits after the steps list.
+  assert.ok(html.indexOf('</ol>') < html.indexOf('class="run-log"'));
+});
+
+test('toHtml: empty/absent deviceLog omits the accordion', () => {
+  assert.ok(!toHtml(SAMPLE).includes('class="run-log"'));
+  assert.ok(!toHtml(SAMPLE, { deviceLog: '' }).includes('class="run-log"'));
+});
+
+test('toHtml: deviceLog body is HTML-escaped', () => {
+  const html = toHtml(SAMPLE, { deviceLog: '<script>alert(1)</script> & more' });
+  assert.ok(html.includes('&lt;script&gt;'));
+  assert.ok(!html.includes('<script>alert(1)</script>'));
+  assert.ok(html.includes('&amp; more'));
+});
+
 test('toJUnitXml: archive-time logFile is noted in the suite system-out', () => {
   const xml = toJUnitXml({ ...SAMPLE, logFile: 'artifacts/logcat.txt' });
   assert.ok(xml.includes('device log: artifacts/logcat.txt'));
