@@ -10,6 +10,7 @@
 //    through the SAME validateNode gate that guards `vk ai` model repairs, so only
 //    KNOWN_COMMANDS action verbs execute — never `ui`/`log`, never a shell. The
 //    server's driver is fixed at startup; client flags can never repoint the device.
+//    Archive-time log capture uses the dedicated /v1/logs endpoint instead.
 //  - /v1/install is a privileged management verb: auth PLUS --allow-install, body
 //    streamed to a server-generated temp path (the client supplies only an
 //    allowlisted extension — never a path), optional sha256 verification.
@@ -34,7 +35,7 @@ import { getDriver } from './drivers';
 import { err, setOutputQuiet } from './output';
 import { Driver, Platform } from './types';
 import { FlagSpec, InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
-import { describeError, ExecRequest, ExecResponse, HealthResponse, RpcErrorBody } from './rpc';
+import { describeError, ExecRequest, ExecResponse, HealthResponse, LogsRequest, LogsResponse, RpcErrorBody } from './rpc';
 import { executeForServer, platformFromFlags, deviceFromFlags } from './cli';
 import { VERSION } from './version';
 
@@ -164,7 +165,7 @@ export function buildServer(config: ServerConfig): Server {
     if (node.type !== 'command') throw new HttpError(400, 'rejected: not a command leaf');
 
     const t0 = Date.now();
-    const { code, error, step, artifacts } = await executeForServer(
+    const { code, error, step, artifacts, logStart } = await executeForServer(
       node.command,
       node.positionals,
       leafToFlags(node),
@@ -177,6 +178,7 @@ export function buildServer(config: ServerConfig): Server {
       ...(error ? { error: describeError(error) } : {}),
       ...(step ? { step } : {}),
       ...(artifacts && Object.keys(artifacts).length ? { artifacts: encodeArtifacts(artifacts) } : {}),
+      ...(logStart ? { logStart } : {}),
     };
     sendJson(res, 200, payload);
   }
@@ -185,6 +187,47 @@ export function buildServer(config: ServerConfig): Server {
     await readBody(req, EXEC_BODY_CAP); // drain (the body is unused; keeps keep-alive sane)
     const elements = config.driver.getElements(); // CliError(3) on dump failure → 500 below
     sendJson(res, 200, { elements });
+  }
+
+  async function handleLogs(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await readBody(req, EXEC_BODY_CAP);
+    let parsed: LogsRequest = {};
+    if (body.length) {
+      try {
+        parsed = JSON.parse(body.toString('utf8')) as LogsRequest;
+      } catch {
+        throw new HttpError(400, 'invalid JSON body');
+      }
+    }
+    // Mirror the driver's --since charset gate so a remote caller cannot inject
+    // into the device shell via a crafted marker (see AdbDriver.getLogs).
+    if (parsed.since !== undefined && parsed.since !== null) {
+      if (typeof parsed.since !== 'string' || !/^[0-9 :.\-]+$/.test(parsed.since)) {
+        throw new HttpError(400, `invalid since: only a logcat timestamp (digits, space, '-', ':', '.') is allowed`);
+      }
+    }
+    const lines =
+      parsed.lines === undefined || parsed.lines === null
+        ? undefined
+        : typeof parsed.lines === 'number' && Number.isFinite(parsed.lines) && parsed.lines > 0
+          ? Math.floor(parsed.lines)
+          : undefined;
+    const appId =
+      parsed.appId === undefined || parsed.appId === null
+        ? undefined
+        : typeof parsed.appId === 'string' && /^[A-Za-z0-9_.-]+$/.test(parsed.appId)
+          ? parsed.appId
+          : (() => {
+              throw new HttpError(400, `invalid appId '${String(parsed.appId)}'`);
+            })();
+    const logs = config.driver.getLogs({
+      ...(lines !== undefined ? { lines } : {}),
+      ...(parsed.since ? { since: parsed.since } : {}),
+      ...(appId ? { appId } : {}),
+      ...(parsed.scopedOnly ? { scopedOnly: true } : {}),
+    });
+    const payload: LogsResponse = { logs };
+    sendJson(res, 200, payload);
   }
 
   async function handleInstall(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -273,6 +316,7 @@ export function buildServer(config: ServerConfig): Server {
     }
     if (req.method === 'POST' && path === '/v1/exec') return deviceEndpoint(() => handleExec(req, res));
     if (req.method === 'POST' && path === '/v1/elements') return deviceEndpoint(() => handleElements(req, res));
+    if (req.method === 'POST' && path === '/v1/logs') return deviceEndpoint(() => handleLogs(req, res));
     if (req.method === 'POST' && path === '/v1/install') {
       if (!config.allowInstall) {
         throw new HttpError(403, 'install is disabled on this server (start it with --allow-install)', 3);

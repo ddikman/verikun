@@ -132,6 +132,45 @@ test('toHtml: a log step renders its logs in a <details> block', () => {
   assert.ok(html.includes('FATAL EXCEPTION'));
 });
 
+test('toHtml: archive-time logFile is linked from the run meta', () => {
+  const html = toHtml({ ...SAMPLE, logFile: 'artifacts/logcat.txt' });
+  assert.ok(html.includes('href="artifacts/logcat.txt"'));
+  assert.ok(html.includes('device log'));
+});
+
+test('toHtml: app-scoped log renders in a bottom accordion (not the full device dump)', () => {
+  const html = toHtml(
+    { ...SAMPLE, logFile: 'artifacts/logcat.txt', appLogFile: 'artifacts/logcat-app.txt', appId: 'dev.verikun.testapp' },
+    { appLog: 'I flutter: Signed in' },
+  );
+  assert.ok(html.includes('class="run-log"'));
+  assert.ok(html.includes('<summary>App log for dev.verikun.testapp'));
+  assert.ok(html.includes('href="artifacts/logcat-app.txt"'));
+  assert.ok(html.includes('I flutter: Signed in'));
+  // Full device dump stays a meta link, not the accordion body.
+  assert.ok(html.includes('>device log</a>'));
+  assert.ok(html.indexOf('</ol>') < html.indexOf('class="run-log"'));
+});
+
+test('toHtml: empty/absent appLog omits the accordion', () => {
+  assert.ok(!toHtml(SAMPLE).includes('class="run-log"'));
+  assert.ok(!toHtml(SAMPLE, { appLog: '' }).includes('class="run-log"'));
+  // Device file alone is not enough — accordion is app-scoped only.
+  assert.ok(!toHtml({ ...SAMPLE, logFile: 'artifacts/logcat.txt' }).includes('class="run-log"'));
+});
+
+test('toHtml: appLog body is HTML-escaped', () => {
+  const html = toHtml(SAMPLE, { appLog: '<script>alert(1)</script> & more' });
+  assert.ok(html.includes('&lt;script&gt;'));
+  assert.ok(!html.includes('<script>alert(1)</script>'));
+  assert.ok(html.includes('&amp; more'));
+});
+
+test('toJUnitXml: archive-time logFile is noted in the suite system-out', () => {
+  const xml = toJUnitXml({ ...SAMPLE, logFile: 'artifacts/logcat.txt' });
+  assert.ok(xml.includes('device log: artifacts/logcat.txt'));
+});
+
 // --- vk ai panel ----------------------------------------------------------
 
 function aiRun(): RunState {

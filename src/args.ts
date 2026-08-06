@@ -52,6 +52,7 @@ const BOOLEAN = new Set([
   'recompile',
   'no-cache',
   'no-restart',
+  'no-logs',
   'allow-install',
   'allow-unsafe-anonymous',
   // Selector state modifiers (STATE_ATTRS in ui/selector.ts) and their negations.

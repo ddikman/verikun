@@ -122,7 +122,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 |---|---|
 | `run start [name] [--force]` | Begin a named run. One auto-starts on the first action if you don't. |
 | `run status` | Show the active run and its recorded steps. |
-| `run archive [name]` | Write JUnit + HTML report to `./.verikun/runs/<id>/`; exits non-zero if any step failed. |
+| `run archive [name] [--no-logs]` | Write JUnit + HTML report to `./.verikun/runs/<id>/`; exits non-zero if any step failed. Captures `artifacts/logcat.txt` by default. |
 | `run clear` | Discard the active run without a report. |
 
 ## Test runs & reports
@@ -130,10 +130,11 @@ vk screenshot                   # -> ./.verikun/screen.png
 Actions are recorded into a **test run** — one auto-starts on the first action
 (set `VERIKUN_NO_RUN=1` to disable). Every command becomes a step with its
 timing, the selector + identifier it resolved through, and pass/fail; a failing
-step also captures a screenshot **and** the UI hierarchy of the page. When a
-step fails you can additionally run `vk log <package>` to pull the device logs —
-that step records the logs **into the same run**, so the crash trace shows up in
-the report alongside the failure.
+step also captures a screenshot **and** the UI hierarchy of the page. Device
+logs are captured automatically at archive time into `artifacts/logcat.txt`
+(session-scoped when possible). You can still run `vk log <package>` mid-run to
+pull a snapshot into a step for the report; `--no-logs` / `VERIKUN_NO_LOGS`
+skips the archive dump on green runs (failures still capture).
 
 `vk run archive` finalizes the run into `./.verikun/runs/<id>/`:
 
@@ -141,8 +142,11 @@ the report alongside the failure.
   for failed assertions, `<error>` for environment errors, and the resolved
   identifier in `<system-out>`. Drops straight into CI.
 - **`report.html`** — a self-contained report: every step, the identifiers used,
-  any screenshots taken, the screenshot + hierarchy of any failed page, and any
-  device logs captured via `vk log`.
+  any screenshots taken, the screenshot + hierarchy of any failed page, a link to
+  the full device log, an app-scoped log accordion when the run launched an app,
+  and any per-step logs from `vk log`.
+- **`artifacts/logcat.txt`** — full device log for the run window (default).
+- **`artifacts/logcat-app.txt`** — app-scoped log (when a package/bundle was launched).
 - **`run.json`** — the raw recording.
 
 `vk run archive` exits non-zero when the run contained failures, so the same

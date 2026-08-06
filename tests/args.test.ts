@@ -95,6 +95,13 @@ test('flagNum: throws CliError(2) on a non-numeric value', () => {
   );
 });
 
+test('parseArgs: --no-logs is a boolean (does not swallow the archive name)', () => {
+  const r = parseArgs(['run', 'archive', 'smoke', '--no-logs']);
+  assert.equal(r.command, 'run');
+  assert.deepEqual(r.positionals, ['archive', 'smoke']);
+  assert.equal(r.flags['no-logs'], true);
+});
+
 test('parseArgs: a leading state modifier does not swallow the selector', () => {
   // Regression: `enabled` was absent from BOOLEAN, and a non-BOOLEAN flag consumes the
   // next token — so `vk tap --enabled @submit` bound the SELECTOR as the flag value and

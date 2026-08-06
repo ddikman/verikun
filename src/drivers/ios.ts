@@ -430,7 +430,7 @@ export class IdbDriver implements Driver {
     return '(unknown)';
   }
 
-  getLogs(opts: { lines?: number; appId?: string; since?: string } = {}): string {
+  getLogs(opts: { lines?: number; appId?: string; since?: string; scopedOnly?: boolean } = {}): string {
     if (!this.isSimulator()) {
       throw new CliError(
         'iOS physical-device log capture is not supported (simulator logs work via `log show`).\n' +
@@ -452,6 +452,10 @@ export class IdbDriver implements Driver {
       // last component. A loose predicate is better than none for a crash trace.
       const proc = opts.appId.split('.').pop() || opts.appId;
       args.push('--predicate', `process CONTAINS "${proc}"`);
+    } else if (opts.scopedOnly) {
+      // scopedOnly without an appId can't mean anything on iOS — empty rather than
+      // a full dump (mirrors Android's "couldn't scope" behaviour).
+      return '';
     }
     const out = runText(XCRUN, args, { timeout: 20000 }).stdout;
     if (opts.since) return out; // the whole session window

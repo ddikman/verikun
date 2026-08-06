@@ -144,11 +144,16 @@ export interface Driver {
   /**
    * Recent device logs as a one-shot snapshot (never a live stream).
    * @param opts.lines  max trailing log lines (newest); driver default ~200
-   * @param opts.appId  scope to a running app's process; omitted/crashed = system-wide
+   * @param opts.appId  scope to that app (Android: uid when known, else live pid;
+   *                    iOS simulator: process-name predicate). When the app isn't
+   *                    running and can't be scoped, falls back to system-wide
+   *                    unless `scopedOnly` is set.
    * @param opts.since  only logs at/after this device-clock marker (see deviceTime);
    *                    takes precedence over lines. Lets a run exclude pre-session logs.
+   * @param opts.scopedOnly  with `appId`, return '' instead of a system-wide dump
+   *                    when the app can't be scoped (archive accordion wants this).
    */
-  getLogs(opts?: { lines?: number; appId?: string; since?: string }): string;
+  getLogs(opts?: { lines?: number; appId?: string; since?: string; scopedOnly?: boolean }): string;
   /**
    * Current device wall-clock in logcat's timestamp format (`MM-DD HH:MM:SS.mmm`),
    * captured at run start and later passed as `getLogs({ since })`. `''` if

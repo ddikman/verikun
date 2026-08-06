@@ -104,17 +104,23 @@ export function toJUnitXml(run: RunState): string {
     `name="${xmlAttr(run.name)}" tests="${c.tests}" failures="${c.failures}" ` +
     `errors="${c.errors}" time="${suiteTime}" timestamp="${xmlAttr(run.startedAt)}"`;
 
+  const suiteExtras: string[] = [];
+  if (run.logFile) suiteExtras.push(`device log: ${run.logFile}`);
+  if (run.ai) {
+    suiteExtras.push(
+      'vk ai: ' +
+        run.ai.cost +
+        (run.ai.improvements.length ? '\nSuggested improvements:\n' + run.ai.improvements.join('\n') : ''),
+    );
+  }
+
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<testsuites name="verikun" tests="${c.tests}" failures="${c.failures}" errors="${c.errors}" time="${suiteTime}">\n` +
     `<testsuite ${suiteAttrs}>\n` +
     `${cases}\n` +
-    (run.ai
-      ? `  <system-out>${xmlText(
-          'vk ai: ' +
-            run.ai.cost +
-            (run.ai.improvements.length ? '\nSuggested improvements:\n' + run.ai.improvements.join('\n') : ''),
-        )}</system-out>\n`
+    (suiteExtras.length
+      ? `  <system-out>${xmlText(suiteExtras.join('\n'))}</system-out>\n`
       : '') +
     `</testsuite>\n</testsuites>\n`
   );
@@ -151,6 +157,10 @@ const STYLE = `
   .msg.fail { color:var(--fail); }
   img.shot { display:block; margin-top:10px; max-width:300px; max-height:520px; border:1px solid var(--line); border-radius:6px; }
   details { margin-top:8px; }
+  details.run-log { margin-top:20px; background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 14px; }
+  details.run-log > summary { font-weight:600; color:#1f2328; }
+  details.run-log > summary a { font-weight:400; }
+  details.run-log pre { max-height:480px; }
   summary { cursor:pointer; color:var(--muted); font-size:13px; }
   pre { background:#0d1117; color:#e6edf3; padding:12px; border-radius:6px; overflow:auto; font-size:12px; line-height:1.45; max-height:360px; }
   .aibox { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:20px; font-size:13px; }
@@ -420,7 +430,12 @@ ${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}
 `;
 }
 
-export function toHtml(run: RunState): string {
+/**
+ * @param opts.appLog  app-scoped logcat body for the bottom accordion (kept out
+ *                     of RunState / run.json — pass the file contents when writing
+ *                     report.html). The full device dump stays a meta-row file link.
+ */
+export function toHtml(run: RunState, opts: { appLog?: string } = {}): string {
   const c = counts(run);
   const chips = [
     `<span class="chip pass">${c.passed} passed</span>`,
@@ -437,7 +452,22 @@ export function toHtml(run: RunState): string {
     `started ${htmlEsc(run.startedAt)}`,
     run.finishedAt ? `finished ${htmlEsc(run.finishedAt)}` : '',
     run.implicit ? 'implicit run' : '',
+    run.logFile ? `<a href="${htmlEsc(run.logFile)}">device log</a>` : '',
   ].filter(Boolean);
+
+  // Bottom accordion: app-scoped dump only. The noisy full device log stays a
+  // download via the meta link — same shape on every framework (package/uid scope).
+  const appLabel = run.appId ? ` for ${htmlEsc(run.appId)}` : '';
+  const appFileLink = run.appLogFile
+    ? ` (<a href="${htmlEsc(run.appLogFile)}">${htmlEsc(run.appLogFile)}</a>)`
+    : '';
+  const appLogPanel =
+    opts.appLog !== undefined && opts.appLog !== ''
+      ? `\n  <details class="run-log">
+    <summary>App log${appLabel}${appFileLink}</summary>
+    <pre>${htmlEsc(opts.appLog)}</pre>
+  </details>`
+      : '';
 
   return `<!doctype html>
 <html lang="en">
@@ -457,7 +487,7 @@ export function toHtml(run: RunState): string {
   ${run.ai ? aiPanelHtml(run.ai) : ''}
   <ol class="steps">
     ${run.steps.map(stepHtml).join('\n    ')}
-  </ol>
+  </ol>${appLogPanel}
 </div>
 </body>
 </html>
