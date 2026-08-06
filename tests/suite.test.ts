@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { cmdSuite, sortTestFiles, listTestFiles, toSuiteResult, AiRunResult, SuiteDeps } from '../src/suite';
+import { cmdSuite, sortTestFiles, listTestFiles, toSuiteResult, mergeSuiteAttempts, AiRunResult, SuiteDeps } from '../src/suite';
 import { RunState, RunStep } from '../src/run';
 import { SuiteRun } from '../src/report';
 import { envError } from '../src/errors';
@@ -121,6 +121,53 @@ test('toSuiteResult: an environment abort is labelled as such, not as a test fai
     1,
   );
   assert.equal(r.failure, "aborted: environment — 'idb' was not found on PATH.");
+});
+
+// --- mergeSuiteAttempts -----------------------------------------------------
+
+test('mergeSuiteAttempts: a single attempt is returned unchanged', () => {
+  const one = toSuiteResult('t.md', aiResult(), 100);
+  assert.deepEqual(mergeSuiteAttempts([one]), one);
+});
+
+test('mergeSuiteAttempts: fail-then-pass is flaky, sums cost/duration, keeps prior evidence', () => {
+  const fail = toSuiteResult(
+    '01-login.md',
+    aiResult({
+      ok: false,
+      runDir: '/tmp/.verikun/runs/fail-1',
+      costUsd: 0.02,
+      failure: { where: 'steps[1]', reason: 'assert failed' },
+    }),
+    1000,
+  );
+  const pass = toSuiteResult(
+    '01-login.md',
+    aiResult({ ok: true, runDir: '/tmp/.verikun/runs/pass-2', costUsd: 0.03, modelRepairs: 1 }),
+    2000,
+  );
+  const merged = mergeSuiteAttempts([fail, pass]);
+  assert.equal(merged.ok, true);
+  assert.equal(merged.flaky, true);
+  assert.equal(merged.id, 'pass-2', 'primary id is the winning run');
+  assert.equal(merged.durationMs, 3000);
+  assert.equal(merged.costUsd, 0.05);
+  assert.equal(merged.modelRepairs, 1);
+  assert.equal(merged.attempts?.length, 1);
+  assert.equal(merged.attempts![0].id, 'fail-1');
+  assert.equal(merged.attempts![0].ok, false);
+  assert.match(merged.attempts![0].failure ?? '', /assert failed/);
+});
+
+test('mergeSuiteAttempts: still-failing after retries keeps prior attempts but is not flaky', () => {
+  const a = toSuiteResult('t.md', aiResult({ ok: false, runDir: '/tmp/runs/a', failure: { where: 's', reason: 'x' } }), 10);
+  const b = toSuiteResult('t.md', aiResult({ ok: false, runDir: '/tmp/runs/b', failure: { where: 's', reason: 'y' } }), 20);
+  const merged = mergeSuiteAttempts([a, b]);
+  assert.equal(merged.ok, false);
+  assert.equal(merged.flaky, undefined);
+  assert.equal(merged.id, 'b');
+  assert.equal(merged.attempts?.length, 1);
+  assert.equal(merged.attempts![0].id, 'a');
 });
 
 // --- cmdSuite: the loop, its abort rule, and the manifest it writes ----------
@@ -366,5 +413,139 @@ test('cmdSuite: an aborted suite still writes index.json and index.html', async 
     const suiteOut = join(outDir, readdirSync(outDir)[0]);
     assert.ok(readFileSync(join(suiteOut, 'index.json'), 'utf8').length > 0);
     assert.match(readFileSync(join(suiteOut, 'index.html'), 'utf8'), /Suite aborted/);
+  });
+});
+
+// --- cmdSuite: --retries (flake recovery) -----------------------------------
+
+test('cmdSuite: --retries recovers a flake — exit 0, warning, prior attempt kept', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 2);
+    const { deps, ran } = harness({
+      files: 2,
+      onTest: () => {
+        const file = ran[ran.length - 1];
+        if (file === '01-t.md') {
+          const attempt = ran.filter((f) => f === '01-t.md').length;
+          if (attempt === 1) {
+            return aiResult({
+              ok: false,
+              runDir: '/tmp/.verikun/runs/flake-fail',
+              failure: { where: 'steps[1]', reason: 'transient assert' },
+            });
+          }
+          return aiResult({ ok: true, runDir: '/tmp/.verikun/runs/flake-pass' });
+        }
+        return aiResult({ runDir: '/tmp/.verikun/runs/other' });
+      },
+    });
+    const outDir = join(root, '.verikun', 'suites');
+    const code = await cmdSuite(dir, { retries: '1' }, deps);
+    assert.equal(code, 0, 'recovered flake must not fail the suite');
+    assert.deepEqual(ran, ['01-t.md', '01-t.md', '02-t.md'], 'failed test re-run once');
+
+    const suite = readManifest(join(outDir, readdirSync(outDir)[0]));
+    assert.equal(suite.totals.failed, 0);
+    assert.equal(suite.totals.passed, 2);
+    const flaky = suite.tests.find((t) => t.file === '01-t.md')!;
+    assert.equal(flaky.ok, true);
+    assert.equal(flaky.flaky, true);
+    assert.equal(flaky.id, 'flake-pass');
+    assert.equal(flaky.attempts?.length, 1);
+    assert.equal(flaky.attempts![0].id, 'flake-fail');
+    assert.ok(suite.warnings?.some((w) => /01-t\.md/.test(w) && /retry/.test(w)));
+    const html = readFileSync(join(outDir, readdirSync(outDir)[0], 'index.html'), 'utf8');
+    assert.match(html, /FLAKY/);
+    assert.match(html, /flake-fail/);
+    assert.match(html, /Warnings/);
+  });
+});
+
+test('cmdSuite: --retries exhausted still exits 1 and keeps all attempt evidence', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 1);
+    let n = 0;
+    const { deps, ran } = harness({
+      files: 1,
+      onTest: () => {
+        n++;
+        return aiResult({
+          ok: false,
+          runDir: `/tmp/.verikun/runs/fail-${n}`,
+          failure: { where: 'steps[1]', reason: `fail #${n}` },
+        });
+      },
+    });
+    const outDir = join(root, '.verikun', 'suites');
+    const code = await cmdSuite(dir, { retries: '2' }, deps);
+    assert.equal(code, 1);
+    assert.equal(ran.length, 3, 'initial + 2 retries');
+    const suite = readManifest(join(outDir, readdirSync(outDir)[0]));
+    const t = suite.tests[0];
+    assert.equal(t.ok, false);
+    assert.equal(t.flaky, undefined);
+    assert.equal(t.id, 'fail-3');
+    assert.equal(t.attempts?.length, 2);
+    assert.equal(t.attempts![0].id, 'fail-1');
+    assert.equal(t.attempts![1].id, 'fail-2');
+    assert.equal(suite.warnings, undefined);
+  });
+});
+
+test('cmdSuite: --retries does not retry a confirmed env abort', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 3);
+    const { deps, ran } = harness({
+      files: 3,
+      onTest: (n) => (n === 1 ? envFailedRun() : aiResult()),
+      preflight: broken,
+    });
+    const code = await cmdSuite(dir, { retries: '3' }, deps);
+    assert.equal(code, 3);
+    assert.equal(ran.length, 1, 'no retries on a confirmed env break');
+  });
+});
+
+test('cmdSuite: --retries does not retry a budget abort', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 1);
+    const { deps, ran } = harness({
+      files: 1,
+      onTest: () => aiResult({ ok: false, abortedForBudget: true, failure: undefined, runDir: '/tmp/runs/budget' }),
+    });
+    const code = await cmdSuite(dir, { retries: '2' }, deps);
+    assert.equal(code, 1);
+    assert.equal(ran.length, 1, 'budget abort is not a flake');
+  });
+});
+
+test('cmdSuite: --retries resets the app between attempts when --app reset is wired', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 1);
+    let resets = 0;
+    let n = 0;
+    const { deps } = harness({
+      files: 1,
+      reset: () => {
+        resets++;
+      },
+      onTest: () => {
+        n++;
+        return n === 1
+          ? aiResult({ ok: false, runDir: '/tmp/runs/a', failure: { where: 's', reason: 'x' } })
+          : aiResult({ ok: true, runDir: '/tmp/runs/b' });
+      },
+    });
+    const code = await cmdSuite(dir, { retries: '1' }, deps);
+    assert.equal(code, 0);
+    assert.equal(resets, 2, 'once before the test, once before the retry');
+  });
+});
+
+test('cmdSuite: rejects a negative --retries', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 1);
+    const { deps } = harness({ files: 1 });
+    await assert.rejects(() => cmdSuite(dir, { retries: '-1' }, deps), /non-negative integer/);
   });
 });

@@ -127,3 +127,46 @@ test('toSuiteHtml: a normal suite has no abort banner', () => {
   assert.ok(!html.includes('Suite aborted'));
   assert.ok(!html.includes('ABORTED'));
 });
+
+// --- flaky / retries evidence -----------------------------------------------
+
+test('toSuiteIndexJson: a recovered flake carries flaky + attempts + warnings, still schemaVersion 1', () => {
+  const flaky = result({
+    id: 'pass-2',
+    flaky: true,
+    attempts: [{ id: 'fail-1', ok: false, durationMs: 500, costUsd: 0.01, failure: 'FAIL at steps[1]: assert' }],
+  });
+  const s = { ...suite([flaky]), warnings: ['01-login.md passed on retry after 1 failed attempt'] };
+  const parsed = JSON.parse(toSuiteIndexJson(s)) as SuiteRun;
+  assert.equal(parsed.schemaVersion, 1);
+  assert.equal(parsed.tests[0].flaky, true);
+  assert.equal(parsed.tests[0].attempts?.[0].id, 'fail-1');
+  assert.equal(parsed.warnings?.[0], '01-login.md passed on retry after 1 failed attempt');
+  // Recovered flakes count as passed, not failed.
+  assert.equal(parsed.totals.passed, 1);
+  assert.equal(parsed.totals.failed, 0);
+});
+
+test('toSuiteHtml: a flaky test shows FLAKY, links prior attempts, and renders the warnings banner', () => {
+  const flaky = result({
+    id: 'pass-2',
+    flaky: true,
+    attempts: [{ id: 'fail-1', ok: false, durationMs: 500, costUsd: 0.01, failure: 'FAIL at steps[1]: assert' }],
+  });
+  const s = { ...suite([flaky]), warnings: ['01-login.md passed on retry after 1 failed attempt'] };
+  const html = toSuiteHtml(s, { linkBase: '../../' });
+  assert.ok(html.includes('FLAKY'));
+  assert.ok(html.includes('passed on retry (flake)'));
+  assert.ok(html.includes('href="../../runs/fail-1/report.html"'), 'prior failed attempt linked');
+  assert.ok(html.includes('href="../../runs/pass-2/report.html"'), 'winning run linked');
+  assert.ok(html.includes('1 flaky'), 'summary chip');
+  assert.ok(html.includes('Warnings'));
+  assert.ok(html.includes('01-login.md passed on retry after 1 failed attempt'));
+});
+
+test('toSuiteHtml: the warnings banner escapes its text', () => {
+  const s = { ...suite([result()]), warnings: ['saw <tag> & more'] };
+  const html = toSuiteHtml(s);
+  assert.ok(html.includes('saw &lt;tag&gt; &amp; more'));
+  assert.ok(!html.includes('saw <tag> & more'));
+});

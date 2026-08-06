@@ -104,7 +104,7 @@ vk screenshot                   # -> ./.verikun/screen.png
 | Command | Description |
 |---|---|
 | `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--server url] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile it to a deterministic plan once, replay it model-free, and self-heal failures via the model. Needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (per model), or no key with `--model codex-cli` / `cursor-cli` (a logged-in `codex` / `cursor-agent` CLI). See [AI](#ai--natural-language-tests). |
-| `suite <dir> [--app <id>] [--name n] [--server url] [--json]` (+ all `ai` flags) | Run every `*.md` in `<dir>` as one sequential suite with an overview report and a non-zero exit on failure — the CI gate. See [Suites](#suites--run-a-directory-of-tests). |
+| `suite <dir> [--app <id>] [--name n] [--retries n] [--server url] [--json]` (+ all `ai` flags) | Run every `*.md` in `<dir>` as one sequential suite with an overview report and a non-zero exit on failure — the CI gate. See [Suites](#suites--run-a-directory-of-tests). |
 
 ### Remote
 | Command | Description |
@@ -287,6 +287,13 @@ vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote devi
 - **Each test is a full `vk ai` run** — plan cache, self-healing, cost budget, and
   its own archived JUnit + HTML report under `./.verikun/runs/<id>/`. A test that
   fails (or errors) doesn't stop the suite; the rest still run.
+- **`--retries N` recovers from flakes.** A failed test is re-run up to N times
+  (default `0` — opt-in, so CI cost/time stay predictable). If a later attempt
+  passes, the suite exits `0` and the flake is a **warning**, not a hard failure.
+  Failed attempt archives stay linked from the suite overview (`attempts` on the
+  test row + a `warnings` list on the manifest), so flakiness remains visible.
+  Cost and duration sum across attempts. Confirmed environment aborts and budget
+  aborts are not retried.
 - **But a broken *environment* does stop it.** If a test dies from an environment
   error (exit 3 — tool gone, device unplugged, server unreachable), the toolchain is
   re-probed; only if it is *still* broken does the suite abort. That re-probe matters:
@@ -300,17 +307,21 @@ vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote devi
     it (see the [CI recipe](#ci-recipe)) instead of verikun growing upload plugins.
     On an abort it also carries `aborted: {reason, notRun}`; the not-run tests get
     **no rows and no place in `totals`**, so `passed + failed === tests` still holds
-    and nothing downstream mistakes a skipped test for a regression.
+    and nothing downstream mistakes a skipped test for a regression. Retried flakes
+    add `flaky` / `attempts` on the test row and suite-level `warnings` (additive;
+    `schemaVersion` stays `1`).
   - **`index.html`** — a summary page linking every test's `report.html`, with a
-    banner naming the not-run tests when the suite aborted.
-- **Exit code is the CI gate:** `0` all green · `1` a test failed · `2` bad/empty
-  directory · `3` environment (the provider or the device toolchain is unavailable,
-  or the box broke mid-run). The `1`-vs-`3` split is the point: `1` is a regression
-  to investigate, `3` is a machine to fix. All `ai` flags (`--model`,
-  `--max-cost-usd`, `--timeout`, …) apply to every test; both the provider
-  (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or the `codex` / `cursor-agent` CLI for
-  `--model codex-cli` / `cursor-cli`) **and** the device toolchain (`adb` / `idb` +
-  a resolvable device) are checked up front, before anything is compiled.
+    banner naming the not-run tests when the suite aborted, and a warnings banner
+    when a flake recovered on retry (prior failed attempts stay linked).
+- **Exit code is the CI gate:** `0` all green (including flakes that recovered with
+  `--retries`) · `1` a test failed · `2` bad/empty directory · `3` environment (the
+  provider or the device toolchain is unavailable, or the box broke mid-run). The
+  `1`-vs-`3` split is the point: `1` is a regression to investigate, `3` is a
+  machine to fix. All `ai` flags (`--model`, `--max-cost-usd`, `--timeout`, …)
+  apply to every test; both the provider (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`,
+  or the `codex` / `cursor-agent` CLI for `--model codex-cli` / `cursor-cli`)
+  **and** the device toolchain (`adb` / `idb` + a resolvable device) are checked up
+  front, before anything is compiled.
 
 ## Remote devices — `vk server`
 

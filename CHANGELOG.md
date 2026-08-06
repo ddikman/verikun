@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-06
+
+### Added
+- **`vk suite --retries N`** ([#43]) — re-run a failed test up to N times so a
+  transient flake can recover the suite instead of reding CI. A later pass exits
+  `0` and surfaces a warning (`flaky` + prior `attempts` on the test row, suite
+  `warnings` in the manifest/HTML); failed-attempt archives stay linked. Default
+  `0` keeps today's gate. Confirmed environment aborts and budget aborts are not
+  retried.
+
+[#43]: https://github.com/ddikman/verikun/issues/43
+
 ## [0.16.0] - 2026-08-05
 
 ### Added
