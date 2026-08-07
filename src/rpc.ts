@@ -140,4 +140,10 @@ export interface ExecBackend {
    *  the server's device lock so the NEXT command (a fresh run token) isn't 409'd
    *  until the idle takeover. Best-effort; local backends need none. */
   close?(): Promise<void> | void;
+  /** Best-effort evidence for a failure the `vk ai` ENGINE produced outside a command
+   *  (a control node giving up, a budget/timeout abort). Those never run through
+   *  exec(), so no step recorder captured the screen. Never throws — a piece it cannot
+   *  get is simply omitted, since the device being gone is often WHY we failed. The
+   *  remote backend has no screenshot route, so it returns the hierarchy only. */
+  captureFailure?(): Promise<{ png?: Buffer; hierarchy?: Element[] }>;
 }

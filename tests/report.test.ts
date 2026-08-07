@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { toJUnitXml, toHtml } from '../src/report';
+import { toJUnitXml, toHtml, runFailure } from '../src/report';
 import type { RunState, RunStep } from '../src/run';
 
 function step(overrides: Partial<RunStep> & Pick<RunStep, 'command' | 'name' | 'status' | 'exitCode'>): RunStep {
@@ -201,4 +201,66 @@ test('toJUnitXml: carries the vk ai cost line and suggested improvements', () =>
   assert.ok(xml.includes('vk ai:'));
   assert.ok(xml.includes('compile=$0.0100'));
   assert.ok(xml.includes('tighten @x'));
+});
+
+// --- run-level failure ------------------------------------------------------
+//
+// A `vk ai` run can fail where no command ran — a `repeat` that never sees its
+// target, a budget/timeout abort. Those recorded no step, so a tally-only report
+// declared the failed run green in the very format CI trusts (issue #41).
+
+const PASSING_STEP = step({ command: 'tap', name: 'tap @x', status: 'passed', exitCode: 0 });
+
+function unrecordedRun(): RunState {
+  return {
+    ...runWith([PASSING_STEP, PASSING_STEP]),
+    failure: { where: 'steps[24]', reason: "repeat stopped after 4 iteration(s) without 'id:target' ever appearing" },
+  };
+}
+
+test('runFailure: prefers the engine verdict, falls back to ai.ok, else null', () => {
+  assert.equal(runFailure(runWith([PASSING_STEP])), null);
+  assert.equal(runFailure(unrecordedRun())?.where, 'steps[24]');
+  // No `failure` field (an older run.json, or a path that only set the ai summary).
+  const aiOnly: RunState = { ...runWith([PASSING_STEP]), ai: { ok: false, cost: '', modelRepairs: 0, improvements: [] } };
+  assert.match(runFailure(aiOnly)?.reason ?? '', /did not pass/);
+});
+
+test('toJUnitXml: a run-level failure with only passing steps is NOT reported green', () => {
+  const xml = toJUnitXml(unrecordedRun());
+  assert.ok(xml.includes('failures="1"'), 'a failed run must never report failures="0"');
+  // The synthetic case is emitted too, so the tally still describes the case list.
+  assert.ok(xml.includes('tests="3"'));
+  assert.equal(xml.match(/<testcase /g)?.length, 3);
+  assert.ok(xml.includes('classname="verikun.run"'));
+  assert.ok(xml.includes('repeat stopped after 4 iteration(s)'));
+  assert.ok(xml.includes('steps[24]'));
+});
+
+test('toJUnitXml: a run-level failure already carried by a red step is not double-counted', () => {
+  const xml = toJUnitXml({
+    ...runWith([PASSING_STEP, step({ command: 'assert', name: 'assert @x', status: 'failed', exitCode: 1, message: 'FAIL' })]),
+    failure: { where: 'steps[1]', reason: 'assert failed' },
+  });
+  assert.ok(xml.includes('tests="2"'));
+  assert.ok(xml.includes('failures="1"'));
+  assert.equal(xml.match(/<testcase /g)?.length, 2);
+});
+
+test('toHtml: a run-level failure states the verdict up top and adds a red row', () => {
+  const html = toHtml(unrecordedRun());
+  assert.ok(html.includes('This run did not pass.'));
+  assert.ok(html.includes('steps[24]'));
+  assert.ok(html.includes('repeat stopped after 4 iteration(s)'));
+  assert.ok(html.includes('1 failed'), 'the summary chips must show the failure');
+  assert.ok(html.includes('<li class="step failed">'));
+});
+
+test('toHtml: a run with a red step shows the banner but no extra synthetic row', () => {
+  const html = toHtml({
+    ...runWith([step({ command: 'assert', name: 'assert @x', status: 'failed', exitCode: 1, message: 'FAIL' })]),
+    failure: { where: 'steps[0]', reason: 'assert failed' },
+  });
+  assert.ok(html.includes('This run did not pass.'));
+  assert.equal(html.match(/<li class="step /g)?.length, 1);
 });

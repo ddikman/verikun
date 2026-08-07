@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-07
+
+### Fixed
+- **A `vk ai` run the engine failed is no longer archived as a GREEN report.** A test that
+  failed because a **control node** failed — a `repeat` that exhausted without its target
+  ever appearing, a `when` that matched no branch with no `else` — recorded no step, and
+  both `report.xml` and `report.html` derived their verdict purely from the step tally. So
+  the JUnit XML declared `failures="0"` for a failed test, in exactly the format CI trusts
+  automatically, and the HTML showed all-PASS while the suite summary said FAIL. The same
+  hole covered `read` failures, a repair give-up, and the budget/timeout aborts (which the
+  engine reports as a bare flag with no reason attached at all).
+
+  `Recorder.recordTerminalFailure` now records the engine's verdict before the archive: the
+  run gains a top-level `failure` (`where` + reason, the same text the suite prints), and a
+  synthetic failed step is appended — but **only when no step is already red**, so a leaf
+  failure that already has its own testcase is not counted twice. `vk run archive`'s exit
+  code and `vk suite`'s `failedSteps` follow from that with no further change.
+- **Failure evidence for a failure no command produced.** `ExecBackend.captureFailure`
+  grabs a screenshot + the UI hierarchy at the moment the engine gives up, attached to the
+  recorded step exactly like a failing command's `step-N-fail.png`. Previously the archive
+  of a control-node failure held no trace of the screen at all. Over `--server` this
+  degrades honestly to the hierarchy only — the server has no screenshot route.
+- **The report writer no longer infers pass/fail from the step tally alone.** `runFailure()`
+  takes the run-level verdict (`failure`, falling back to `ai.ok`); if a failed run somehow
+  still carries no red step, both renderers emit one synthetic failing testcase rather than
+  reporting green. `report.html` also states the verdict in a banner at the top, since that
+  page is where a human looks first.
+
 ## [0.18.0] - 2026-08-06
 
 ### Added
@@ -40,7 +68,6 @@ All notable changes to this project are documented here. The format is based on
   still-broken environment aborts with exit `3` exactly as before.
 
 [#43]: https://github.com/ddikman/verikun/issues/43
-
 ## [0.16.0] - 2026-08-05
 
 ### Added
@@ -127,7 +154,6 @@ All notable changes to this project are documented here. The format is based on
   off-screen nodes and clips the rest, and a fast swipe can take the app off the screen.
 
 [#42]: https://github.com/ddikman/verikun/issues/42
-
 ## [0.14.0] - 2026-08-03
 
 ### Added
