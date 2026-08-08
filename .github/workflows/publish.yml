@@ -107,9 +107,27 @@ jobs:
       - name: Verify the committed generated files are current
         run: git diff --exit-code -- src/version.ts .claude-plugin/plugin.json
 
+      # package-lock.json carries its own copy of the package version, and a hand-edited
+      # version bump leaves it behind. `npm ci` will NOT catch this: it errors only on
+      # dependency drift, not on the root "version" field, and it never rewrites the lock
+      # (that is the point of `ci`). So regenerate the lock and diff it — the metadata-only
+      # `--package-lock-only` touches no node_modules and is a no-op when already in sync.
+      - name: Verify package-lock.json is in sync
+        run: |
+          npm install --package-lock-only
+          git diff --exit-code -- package-lock.json
+
       # A tag can point at any commit, not only one CI already vetted.
       - name: Test (unit suite)
         run: npm test
+
+      # The release gate for packaging. `npm test` above asserts package.json's "files"
+      # allowlist; this packs the tarball and asserts what is actually inside it —
+      # including that the contributor-only create-pr skill is NOT there. Runs before
+      # `npm publish` because npm forbids republishing a version: a packaging mistake
+      # caught here costs a re-tag, caught afterwards it costs the version number.
+      - name: Verify npm package contents
+        run: node scripts/check-package-contents.mjs
 
       # A hyphen means a prerelease (v1.0.0-rc.1), which must not become what
       # `npm install -g verikun` resolves to.

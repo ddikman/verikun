@@ -27,7 +27,10 @@
   },
   "main": "dist/cli.js",
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md",
+    ".claude/skills/verikun/SKILL.md",
+    "example/*.md"
   ],
   "scripts": {
     "prebuild": "node scripts/gen-version.mjs",

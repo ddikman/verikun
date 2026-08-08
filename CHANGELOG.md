@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **The npm package now ships the agent skill and the `example/*.md` tests.** `npm install -g verikun`
+  delivers the CLI *and* `SKILL.md` — the agent-facing contract — in one step, rather than needing a
+  separate `npx skills add` / plugin install to obtain it. It lands at
+  `.claude/skills/verikun/SKILL.md` inside the package, the same path it has in the repo (shipped,
+  not duplicated), which also makes the relative `SKILL.md` links in the published README resolve
+  rather than dangle.
+- **Packaging is now verified against the built artifact, not just the config.** New
+  `scripts/check-package-contents.mjs` packs the tarball and asserts its real contents — required
+  docs present, the contributor-only `create-pr` skill and `src/`/`tests/` absent. It runs in CI on
+  every PR and as a release gate in `publish.yml` before `npm publish`, where a mistake would
+  otherwise burn a version number npm will not let us reuse. This catches what an allowlist check
+  structurally cannot: a stray `.npmignore`, a change in how npm treats the `.claude/`
+  dot-directory, `.claude/skills` added alongside the exact skill path, or a subdirectory appearing
+  under `example/`. That last one is not hypothetical — the allowlist entry is the glob
+  `example/*.md` rather than a bare `example` precisely because the directory also holds the Flutter
+  e2e fixture app, 74 files of Gradle/Xcode/PNG that no end user installing the CLI should download.
+- `publish.yml` also verifies `package-lock.json` is in sync with `package.json`'s version. `npm ci`
+  does not catch this — it errors only on dependency drift, never on the root `version` field.
+
+### Fixed
+- **`CHANGELOG.md` is now included in the published npm package.** `package.json`'s `"files"` is an
+  allowlist, and npm force-includes only `package.json`, `README`, `LICENSE`, the `main` file and the
+  `bin` file(s) — a changelog is *not* on that list (npm 5/6 included one; modern npm does not).
+  Every release up to 0.19.0 therefore published without a changelog, and did so silently: the
+  publish succeeded, CI was green, and nothing anywhere reported the omission.
+  `tests/package-files.test.ts` now guards the allowlist, including against an entry whose path no
+  longer exists.
+
 ## [0.19.0] - 2026-08-08
 
 ### Added
