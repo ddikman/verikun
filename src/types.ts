@@ -2,6 +2,8 @@
 // the selector / formatting / command layers are fully platform-agnostic — each
 // Driver is responsible only for producing Element[] from its native source.
 
+import type { SettingKey } from './device/settings';
+
 export type Platform = 'android' | 'ios';
 
 export interface Bounds {
@@ -160,4 +162,19 @@ export interface Driver {
    * unavailable (or unsupported, e.g. iOS) — callers treat empty as "no marker".
    */
   deviceTime(): string;
+  /**
+   * Read a device setting (see device/settings.ts for the key set). Best-effort:
+   * never throws — an unreadable or untracked setting is `null`, like currentApp()'s
+   * `'(unknown)'`. Values are the table's canonical form, so a read round-trips
+   * through `setDeviceSetting` unchanged (that is what makes snapshot/restore exact).
+   */
+  getDeviceSetting(key: SettingKey): string | null;
+  /**
+   * Apply a device setting and VERIFY it landed by reading it back — the underlying
+   * device commands (`svc`, `cmd`, `settings put`) are fire-and-forget and silently
+   * no-op on some OEM skins, so trusting the exit code would report success for a
+   * change that never happened. Throws CliError(…, 3) if the value refuses to stick
+   * or the platform cannot honor it.
+   */
+  setDeviceSetting(key: SettingKey, value: string): void;
 }

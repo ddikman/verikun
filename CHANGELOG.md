@@ -6,6 +6,74 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-08
+
+### Added
+- **`vk device set` — change the device the app runs on, then put it back (#31).** Five settings
+  to start: `airplane` (go offline, for retry/error handling), `dark`, `font-scale`, `rotation`
+  and `stay-awake`, applied as `key=value` assignments so several land in one call —
+  `vk device set dark=on font-scale=1.3 rotation=landscape`. Rounded out by `device get`,
+  `device reset` and `device caps`. The design is snapshot → override → restore: `set` records
+  what each setting held *before* it changed it, in the run file rather than in memory (every
+  `vk` call is its own process, so an in-memory latch could not undo a flow that died), and
+  `batch` / `ai` / `suite` restore from a `finally` — so a test that dies between `airplane=on`
+  and its reset cannot leave the phone offline. A bare `vk device set` from a shell deliberately
+  stays applied until you `vk device reset`.
+- **A `@vk_device` screen on the Flutter fixture, so device settings are *assertable*.** Every
+  line on it (`vk_dev_brightness`, `vk_dev_orientation`, `vk_dev_textscale`) is read from
+  `MediaQuery` — from the platform, not from app state — so
+  `assert @vk_dev_brightness --text dark` proves the app itself observed the change, rather
+  than proving only that a value landed in a system database. The fixture also gains a
+  `darkTheme`: with only a light theme, `ThemeMode.system` has nothing to switch to and a
+  dark-mode check would pass vacuously. `example/example-test-devicestate.md` drives it on
+  both platforms, and `tests/e2e/flutter-app.test.ts` covers the platform-divergent half
+  (Android-only `rotation`; the iOS exit-3 refusal and its manual equivalent). Font scale is
+  asserted as "grew, then was restored" rather than against a literal, because the effective
+  ratio for `font-scale=1.3` differs per target — `1.30` on API 31, `1.26` on API 34 (Android
+  14 scales large text non-linearly) and `1.35` on iOS (nearest Dynamic Type category). All
+  three are captured in `example/flutter-app/README.md`'s measured facts.
+- **A capability table (`src/device/settings.ts`) rather than five ad-hoc commands.** It declares
+  each key's value domain and its per-platform support — `supported`, `unsupported`, or `noop` —
+  and drives argument validation, the driver switch, `vk device caps` and the `vk ai` plan
+  validator from one place. Android supports all five; on an iOS **simulator** `dark` and
+  `font-scale` work via `simctl ui` (font scale maps to the nearest Dynamic Type category, and
+  the applied category is echoed), `stay-awake` is an honest no-op, and `airplane`/`rotation`
+  do not exist at all. Every `unsupported` entry names the manual equivalent and every `noop`
+  says why it was unnecessary — both enforced by the unit suite, so a future setting cannot be
+  added as a silent dead end.
+- **`vk ai` can drive the device, and a bad setting fails at compile time.** `device` joins
+  `KNOWN_COMMANDS` and the grammar, and `validateNode` checks a `device` leaf's keys and values
+  during **plan validation** — unlike every other command, whose selector failures are runtime
+  facts the engine can heal. A suite asking for `rotation` on iOS therefore fails before the
+  first tap rather than twenty steps in, on a device it has already half-modified.
+
+### Changed
+- **A run rollover no longer strands the device snapshot.** `deviceOverrides` lives in the run,
+  and `rolloverReason` *seals* runs on a device/session change or idle timeout — so the snapshot
+  used to leave with the archive while `vk device reset`, which reads the active run, reported
+  "nothing to restore" and left the device modified. Found the hard way: two workspaces driving
+  different devices from one working directory ping-ponged the active run and left a phone dark
+  and rotated. A same-device rollover now carries the overrides **forward**; a device-change
+  rollover warns with the exact `vk device set … --device <serial>` needed to undo it, since a
+  process pointed at the new device cannot drive the old one and restoring one device's values
+  onto another would be worse than leaving it.
+- `RunState` gained `deviceOverrides`, and `device` joined `RECORDABLE` — a report showing
+  "checkout failed" without "we cut the network two steps earlier" points the reader at the
+  wrong culprit. `stepName` renders the whole assignment list (`device set dark=on`).
+- `exec.ts` gained `sleepSync`: the `Driver` interface is entirely synchronous, so a readback
+  poll cannot await a timer. Built on `Atomics.wait`, keeping the zero-runtime-dependency rule.
+
+### Fixed
+- Nothing user-visible yet (this release adds a new capability), but two traps are handled
+  rather than inherited: **`airplane=on` is verified by effect, not by its flag** — Android
+  remembers a user who re-enabled wifi during a previous flight
+  (`airplane_mode_toggleable_radios`), so `airplane-mode enable` can leave wifi *up*; verikun
+  reads that list off the device, confirms each radio it names actually went down, and forces
+  any survivor — because reporting "offline" while the app is still online would make an
+  offline test pass for the wrong reason. And **`airplane=on` is refused over a wireless adb
+  link** (exit 2, `--allow-wireless` overrides), since it would cut the very connection
+  carrying the next command, with no way to turn it back on remotely.
+
 ## [0.18.1] - 2026-08-07
 
 ### Fixed

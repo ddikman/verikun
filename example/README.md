@@ -1,25 +1,32 @@
 # Examples
 
-Two things live here, and both revolve around the same app:
+Three things live here, and all of them revolve around the same app:
 
 - **[`example-test.md`](./example-test.md)** — the *showcase*: a natural-language
   [`vk ai`](../README.md#ai--natural-language-tests) test you can read to see what a
   verikun test looks like, and run on either platform.
-- **[`flutter-app/`](./flutter-app/)** — the app it drives, and the fixture the device e2e
+- **[`example-test-devicestate.md`](./example-test-devicestate.md)** — the same idea applied
+  to the *device* rather than the app: switch it to dark mode and accessibility-sized text,
+  check the fixture still reports itself correctly, then put everything back with
+  `device reset`. The same shape you would use for offline testing
+  (`device set airplane=on`).
+- **[`flutter-app/`](./flutter-app/)** — the app they drive, and the fixture the device e2e
   suite (`npm run test:e2e`) measures `vk` against. Its README carries the measured,
   per-platform facts about what `vk` actually reports for a Flutter UI.
 
 Everything targets `dev.verikun.testapp`, so there is one source of truth: the same app
-backs the prose test, the e2e suite and the documented behaviour. Previously there were two
+backs the prose tests, the e2e suite and the documented behaviour. Previously there were two
 tests driving stock OEM apps — the stock camera on Android and Settings on iOS — which
 depended on whatever shipped on the tester's device, and the Android one really took and
-deleted two photos on every run. The single test that replaced them is **non-destructive**
-and reproducible on any machine.
+deleted two photos on every run. What replaced them is **non-destructive** and reproducible
+on any machine.
 
-`vk suite example` is non-recursive, so it picks up only the `*.md` test here and ignores
-the app directory.
+`vk suite example` is non-recursive, so it picks up only the `*.md` tests here and ignores
+the app directory. Both are written to pass on **either** platform — anything that only
+works on one (`rotation`, `airplane`) lives in `tests/e2e/`, which knows which platform it
+is on and can assert the refusal as well as the success.
 
-## The test
+## The showcase test
 
 Sign in (type a password into a form whose submit button stays disabled until it is valid,
 tick a checkbox), navigate back, then start an **eight-second** load and wait for it —

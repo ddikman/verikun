@@ -24,14 +24,31 @@ Two things drive it now, and both are non-destructive:
 | ![Home screen](screenshots/home.png) | ![Login screen](screenshots/login.png) | ![Delayed load screen](screenshots/async.png) | ![State flags screen](screenshots/state.png) |
 | Reset anchor — `vk launch` always lands here | A prefilled field, an obscured field, a checkbox, and a submit button disabled until both fields are filled | Pick a delay, start a load, watch a spinner — the 8s preset outlasts vk's default wait window on purpose | A mode picker whose two options share one handler, so every tap flips it — and a field that takes real input focus |
 
-Four screens, each earning its place by pinning a specific part of vk's contract:
+Each screen earns its place by pinning a specific part of vk's contract:
 
 | Screen | Ids | What it pins |
 |---|---|---|
-| `@vk_home` | `vk_nav_login`, `vk_nav_async`, `vk_nav_state` | Reset anchor — `vk launch` always lands here |
+| `@vk_home` | `vk_nav_login`, `vk_nav_async`, `vk_nav_scroll`, `vk_nav_state`, `vk_nav_device` | Reset anchor — `vk launch` always lands here |
 | `@vk_login` | `vk_user` (prefilled), `vk_pass` (obscured), `vk_remember`, `vk_submit` (disabled until valid), `vk_login_ok` | `password` flag + report redaction, `text --clear`, `find --enabled`, `checked` |
 | `@vk_async` | `vk_delay_1/3/8`, `vk_load`, `vk_fail`, `vk_spinner`, `vk_loading_text`, `vk_loaded`, `vk_error` | The ~5000 ms auto-wait window, `--wait`, `assert --gone`, dumping while animating |
+| `@vk_scroll` | `vk_scroll_row_*`, `vk_scroll_target`, `vk_scroll_decoy`, `vk_scroll_mode`, `vk_scroll_result` | Off-screen elements and automatic scroll-into-view |
 | `@vk_state` | `vk_mode_photo`, `vk_mode_video`, `vk_mode_status`, `vk_focus_field` | `selected` / `focused` and their `--not-` forms, and the shared-handler toggle that makes them necessary |
+| `@vk_device` | `vk_dev_brightness`, `vk_dev_orientation`, `vk_dev_textscale`, `vk_dev_sample` | `vk device set` — every line is read from `MediaQuery`, i.e. from the platform, so it changes only when the DEVICE changes |
+
+`@vk_device` is the surface that makes device settings *assertable* rather than merely
+screenshot-able. Without it a `device set dark=on` test could only prove the setting
+reached a system database; with it, `assert @vk_dev_brightness --text dark` proves the app
+itself observed the change. The app therefore ships a `darkTheme` — with only a light
+theme, `ThemeMode.system` has nothing to switch to and the check would pass vacuously.
+
+`scripts/capture-device-screens.sh` walks that screen through each setting and shoots it,
+which is how the per-target differences in measured fact 16 were established. Run it
+yourself rather than trusting a committed picture — the numbers depend on the device:
+
+```sh
+scripts/capture-device-screens.sh .context/shots pixel6 --device emulator-5554
+scripts/capture-device-screens.sh .context/shots ios    --ios
+```
 
 The delays are `Future.delayed`, **not** network calls — the fixture is hermetic
 and works on a device in airplane mode.
@@ -419,3 +436,30 @@ after:  Mode: video
 
 That is why the negative form is the load-bearing half: `--selected` alone cannot
 express "leave it alone if it is already right".
+
+### 16. `font-scale` is not the ratio the app ends up applying
+
+`vk device set font-scale=1.3` writes `1.3` to `settings put system font_scale`, and
+the readback verifies it. What the *app* then applies is a different number on both
+platforms, so a test asserting the effective ratio equals `1.30` passes on some
+devices and fails on others:
+
+| Target | `font_scale` asked for | `@vk_dev_textscale` reports |
+|---|---|---|
+| Pixel 3a, Samsung SM-A415F (API 31) | `1.3` | `1.30` |
+| Pixel 6 emulator (API **34**) | `1.3` | `1.26` |
+| iPhone 17 Pro simulator | `1.3` | `1.35` |
+
+Two different causes:
+
+- **Android 14 (API 34) applies non-linear font scaling.** Larger text is scaled less
+  aggressively than small text, so a 16px body at `font_scale 1.3` lands near 1.26.
+  This is deliberate platform behaviour, not a `vk` bug — and it is invisible until
+  you run the same test on an API 34 device, which is exactly how it was found here.
+- **iOS has no float.** It has named Dynamic Type categories, so `1.3` maps to the
+  nearest one (`extra-extra-extra-large`) whose own ratio is ~1.35. `vk` prints the
+  category it applied on stderr, so the mapping is never silent.
+
+So assert that the scale **grew and was restored**, not that it equals a literal —
+`tests/e2e/flutter-app.test.ts` does exactly that. The value is still worth showing on
+`@vk_device`: it is what the layout actually gets, which is the thing that overflows.

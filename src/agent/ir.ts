@@ -17,6 +17,9 @@
 //    structured-output schemas can't express an arbitrary-key object. A pure boolean
 //    flag is value:"true" (flagBool reads 'true' as true; flagStr reads the string).
 
+import { CliError } from '../errors';
+import { isSettingKey, parseDeviceAssignments } from '../device/settings';
+
 export interface FlagSpec {
   name: string;
   value: string;
@@ -136,6 +139,7 @@ export const KNOWN_COMMANDS: ReadonlySet<string> = new Set([
   'screenshot', 'shot',
   'wait', 'assert',
   'launch', 'open', 'stop', 'clear',
+  'device',
   // Inspection/diagnostic commands (`current`, `ui`, `find`, `log`, `logs`) are
   // deliberately NOT here: they are not test actions (the grammar never offers them), so
   // a plan or repair must never emit them — and `log`'s flags reach a device shell
@@ -355,6 +359,45 @@ const READ_FIELDS = new Set(['text', 'desc', 'id', 'idShort']);
  *  name can never smuggle regex/template metacharacters into a selector. */
 const CTX_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * Fold `{command: "device set"}` back into `{command: "device", positionals: ["set", …]}`.
+ *
+ * `device` is the only verb in the grammar with a subcommand, and every other one is a
+ * single word — so the model reliably writes the pair as one command name. That is an
+ * unambiguous spelling of a REAL command, not a hallucination, so normalizing it is the
+ * same kind of leniency as the `click`/`tap` aliases rather than a hole in the
+ * allowlist: an unknown subcommand still falls through and is rejected below.
+ */
+function normalizeLeaf(command: string, positionals: string[]): { command: string; positionals: string[] } {
+  const m = /^device[\s:_-]+(set|get|reset|caps)$/i.exec(command.trim());
+  return m ? { command: 'device', positionals: [m[1].toLowerCase(), ...positionals] } : { command, positionals };
+}
+
+/**
+ * Check a `device` leaf's subcommand and assignments at PLAN-VALIDATION time.
+ *
+ * Every other command is validated only by name, because a bad selector is a runtime
+ * fact the engine can heal. A device setting is different: whether it exists, and
+ * whether the value is legal, are known statically — so catching it here means a
+ * suite that asks for an unknown key fails before the first tap instead of twenty
+ * steps in, on a device it has already half-modified.
+ */
+function validateDeviceStep(positionals: string[], where: string): void {
+  const sub = (positionals[0] ?? '').toLowerCase();
+  if (!['set', 'get', 'reset', 'caps'].includes(sub)) {
+    throw new InvalidPlanError(`${where}: device subcommand must be set|get|reset|caps, got ${JSON.stringify(sub)}`);
+  }
+  const rest = positionals.slice(1);
+  try {
+    if (sub === 'set') parseDeviceAssignments(rest);
+    else for (const k of rest) {
+      if (!isSettingKey(k.trim().toLowerCase())) throw new CliError(`unknown device setting '${k}'`, 2);
+    }
+  } catch (e) {
+    throw new InvalidPlanError(`${where}: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+  }
+}
+
 /** Validate a single node (used for both compile output and a spliced repair).
  *
  *  `depth` is how many control nodes enclose this one. It is the ONLY thing bounding
@@ -398,14 +441,17 @@ export function validateNode(node: unknown, where: string, depth = 0): PlanNode 
 
   switch (n.type) {
     case 'command': {
-      if (typeof n.command !== 'string' || !KNOWN_COMMANDS.has(n.command)) {
-        throw new InvalidPlanError(`${where}: unknown command ${JSON.stringify(n.command)}`);
-      }
+      if (typeof n.command !== 'string') throw new InvalidPlanError(`${where}: unknown command ${JSON.stringify(n.command)}`);
       if (!Array.isArray(n.positionals) || !n.positionals.every((p) => typeof p === 'string')) {
         throw new InvalidPlanError(`${where}: positionals must be a string[]`);
       }
+      const { command, positionals } = normalizeLeaf(n.command, n.positionals as string[]);
+      if (!KNOWN_COMMANDS.has(command)) {
+        throw new InvalidPlanError(`${where}: unknown command ${JSON.stringify(n.command)}`);
+      }
       if (!isFlagSpecArray(n.flags)) throw new InvalidPlanError(`${where}: flags must be {name,value}[]`);
-      return { type: 'command', command: n.command, positionals: n.positionals as string[], flags: n.flags };
+      if (command === 'device') validateDeviceStep(positionals, where);
+      return { type: 'command', command, positionals, flags: n.flags };
     }
     case 'read': {
       const selector = selectorOf();

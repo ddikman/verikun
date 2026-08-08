@@ -4,7 +4,17 @@ import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
+import { adbTransport, severanceRisk } from './drivers/adb';
 import { Bounds, Driver, DeviceInfo, Element, Platform, Point, ToolProbe } from './types';
+import {
+  SETTINGS,
+  SETTING_KEYS,
+  SettingKey,
+  Support,
+  checkSupport,
+  isSettingKey,
+  parseDeviceAssignments,
+} from './device/settings';
 import {
   parseSelector,
   matchElements,
@@ -969,6 +979,202 @@ function cmdClear(ctx: Ctx): number {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// device — control the device the app runs on (see device/settings.ts)
+// ---------------------------------------------------------------------------
+//
+// The capability table is the single source of truth: it validates values, decides
+// what each platform supports, and prints itself via `device caps`. Two properties
+// are load-bearing:
+//
+//  - FAIL EARLY. Every assignment is parsed and capability-checked before ANY device
+//    I/O, so `device set dark=on rotation=landscape` on iOS refuses up front instead
+//    of applying dark mode and then dying — a half-applied device is worse than none.
+//  - SNAPSHOT FIRST. The pre-change value is persisted before the change is made, so
+//    `device reset` can undo it even from a later process.
+
+const DEVICE_USAGE =
+  'Usage: verikun device set <key>=<value> [<key>=<value> ...] | device get [key] | device reset [key ...] | device caps\n' +
+  `Keys: ${SETTING_KEYS.join(', ')}`;
+
+function cmdDevice(ctx: Ctx): number {
+  const sub = (ctx.positionals[0] ?? '').toLowerCase();
+  const rest = ctx.positionals.slice(1);
+  switch (sub) {
+    case 'set':
+      return deviceSet(ctx, rest);
+    case 'get':
+    case 'status':
+      return deviceGet(ctx, rest);
+    case 'reset':
+      return deviceReset(ctx, rest);
+    case 'caps':
+      return deviceCaps(ctx);
+    default:
+      throw new CliError(
+        (sub ? `Unknown 'device' subcommand '${sub}'.\n` : '') + DEVICE_USAGE,
+        2,
+      );
+  }
+}
+
+/** Render a setting value for humans/JSON; a platform that cannot answer says so. */
+const showValue = (v: string | null): string => v ?? 'n/a';
+
+function deviceSet(ctx: Ctx, args: string[]): number {
+  const assignments = parseDeviceAssignments(args);
+
+  // Gate 1: capability, for EVERY key, before touching the device.
+  const support = new Map<SettingKey, Support>();
+  for (const { key } of assignments) support.set(key, checkSupport(key, ctx.platform));
+
+  // Gate 2: would this cut the wire we are talking over? Only wireless adb is at
+  // risk, and only from the radios. A stderr warning would be useless here — the
+  // command that reads it is the one that just lost its transport — so refuse, and
+  // require an explicit opt-in to accept losing the link.
+  if (ctx.platform === 'android') {
+    const transport = adbTransport(ctx.driver.resolvedSerial());
+    for (const { key, value } of assignments) {
+      if (severanceRisk(transport, key, value) && !flagBool(ctx.flags, 'allow-wireless')) {
+        throw new CliError(
+          `Refusing to set ${key}=${value} over a wireless adb connection (${ctx.driver.resolvedSerial()}): ` +
+            'it would cut the link carrying this session, and nothing could turn it back on remotely.\n' +
+            'Connect over USB, or pass --allow-wireless to accept losing the connection.',
+          2,
+        );
+      }
+    }
+  }
+
+  const applied: Record<string, string> = {};
+  for (const { key, value } of assignments) {
+    // A no-op key has nothing to put back, so it is never snapshotted.
+    if (support.get(key) !== 'noop') snapshotSetting(ctx, key);
+    ctx.driver.setDeviceSetting(key, value);
+    applied[key] = value;
+  }
+
+  const summary = assignments.map((a) => `${a.key}=${a.value}`).join(' ');
+  ctx.record?.note({ message: `device set ${summary}` });
+  if (flagBool(ctx.flags, 'json')) json({ set: applied });
+  else out(`device set ${summary}`);
+  return 0;
+}
+
+/** Persist what a setting held before we change it. Warns rather than fails when the
+ *  value can't be captured — the change still happens, it just can't be auto-undone. */
+function snapshotSetting(ctx: Ctx, key: SettingKey): void {
+  if (!ctx.record) {
+    // Recording disabled (VERIKUN_NO_RUN=1): there is nowhere to persist the original,
+    // so this change is one-way. Say so rather than implying reset will handle it.
+    err(`warning: run recording is off, so '${key}' was not snapshotted — \`device reset\` cannot restore it`);
+    return;
+  }
+  const original = ctx.driver.getDeviceSetting(key);
+  if (original === null) {
+    err(`warning: could not read the current '${key}' — \`device reset\` will not restore it`);
+    return;
+  }
+  ctx.record.rememberDeviceOverride(key, original);
+}
+
+function deviceGet(ctx: Ctx, args: string[]): number {
+  const keys = args.length ? args.map(requireSettingKey) : SETTING_KEYS;
+  const values: Record<string, string> = {};
+  for (const key of keys) {
+    values[key] = SETTINGS[key].support[ctx.platform] === 'unsupported'
+      ? 'n/a'
+      : showValue(ctx.driver.getDeviceSetting(key));
+  }
+  if (flagBool(ctx.flags, 'json')) json(values);
+  else for (const key of keys) out(`${key.padEnd(12)} ${values[key]}`);
+  return 0;
+}
+
+function deviceReset(ctx: Ctx, args: string[]): number {
+  // Read from the recorder's in-flight state, not from disk: this step's own commit()
+  // will write that state back, so a disk-level delete here would be undone.
+  const overrides = ctx.record?.deviceOverrides() ?? {};
+  const wanted = args.length ? args.map(requireSettingKey) : (Object.keys(overrides) as SettingKey[]);
+  const restored: Record<string, string> = {};
+  const failed: string[] = [];
+
+  for (const key of wanted) {
+    const original = overrides[key];
+    if (original === undefined) continue; // never changed by this run — leave it alone
+    try {
+      ctx.driver.setDeviceSetting(key, original);
+      restored[key] = original;
+    } catch (e) {
+      // Best-effort by design: reset is usually reached while cleaning up after a
+      // failure, and one stubborn setting must not stop the rest being put back.
+      failed.push(`${key} (${e instanceof Error ? e.message.split('\n')[0] : String(e)})`);
+    }
+  }
+  ctx.record?.forgetDeviceOverrides(Object.keys(restored));
+
+  const summary = Object.entries(restored).map(([k, v]) => `${k}=${v}`).join(' ');
+  ctx.record?.note({ message: summary ? `device reset ${summary}` : 'device reset (nothing to restore)' });
+  if (failed.length) err(`warning: could not restore ${failed.join(', ')}`);
+  if (flagBool(ctx.flags, 'json')) json({ restored, ...(failed.length ? { failed } : {}) });
+  else out(summary ? `device reset ${summary}` : 'device reset: nothing to restore');
+  return 0;
+}
+
+function deviceCaps(ctx: Ctx): number {
+  const rows = SETTING_KEYS.map((key) => {
+    const spec = SETTINGS[key];
+    const support = spec.support[ctx.platform];
+    return {
+      key,
+      values: spec.values,
+      support,
+      describe: spec.describe,
+      ...(support === 'unsupported' && spec.manual[ctx.platform] ? { manual: spec.manual[ctx.platform] } : {}),
+      ...(spec.note[ctx.platform] ? { note: spec.note[ctx.platform] } : {}),
+    };
+  });
+  if (flagBool(ctx.flags, 'json')) {
+    json({ platform: ctx.platform, settings: rows });
+    return 0;
+  }
+  out(`device settings on ${ctx.platform}:`);
+  for (const r of rows) {
+    out(`  ${r.key.padEnd(12)} ${r.support.padEnd(12)} ${r.values}`);
+    out(`  ${' '.repeat(12)} ${r.describe}`);
+    if (r.manual) out(`  ${' '.repeat(12)} unsupported: ${r.manual.replace(/\n/g, ' ')}`);
+    if (r.note) out(`  ${' '.repeat(12)} note: ${r.note}`);
+  }
+  return 0;
+}
+
+function requireSettingKey(v: string): SettingKey {
+  const k = v.trim().toLowerCase();
+  if (!isSettingKey(k)) {
+    throw new CliError(`Unknown device setting '${v}'. Known: ${SETTING_KEYS.join(', ')}.`, 2);
+  }
+  return k;
+}
+
+/**
+ * Put back every device setting this run changed. Best-effort and silent about
+ * "nothing to do", because it runs from a `finally` — the flow may well be unwinding
+ * from the very failure that left the device in a modified state.
+ *
+ * Runs through the backend rather than a Driver so the local and remote paths are the
+ * same code. (Remote is a known gap: the overrides live in the *server's* run file, so
+ * a locally-empty snapshot means this correctly skips — see the issue's Out of scope.)
+ */
+async function restoreDeviceOverrides(backend: ExecBackend): Promise<void> {
+  if (!Recorder.hasDeviceOverrides()) return;
+  try {
+    err('[verikun] restoring device settings changed by this run…');
+    await backend.exec('device', ['reset'], {});
+  } catch {
+    /* the device may be exactly why we are unwinding — never mask the real error */
+  }
+}
+
 function cmdCurrent(ctx: Ctx): number {
   out(ctx.driver.currentApp());
   return 0;
@@ -1189,27 +1395,40 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
     return 0;
   }
 
-  for (const { n, text } of commands) {
-    let code: number;
-    try {
-      const { command, positionals: pos, flags } = parseArgs(tokenizeLine(text));
-      if (!command) continue; // tokens were all flags — nothing to run
-      if (command === 'batch') {
-        throw new CliError(`batch: a batch line may not itself be 'batch' (line ${n})`, 2);
+  // The finally is what makes `device set` safe to use in a batch: a line that fails
+  // (or a ^C) still puts the device back, instead of leaving it offline or rotated.
+  try {
+    for (const { n, text } of commands) {
+      let code: number;
+      try {
+        const { command, positionals: pos, flags } = parseArgs(tokenizeLine(text));
+        if (!command) continue; // tokens were all flags — nothing to run
+        if (command === 'batch') {
+          throw new CliError(`batch: a batch line may not itself be 'batch' (line ${n})`, 2);
+        }
+        if (!quiet) err(`[verikun] batch ${n}: ${text}`);
+        code = await executeParsed(command, pos, withBatchGlobals(flags, batchFlags));
+      } catch (e) {
+        // A malformed line (bad quoting, nested batch) is itself an error to halt on.
+        code = mapError(e, batchFlags);
       }
-      if (!quiet) err(`[verikun] batch ${n}: ${text}`);
-      code = await executeParsed(command, pos, withBatchGlobals(flags, batchFlags));
-    } catch (e) {
-      // A malformed line (bad quoting, nested batch) is itself an error to halt on.
-      code = mapError(e, batchFlags);
+      if (code !== 0) {
+        err(`[verikun] batch stopped at line ${n} (\`${text}\`) — exit ${code}`);
+        return code;
+      }
     }
-    if (code !== 0) {
-      err(`[verikun] batch stopped at line ${n} (\`${text}\`) — exit ${code}`);
-      return code;
+    if (!quiet) err(`[verikun] batch: ${commands.length} command(s) ok`);
+    return 0;
+  } finally {
+    if (Recorder.hasDeviceOverrides()) {
+      err('[verikun] restoring device settings changed by this batch…');
+      try {
+        await executeParsed('device', ['reset'], withBatchGlobals({}, batchFlags));
+      } catch {
+        /* the device may be exactly why we are unwinding — never mask the real error */
+      }
     }
   }
-  if (!quiet) err(`[verikun] batch: ${commands.length} command(s) ok`);
-  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1725,6 +1944,9 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   try {
     result = await runAiTest(file, opts, backend, platform, device);
   } finally {
+    // Undo any device setting the test changed, INCLUDING when it failed part-way —
+    // otherwise an unattended run leaves the phone offline or in dark mode.
+    await restoreDeviceOverrides(backend);
     await backend.close?.(); // frees a remote server's device lock for the next command
   }
 
@@ -1803,6 +2025,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
       preflight: () => backend.preflight?.(),
     });
   } finally {
+    await restoreDeviceOverrides(backend);
     await backend.close?.();
   }
 }
@@ -1854,6 +2077,8 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
       return cmdStop(ctx);
     case 'clear':
       return cmdClear(ctx);
+    case 'device':
+      return cmdDevice(ctx);
     case 'current':
       return cmdCurrent(ctx);
     case 'log':
@@ -1901,7 +2126,7 @@ async function executeOutcome(
   // Recordable commands open a step (auto-starting an implicit run if needed);
   // the step is finalized with the outcome — and, on failure, screenshot + UI
   // hierarchy of the page are captured — whether the command returns or throws.
-  const recordable = isRecordable(command);
+  const recordable = isRecordable(command, positionals);
   let driver: Driver | undefined = sharedDriver;
   let recorder: Recorder | null = null;
   try {
@@ -2086,6 +2311,22 @@ ACT
                                       idb install). With --server, uploads the file to a
                                       remote vk server (which must run --allow-install)
 
+DEVICE STATE (change the device the app runs on, then put it back)
+  device set <key>=<value> ...        Apply settings, snapshotting each original first.
+                                      Keys: ${SETTING_KEYS.join(', ')}
+                                      e.g. \`device set airplane=on\` to test offline handling,
+                                      \`device set dark=on font-scale=1.3 rotation=landscape\`.
+                                      Each change is verified by reading it back — the
+                                      underlying device commands silently no-op on some skins.
+  device get [key] [--json]           Show current values ('n/a' where unsupported)
+  device reset [key ...]              Restore what this run changed. batch/ai/suite also
+                                      do this automatically when the flow ends OR fails,
+                                      so a dead test can't leave the phone offline.
+  device caps [--json]                What this platform supports, and the manual
+                                      equivalent where it doesn't
+                                      Refuses \`airplane=on\` over wireless adb (it would cut
+                                      this very connection); --allow-wireless overrides.
+
 BATCH (script many commands in one process)
   batch [--file path] [--quiet]       Run newline-separated commands — from --file,
                                       else piped stdin — each exactly as its own
@@ -2209,5 +2450,7 @@ EXIT CODES
 
 iOS (--ios): full parity via idb — ui/tap/text/swipe/key + screenshot/launch/stop.
   Needs idb (\`brew install idb-companion\` + \`pip install fb-idb\`); see \`vk doctor --ios\`.
-  Caveats: no \`clear\` (no per-app reset), \`current\` is (unknown), device logs are simulator-only.`;
+  Caveats: no \`clear\` (no per-app reset), \`current\` is (unknown), device logs are simulator-only.
+  \`device set\`: dark + font-scale work on a SIMULATOR (font-scale maps to the nearest
+  Dynamic Type category); airplane and rotation are unsupported — run \`vk device caps --ios\`.`;
 }

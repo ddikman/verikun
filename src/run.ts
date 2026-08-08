@@ -89,6 +89,11 @@ export interface RunState {
    *  abort. Those never run through beginStep, so nothing marked the run red and the
    *  archive declared a failed test green. The report trusts this over the step tally. */
   failure?: { where: string; reason: string };
+  /** Device settings this run changed, each mapped to the value that was live BEFORE
+   *  verikun first touched it. Kept in the run file rather than in a process-local
+   *  variable so `vk device reset` still works from a LATER process — every vk call
+   *  is its own process, so an in-memory latch could not undo a flow that died. */
+  deviceOverrides?: Record<string, string>;
   steps: RunStep[];
 }
 
@@ -113,9 +118,17 @@ const RECORDABLE = new Set([
   'wait', 'assert',
   'launch', 'open', 'stop', 'clear',
   'log', 'logs',
+  // `device` changes the environment the app runs in. A report showing "checkout
+  // failed" without "we cut the network two steps earlier" would be misleading.
+  'device',
 ]);
 
-export function isRecordable(command: string): boolean {
+export function isRecordable(command: string, positionals: string[] = []): boolean {
+  // `device` is the one command that is recordable only in part: `set`/`reset` change
+  // the environment the app runs in and belong in the report, while `get`/`caps` are
+  // pure inspection — recording those would auto-start a test run just for asking what
+  // the device supports, exactly the noise `ui`/`find` are excluded to avoid.
+  if (command === 'device') return ['set', 'reset'].includes((positionals[0] ?? '').toLowerCase());
   return RECORDABLE.has(command);
 }
 
@@ -336,6 +349,10 @@ export function stepName(command: string, positionals: string[], flags: Record<s
     case 'home':
     case 'enter':
       return command;
+    case 'device':
+      // The payload IS the story here — "device set" alone would tell a report
+      // reader nothing about what changed, so keep the whole assignment list.
+      return `device ${p.join(' ')}`.trim();
     default:
       return `${command} ${p[0] ?? ''}`.trim();
   }
@@ -376,9 +393,31 @@ export class Recorder {
     let rolledOver = false;
 
     // Close a stale / context-mismatched run before continuing.
+    let carriedOverrides: Record<string, string> | undefined;
     if (state) {
       const reason = rolloverReason(state, serial, session);
       if (reason) {
+        // A sealed run takes its deviceOverrides with it, and `device reset` reads the
+        // ACTIVE run — so without this the device silently stays modified and reset
+        // cheerfully reports "nothing to restore". Same device: carry the snapshot into
+        // the fresh run so reset still works. Different device: we cannot drive the old
+        // one from here, so say exactly what was left changed and where.
+        const stranded = state.deviceOverrides ?? {};
+        if (Object.keys(stranded).length > 0) {
+          // Same predicate as the log-attribution check: "is the device in front of us
+          // still the one this run was bound to?"
+          const sameDevice = rolloverLogsSameDevice(state.device, serial);
+          if (sameDevice) {
+            carriedOverrides = stranded;
+          } else {
+            const listed = Object.entries(stranded).map(([k, v]) => `${k} (was ${v})`).join(', ');
+            err(
+              `[verikun] WARNING: run for device ${state.device} is being closed while it still has ` +
+                `device settings applied: ${listed}. That device was NOT restored — put it back with ` +
+                `\`vk device set ${Object.entries(stranded).map(([k, v]) => `${k}=${v}`).join(' ')} --device ${state.device}\``,
+            );
+          }
+        }
         try {
           // Only reuse this step's driver when it still targets the run's device.
           // A device-change rollover must not write the new device's logcat into
@@ -407,6 +446,9 @@ export class Recorder {
         device: serial || deviceReq,
         session,
         implicit: true,
+        // Survives a same-device rollover, so `device reset` can still undo what an
+        // earlier run applied to the device now in front of us.
+        ...(carriedOverrides ? { deviceOverrides: carriedOverrides } : {}),
         steps: [],
       };
       if (!rolledOver) {
@@ -691,6 +733,42 @@ export class Recorder {
 
   static status(): RunState | null {
     return loadState(activeDir());
+  }
+
+  // --- device overrides ---------------------------------------------------
+  //
+  // These are INSTANCE methods on purpose. A recorder holds the run state in memory
+  // for the duration of a step and writes the whole thing in commit(), so a static
+  // that loaded-mutated-saved the file mid-step would be silently overwritten a
+  // moment later by that commit — the snapshot would vanish and `device reset` would
+  // have nothing to undo. Mutating this.state lets commit() persist it.
+
+  /**
+   * Record what a device setting held BEFORE this run changed it. Keeps the EARLIEST
+   * original: setting `dark` twice must still restore to the pre-run appearance, not
+   * to the intermediate value.
+   */
+  rememberDeviceOverride(key: string, original: string): void {
+    this.state.deviceOverrides ??= {};
+    if (!(key in this.state.deviceOverrides)) this.state.deviceOverrides[key] = original;
+  }
+
+  /** The pre-run values of every device setting this run changed. */
+  deviceOverrides(): Record<string, string> {
+    return this.state.deviceOverrides ?? {};
+  }
+
+  /** Drop override records once they have been restored (all, or a named subset). */
+  forgetDeviceOverrides(keys?: string[]): void {
+    if (!this.state.deviceOverrides) return;
+    if (keys) for (const k of keys) delete this.state.deviceOverrides[k];
+    else this.state.deviceOverrides = {};
+  }
+
+  /** Whether the run on disk has anything to restore. Used OUTSIDE a step — by the
+   *  batch/ai/suite teardown deciding whether a `device reset` is worth issuing. */
+  static hasDeviceOverrides(): boolean {
+    return Object.keys(Recorder.status()?.deviceOverrides ?? {}).length > 0;
   }
 
   /** Merge a patch into the active run (used by `vk ai` to attach its summary

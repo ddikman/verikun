@@ -8,12 +8,12 @@
 // but never runs them (see harness.ts). Every case here is model-free except the
 // `vk ai` one, which is why that one is behind its own env var.
 
-import { before, describe, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { APP_ID, byId, isAndroid, openScreen, ui, unavailable, vk } from './harness';
+import { APP_ID, byId, isAndroid, labelField, openScreen, ui, unavailable, vk } from './harness';
 import type { RunState } from '../../src/run';
 
 // One probe for the whole file: with no device or no fixture, skip with a
@@ -559,6 +559,153 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
 
       const html = readFileSync(join(runDir, 'report.html'), 'utf8');
       assert.match(html, /This run did not pass/);
+    });
+  });
+
+  // `vk device set` changes the device the app runs on. The fixture's Device state
+  // screen reports what the PLATFORM tells the app (MediaQuery, not app state), so
+  // asserting on those lines proves a setting actually reached the app rather than
+  // merely landing in a system database — the difference between a real offline test
+  // and one that goes green while the app is still online.
+  //
+  // Everything here restores in `after`, so a failure mid-run cannot leave the device
+  // dark, rotated or enlarged for the next test in the file.
+  describe('device settings', () => {
+    before(() => openScreen('device'));
+    after(() => dev(['reset']));
+
+    // LOAD-BEARING: every device set/reset must run with recording ON. The snapshot of
+    // the pre-change value lives in the run file, so under the suite's default
+    // VERIKUN_NO_RUN=1 a `set` records nothing and the matching `reset` silently
+    // restores nothing — the tests would pass while leaving the device modified.
+    const dev = (args: string[]) => vk(['device', ...args], { record: true });
+
+    /**
+     * The value one Device-state line currently shows, as the APP reports it.
+     *
+     * Reads via labelField() because a Flutter label lands in `desc` on Android and
+     * `text` on iOS (measured fact 4 in example/flutter-app/README.md) — hard-coding
+     * `text` here silently returns '' on Android and fails for the wrong reason.
+     */
+    const lineText = (id: string): string => {
+      const found = JSON.parse(vk(['find', `@${id}`, '--json']).stdout) as Array<Record<string, string>>;
+      return found[0]?.[labelField()] ?? '';
+    };
+    const brightness = () => lineText('vk_dev_brightness');
+    const orientation = () => lineText('vk_dev_orientation');
+
+    test('caps reports this platform honestly', () => {
+      const r = dev(['caps', '--json']);
+      assert.equal(r.code, 0, r.stderr);
+      const caps = JSON.parse(r.stdout) as {
+        settings: Array<{ key: string; support: string; manual?: string }>;
+      };
+      const byKey = Object.fromEntries(caps.settings.map((s) => [s.key, s]));
+      assert.equal(byKey.dark.support, 'supported', 'dark should work on both platforms');
+      if (isAndroid) {
+        assert.equal(byKey.rotation.support, 'supported');
+        assert.equal(byKey.airplane.support, 'supported');
+      } else {
+        // The honest-degrade contract: refuse, and say what to do by hand instead.
+        assert.equal(byKey.rotation.support, 'unsupported');
+        assert.equal(byKey.airplane.support, 'unsupported');
+        assert.ok(byKey.rotation.manual, 'an unsupported key must name a manual equivalent');
+        assert.equal(byKey['stay-awake'].support, 'noop');
+      }
+    });
+
+    test('dark mode reaches the app, and reset brings it back', () => {
+      // Flip whatever the device is CURRENTLY on rather than assuming it starts light:
+      // a phone in daily use is often already in dark mode, and a test that fails
+      // because of the tester's own preference is a test nobody trusts.
+      const before = brightness();
+      assert.ok(['light', 'dark'].includes(before), `unexpected brightness line: ${before}`);
+      const flipped = before === 'dark' ? 'off' : 'on';
+      const want = before === 'dark' ? 'light' : 'dark';
+
+      assert.equal(dev(['set', `dark=${flipped}`]).code, 0);
+      assert.equal(brightness(), want, 'the app never saw the brightness change');
+
+      assert.equal(dev(['reset']).code, 0);
+      assert.equal(brightness(), before, 'reset did not restore the original brightness');
+    });
+
+    test('reset restores the value that was live BEFORE the run, not a default', () => {
+      // The whole point of snapshotting: a phone in daily use has usually drifted from
+      // the defaults already, and clobbering that would be its own bug.
+      const before = JSON.parse(dev(['get', '--json']).stdout) as Record<string, string>;
+      assert.equal(dev(['set', 'dark=on']).code, 0);
+      assert.equal(dev(['reset']).code, 0);
+      const after = JSON.parse(dev(['get', '--json']).stdout) as Record<string, string>;
+      assert.deepEqual(after, before);
+    });
+
+    test('an unknown key or value is a usage error, before touching the device', () => {
+      const before = brightness();
+      assert.equal(dev(['set', 'bogus=1']).code, 2);
+      assert.equal(dev(['set', 'dark=maybe']).code, 2);
+      assert.equal(dev(['set', 'dark']).code, 2);
+      // Unchanged — a rejected command must not half-apply.
+      assert.equal(brightness(), before);
+    });
+
+    test('rotation re-lays out the app', { skip: !isAndroid && 'Android only' }, () => {
+      // Pin the starting orientation through the same mechanism instead of assuming
+      // the device is held portrait. Doing it as a `set` also means the snapshot keeps
+      // the EARLIEST original, so the single reset below still restores what the
+      // device really had — which is that "earliest wins" rule under test for free.
+      const before = orientation();
+      assert.equal(dev(['set', 'rotation=portrait']).code, 0);
+      assert.equal(orientation(), 'portrait');
+
+      assert.equal(dev(['set', 'rotation=landscape']).code, 0);
+      assert.equal(orientation(), 'landscape', 'the app never saw the orientation change');
+
+      assert.equal(dev(['reset']).code, 0);
+      assert.equal(orientation(), before, 'reset did not restore the pre-test orientation');
+    });
+
+    test('font-scale reaches the app', () => {
+      // Asserts the scale WENT UP and comes back, not that it equals 1.30 — because the
+      // effective ratio is not the number you asked for on either platform:
+      //   - Android 14+ (API 34) applies NON-LINEAR font scaling, so a 16px body at
+      //     font_scale 1.3 reports ~1.26. Measured on a Pixel 6 emulator; a Pixel 3a and
+      //     a Samsung on API 31 both report 1.30, which is how the API-31 assumption
+      //     baked into an earlier version of this test survived until it didn't.
+      //   - iOS has named Dynamic Type categories rather than a float, so 1.3 lands on
+      //     the nearest one and reports ~1.35.
+      // "Bigger than before, and restored after" is the claim that is true everywhere.
+      const before = Number(lineText('vk_dev_textscale'));
+      assert.ok(Number.isFinite(before), `text scale line is not a number: ${lineText('vk_dev_textscale')}`);
+
+      // Pin BOTH ends through the same mechanism rather than assuming the device does
+      // not already sit at the target — a previous run that died mid-test leaves it
+      // there, and then "set 1.3" changes nothing and the test fails for the wrong
+      // reason. The snapshot keeps the earliest original, so one reset still undoes it.
+      assert.equal(dev(['set', 'font-scale=1.0']).code, 0);
+      const small = Number(lineText('vk_dev_textscale'));
+      assert.equal(dev(['set', 'font-scale=1.5']).code, 0);
+      const large = Number(lineText('vk_dev_textscale'));
+      assert.ok(large > small, `text scale did not grow: ${small} -> ${large}`);
+
+      assert.equal(dev(['reset']).code, 0);
+      assert.equal(Number(lineText('vk_dev_textscale')), before, 'reset did not restore the text scale');
+    });
+
+    test('an unsupported setting exits 3 naming the manual equivalent', { skip: isAndroid && 'iOS only' }, () => {
+      const r = dev(['set', 'rotation=landscape']);
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, /not supported on ios/i);
+      assert.match(r.stderr, /Simulator window|Cmd\+Left/, 'no manual equivalent offered');
+    });
+
+    test('device get/caps do not start a test run', () => {
+      // They are inspection, like `ui`/`find`. Recording them would auto-start a run
+      // just for asking what the platform supports.
+      vk(['run', 'clear'], { record: true });
+      assert.equal(dev(['get']).code, 0);
+      assert.equal(dev(['caps']).code, 0);
+      assert.match(vk(['run', 'status'], { record: true }).stdout, /no active test run/i);
     });
   });
 });

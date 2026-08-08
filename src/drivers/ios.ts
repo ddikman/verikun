@@ -6,6 +6,13 @@ import { CliError, probeFailure } from '../errors';
 import { runText } from '../exec';
 import { parseIosHierarchy } from '../ui/ios-parse';
 import { viewportFor } from '../ui/viewport';
+import {
+  SettingKey,
+  canonicalFontScale,
+  contentSizeToFontScale,
+  fontScaleToContentSize,
+} from '../device/settings';
+import { err } from '../output';
 
 // iOS driver. `xcrun simctl` / `devicectl` cover device discovery and — on a
 // simulator — screenshots, app lifecycle, and logs (no extra install needed).
@@ -474,6 +481,104 @@ export class IdbDriver implements Driver {
       return runText(XCRUN, ['simctl', 'spawn', this.udid(), 'date', '+%Y-%m-%d %H:%M:%S']).stdout.trim();
     } catch {
       return '';
+    }
+  }
+
+  // --- device settings ------------------------------------------------------
+  //
+  // Only two of the five keys exist on iOS, and only on a SIMULATOR: `simctl ui`
+  // offers appearance / content_size / increase_contrast and nothing else, while
+  // `idb ui` is purely interaction (tap/text/key/swipe/describe). A physical device
+  // has no scriptable settings surface at all. Rather than fake the gap — a
+  // status-bar override would repaint the wifi glyph without cutting any traffic —
+  // the unsupported keys refuse with exit 3 and name the manual equivalent, the way
+  // clearApp does.
+
+  /** `simctl ui <udid> <option>` with no argument reads the current value. */
+  private simctlUi(option: string, value?: string): string {
+    const args = ['simctl', 'ui', this.udid(), option, ...(value ? [value] : [])];
+    const r = runText(XCRUN, args);
+    if (r.code !== 0) {
+      throw new CliError(`simctl ui ${option} failed: ${r.stderr.trim() || `exit code ${r.code}`}`, 3);
+    }
+    return r.stdout.trim();
+  }
+
+  /** Shared refusal for a key iOS cannot honor. */
+  private unsupportedSetting(key: SettingKey, detail: string): never {
+    throw new CliError(`Device setting '${key}' is not supported on iOS.\n${detail}`, 3);
+  }
+
+  private assertSimulator(key: SettingKey): void {
+    if (!this.isSimulator()) {
+      this.unsupportedSetting(
+        key,
+        'A physical iOS device exposes no scriptable settings surface (simctl drives simulators ' +
+          'only, and idb covers interaction, not preferences). Change it by hand in Settings.',
+      );
+    }
+  }
+
+  getDeviceSetting(key: SettingKey): string | null {
+    // Best-effort by contract: never throw, so a snapshot of a key this platform
+    // cannot answer simply declines to restore it rather than aborting the run.
+    try {
+      if (!this.isSimulator()) return null;
+      switch (key) {
+        case 'dark': {
+          const v = this.simctlUi('appearance').toLowerCase();
+          return v === 'dark' ? 'on' : v === 'light' ? 'off' : null;
+        }
+        case 'font-scale': {
+          // simctl also answers 'unknown' / 'unsupported'; both map to null.
+          const scale = contentSizeToFontScale(this.simctlUi('content_size'));
+          return scale === null ? null : canonicalFontScale(scale);
+        }
+        case 'airplane':
+        case 'rotation':
+        case 'stay-awake':
+          return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  setDeviceSetting(key: SettingKey, value: string): void {
+    switch (key) {
+      case 'dark': {
+        this.assertSimulator(key);
+        this.simctlUi('appearance', value === 'on' ? 'dark' : 'light');
+        return;
+      }
+      case 'font-scale': {
+        this.assertSimulator(key);
+        // iOS has named Dynamic Type categories where Android has a float, so the
+        // value is mapped — and the category we actually applied is echoed, because
+        // silently landing on a different size than asked for would be a lie.
+        const category = fontScaleToContentSize(Number(value));
+        this.simctlUi('content_size', category);
+        err(`note: font-scale ${value} applied on iOS as content size '${category}'`);
+        return;
+      }
+      case 'stay-awake':
+        // Honest no-op: a simulator never sleeps, so the intent is already satisfied.
+        this.assertSimulator(key);
+        err('note: stay-awake is a no-op on iOS — simulators do not sleep');
+        return;
+      case 'airplane':
+        return this.unsupportedSetting(
+          key,
+          'A simulator has no radio to switch off (`simctl status_bar override --wifiMode failed` ' +
+            'only repaints the status bar). Use Xcode > Open Developer Tool > Network Link ' +
+            "Conditioner, or toggle the host Mac's own network — the simulator shares it.",
+        );
+      case 'rotation':
+        return this.unsupportedSetting(
+          key,
+          'Neither `simctl ui` (appearance/content_size/increase_contrast only) nor `idb ui` ' +
+            'exposes orientation. Rotate the Simulator window by hand (Cmd+Left / Cmd+Right).',
+        );
     }
   }
 }
