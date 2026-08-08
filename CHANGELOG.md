@@ -15,7 +15,11 @@ All notable changes to this project are documented here. The format is based on
   rather than dangle.
 - **Packaging is now verified against the built artifact, not just the config.** New
   `scripts/check-package-contents.mjs` packs the tarball and asserts its real contents — required
-  docs present, the contributor-only `create-pr` skill and `src/`/`tests/` absent. It runs in CI on
+  docs present; environment/secret files (`.env*`, `*.pem`/`*.key`/`*.keystore`), the
+  contributor-only `create-pr` skill, and `src/`/`tests/` absent. The secrets assertion is a third
+  independent layer: the `files` allowlist and `.gitignore`'s `.env*` rules already exclude them, but
+  npm's own always-excluded list does *not* cover `.env`, so removing both leaves no warning — and a
+  leaked credential can't be unpublished out of mirrors. It runs in CI on
   every PR and as a release gate in `publish.yml` before `npm publish`, where a mistake would
   otherwise burn a version number npm will not let us reuse. This catches what an allowlist check
   structurally cannot: a stray `.npmignore`, a change in how npm treats the `.claude/`

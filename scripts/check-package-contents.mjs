@@ -43,6 +43,16 @@ const required = [
 // Patterns that must NOT appear. create-pr is contributor-only (metadata.internal: true);
 // src/ and tests/ appearing means the "files" allowlist stopped being applied at all.
 const forbidden = [
+  // Highest-consequence check here, and the only one that is not recoverable: a published tarball
+  // is mirrored and cached within seconds, so an unpublish does not un-leak a credential.
+  // Two layers already keep these out — the "files" allowlist, and .gitignore's `.env` / `.env.*`
+  // (npm falls back to gitignore rules when "files" is absent). This is a third, independent layer,
+  // because npm's own always-excluded list does NOT cover .env: drop the allowlist and edit
+  // .gitignore and the fallback is gone with no warning.
+  {
+    label: 'environment / secret files',
+    match: (p) => /(^|\/)\.env/.test(p) || /\.(pem|key|p12|keystore|jks)$/.test(p),
+  },
   { label: 'the contributor-only create-pr skill', match: (p) => p.includes('create-pr') },
   { label: 'TypeScript sources (is "files" still set?)', match: (p) => p.startsWith('src/') },
   { label: 'the test suite (is "files" still set?)', match: (p) => p.startsWith('tests/') },
