@@ -36,6 +36,8 @@ npm install -g verikun    # installs the `verikun` and `vk` commands globally
 
 Then run `vk doctor` to check your setup. Re-run the same command to upgrade later.
 
+The package also carries the agent [`SKILL.md`](.claude/skills/verikun/SKILL.md), the [`CHANGELOG`](CHANGELOG.md) and the [`example/`](example) tests, so they ship with your install (the Flutter fixture app under `example/` is repo test infrastructure and is not included). *Registering* that skill with a particular agent is a separate step — that's what the two sections below do.
+
 ### Install as a Claude Code plugin
 
 This repo doubles as a Claude Code [plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces). Installing the plugin gives Claude the `verikun` skill — the agent-facing usage guide — so it knows how to drive devices.

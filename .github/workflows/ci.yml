@@ -51,6 +51,14 @@ jobs:
         env:
           TEST_SUMMARY_LABEL: Node ${{ matrix.node-version }}
 
+      # Packs the tarball and asserts its actual contents. The unit suite checks
+      # package.json's "files" allowlist (our intent); this checks the artifact (the
+      # result). The gap between them is where the "no CHANGELOG.md for six releases"
+      # bug lived — publish succeeded and CI was green the whole time. Runs on PRs so
+      # a packaging mistake is caught at review, not at `git push --tags`.
+      - name: Verify npm package contents
+        run: node scripts/check-package-contents.mjs
+
       # Surface that markdown summary on the run's page (the "Summary" tab), so a
       # formatted test list is one click away instead of buried in the log.
       # `always()` so it still reports when tests fail — that is when it matters.
