@@ -36,6 +36,10 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+          # Pin the cache key to the ROOT lockfile. Without this, setup-node globs the
+          # workspace recursively and docs/package-lock.json (the docs site, a separate
+          # npm project) would feed into the hash — busting this cache on every docs edit.
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci

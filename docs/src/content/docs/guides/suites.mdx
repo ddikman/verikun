@@ -1,0 +1,122 @@
+---
+title: Suites
+description: Run a directory of natural-language tests as one gated pass/fail run, with an overview report and a CI-ready exit code.
+sidebar:
+  order: 3
+---
+
+import { Image } from 'astro:assets';
+import suiteOverview from '../../../../pr/55-suite-retries-overview.png';
+
+`vk suite <dir>` runs every `*.md` in a directory through the
+[`vk ai`](/verikun/guides/natural-language-tests/) engine, sequentially, against one shared
+device — local or [remote](/verikun/guides/remote-devices-and-ci/):
+
+```sh
+vk suite tests/ --app com.example.app                              # local device
+vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote device
+```
+
+## How it runs
+
+- **Ordering is lexicographic.** Prefix files `01-…`, `02-…` to sequence them. `README.md`
+  is skipped — it documents the suite, it is not a test.
+- **Isolation between tests.** With `--app <id>`, the app's data is cleared before each test
+  (`pm clear`; iOS degrades to a force-stop, since it has no per-app reset). Without
+  `--app`, make each test self-isolating — start the prose with `launch <pkg> --clear`.
+- **Each test is a full `vk ai` run** — plan cache, self-healing, cost budget, and its own
+  archived JUnit + HTML report under `./.verikun/runs/<id>/`. A test that fails or errors
+  does not stop the suite; the rest still run.
+- **All `ai` flags apply to every test** — `--model`, `--max-cost-usd`, `--timeout`, and so
+  on.
+- **Preflight is up front.** Both the provider (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or
+  the `codex` / `cursor-agent` CLI) **and** the device toolchain (`adb` / `idb` plus a
+  resolvable device) are checked before anything is compiled.
+
+## The exit code is the CI gate
+
+| Code | Meaning |
+|---|---|
+| `0` | All green — **including flakes that recovered** under `--retries` |
+| `1` | A test failed. A regression to investigate. |
+| `2` | Bad or empty directory |
+| `3` | Environment — the provider or device toolchain is unavailable, or the box broke mid-run |
+
+The `1`-vs-`3` split is the point: **`1` is a regression to investigate, `3` is a machine to
+fix.** Conflating them means a dead USB cable reads like a mass regression at 3am.
+
+## Recovering from flakes: `--retries`
+
+```sh
+vk suite tests/ --app com.example.app --retries 2
+```
+
+A failed test is re-run up to N times. The default is `0` — opt-in, so CI cost and time stay
+predictable.
+
+If a later attempt passes, the suite exits `0` and the flake becomes a **warning**, not a
+hard failure. Failed-attempt archives stay linked from the suite overview (`attempts` on the
+test row, plus a `warnings` list on the manifest), so flakiness stays visible rather than
+being papered over. Cost and duration sum across attempts.
+
+<Image src={suiteOverview} alt="Suite overview page showing a recovered flake with a warnings banner and per-test rows" />
+
+### What earns a retry
+
+Anything that might come out differently: a flaky selector, a wedged app, and **a broken
+environment** — including a `vk server` connection dropping mid-suite.
+
+The bias is intentional. An attempt costs one test; giving up costs the whole suite plus a
+human rerunning it. Environment retries wait a little longer each time (an outage that
+survives the health probe usually needs seconds, not milliseconds) and each one lands in
+`warnings`, so riding out a wobble is never silent.
+
+**Exactly two failures are never retried**, because a rerun cannot change them:
+
+- a **budget abort** — each attempt gets its own ceiling, so it would just re-abort having
+  spent twice
+- a **usage error** (exit `2`) — an unreadable test file, a payload the server refuses
+
+### When a broken environment does stop the suite
+
+If a test dies from an environment error (exit `3` — tool gone, device unplugged, server
+unreachable), the toolchain is **re-probed**. Only if it is *still* broken **and** no
+retries remain does the suite abort.
+
+That re-probe matters: a transient `uiautomator` dump failure also exits `3`, and should not
+vaporise a 20-test run. But continuing on a genuinely dead box just produces one identical
+red row per remaining test — noise that reads exactly like a mass regression.
+
+## The overview report
+
+The suite writes to `./.verikun/suites/<id>/`:
+
+### `index.json`
+
+A stable, `schemaVersion`ed manifest: per-test pass/fail, steps, model repairs, cost,
+duration, and the run id, plus suite totals.
+
+This is the **output contract for reporting**. Upload and publish steps compose over it (see
+the [CI guide](/verikun/guides/remote-devices-and-ci/#publishing-results-elsewhere)) rather
+than verikun growing upload plugins.
+
+On an abort it also carries `aborted: {reason, notRun}`. The not-run tests get **no rows and
+no place in `totals`**, so `passed + failed === tests` still holds and nothing downstream
+mistakes a skipped test for a regression.
+
+Retried flakes add `flaky` and `attempts` on the test row plus suite-level `warnings`. These
+are additive, so `schemaVersion` stays `1`.
+
+### `index.html`
+
+A summary page linking every test's `report.html`, with a banner naming the not-run tests
+when the suite aborted, and a warnings banner when a flake recovered on retry (prior failed
+attempts stay linked).
+
+## Where to go next
+
+- [Remote devices & CI](/verikun/guides/remote-devices-and-ci/) — run a suite from a GitHub
+  Actions runner against a real device
+- [Reports & test runs](/verikun/reference/reports-and-test-runs/) — the full `index.json`
+  and report structure
+- [Exit codes](/verikun/reference/exit-codes/) — the complete contract

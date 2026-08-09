@@ -1,0 +1,69 @@
+name: Documentation site
+
+# Build and deploy the Astro Starlight site in docs/ to GitHub Pages.
+#
+# The site is an independent npm project: docs/package.json + docs/package-lock.json, with
+# its own dependency tree. The repo root has NO `workspaces` key, so root `npm ci` never
+# descends into it and the CLI package's zero-runtime-dependency rule is untouched. Nothing
+# under docs/ is in package.json's "files", so none of it reaches the npm tarball either.
+#
+# ONE-TIME SETUP: repo Settings -> Pages -> Source must be set to "GitHub Actions".
+# Until that is done this workflow builds fine and the deploy job fails.
+#
+# The repo's default workflow permissions are `read`, so the permissions block below is
+# required — nothing here is inherited.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy in flight: a half-published Pages deployment is worse than a
+# slightly stale one. PR builds are safe to cancel, hence the ref in the group.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      # Builds the site and uploads it as a Pages artifact. `path` points at the Astro
+      # project root; the action reads docs/package-lock.json for the install.
+      # Astro 7 requires Node >= 22.12 — the action defaults to 24, which satisfies it.
+      - name: Build the site
+        uses: withastro/action@v6
+        with:
+          path: docs
+
+  deploy:
+    name: Deploy
+    # On a pull request this job is skipped, so the build above acts as a check only:
+    # a dead internal link or bad frontmatter fails the PR without publishing anything.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

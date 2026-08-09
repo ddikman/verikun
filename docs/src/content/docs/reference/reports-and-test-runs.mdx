@@ -1,0 +1,193 @@
+---
+title: Reports & test runs
+description: What gets recorded, what the archived report contains, the suite manifest schema, and when a run rolls over.
+sidebar:
+  order: 7
+---
+
+import { Image } from 'astro:assets';
+import logCollapsed from '../../../../screenshots/archive-device-log/collapsed.png';
+import logOpen from '../../../../screenshots/archive-device-log/open.png';
+
+Actions are recorded into a **test run**. One auto-starts on the first action — set
+`VERIKUN_NO_RUN=1` to disable.
+
+Every command becomes a step with its timing, the selector **and the identifier it resolved
+through**, and pass/fail. A failing step also captures a screenshot **and** the UI hierarchy
+of the page.
+
+## Where it lives
+
+```
+./.verikun/run/            active run (run.json + artifacts/)   — auto-created on first action
+./.verikun/runs/<id>/      archived runs (report.xml, report.html, run.json, artifacts/)
+./.verikun/suites/<id>/    suite overviews (index.json, index.html)
+```
+
+Because each `vk` call is its own process, run state is **persisted to disk and reloaded per
+command**. That is what lets `vk device reset` undo a change from a later process, even if
+the flow that made it died.
+
+## What is recorded
+
+Actions plus `wait` and `assert`. **Not** inspection — `ui`, `find`, `devices` — because
+reading the screen is not a test step.
+
+The one exception is **`log`**, which is recorded precisely so its on-demand device-log
+capture lands in the report.
+
+## Archiving
+
+```sh
+vk run archive smoke
+```
+
+Finalizes the run into `./.verikun/runs/<id>/`:
+
+| File | Contents |
+|---|---|
+| **`report.xml`** | JUnit: one `<testcase>` per step with timings, `<failure>` for failed assertions, `<error>` for environment errors, and the resolved identifier in `<system-out>`. Drops straight into CI. |
+| **`report.html`** | Self-contained report — see below |
+| **`artifacts/logcat.txt`** | Full device log for the run window (default) |
+| **`artifacts/logcat-app.txt`** | App-scoped log, when a package or bundle was launched |
+| **`run.json`** | The raw recording |
+
+`vk run archive` **exits non-zero when the run contained failures**, so the same command both
+produces the report and gates CI.
+
+### `report.html`
+
+Every step, the identifiers used, any screenshots taken, the screenshot and hierarchy of any
+failed page, a link to the full device log, an app-scoped log accordion when the run launched
+an app, and any per-step logs from `vk log`. A run that did not pass says so in a banner at
+the top.
+
+<Image src={logCollapsed} alt="An archived HTML report with the device-log accordion collapsed" />
+
+Expanding the accordion shows the captured device log inline:
+
+<Image src={logOpen} alt="The same report with the device-log accordion expanded, showing logcat output" />
+
+## Device logs
+
+Logs are pulled **at archive time** into `artifacts/logcat.txt`, session-scoped where
+possible — no explicit `vk log` is required.
+
+- Opt out on green runs with `vk run archive --no-logs` or `VERIKUN_NO_LOGS`. **Failed runs
+  still capture.**
+- Capture is best-effort and **never blocks sealing**.
+- An on-demand `vk log` still attaches into its own step, kept tail-first so a crash trace
+  survives the size cap.
+
+Session scoping works by recording a device-clock marker at the run's first step, then
+passing it as the log start. Over `--server`, the remote endpoints serve the same data so a
+remote CI archive matches a local one.
+
+:::caution
+`getLogs` returns **raw device output**. Those logs can carry secrets the app logged. They
+are **not redacted**.
+:::
+
+## Secrets
+
+Step names never include typed text. `vk text` **redacts the value** into the step message
+when the field carries the `password` flag.
+
+:::note
+Measured gap: `obscureText` does not set the `password` flag on **iOS**, so redaction never
+fires there for Flutter apps. Do not rely on it cross-platform.
+:::
+
+## Pass/fail mapping
+
+The returned exit code, or a thrown `CliError`'s code:
+
+| Exit code | Report outcome |
+|---|---|
+| `0` | passed |
+| `1` | `<failure>` — an assertion |
+| `≥ 2` | `<error>` — environment or usage |
+
+### A failed run can never archive green
+
+Recording is a side effect of running a *command*, so a failure the `vk ai` **engine**
+produced — a control node giving up, a budget or timeout abort — has no command to attach
+itself to. Such a run used to reach the archive with nothing red in it, and the report
+declared a failed test `failures="0"`.
+
+That is closed at three levels:
+
+1. The recorder sets a run-level `failure` (the `where` plus the reason) and appends **one**
+   synthetic failed step — but **only when no step is already red**, so a leaf failure is
+   never counted twice.
+2. `cli.ts` builds that record from the plan result and is also what prints the `[ai] …`
+   verdict, so the archive and the console cannot disagree.
+3. The report renderer trusts `failure` over the step tally, and emits a synthetic failing
+   testcase if a failed run somehow still has no red step.
+
+Evidence for such a failure is a screenshot plus hierarchy locally; hierarchy only over
+`--server`, which has no screenshot route.
+
+## Automatic rollover
+
+So an implicit run never silently merges unrelated activity, the active run **auto-closes
+(archives) and a fresh one starts** when the context changes:
+
+| Trigger | Applies to | Tune with |
+|---|---|---|
+| Idle too long (default 30 min) | **implicit runs only** | `VERIKUN_RUN_IDLE_MIN` (minutes; `0` disables) |
+| Different device serial | any run | — |
+| Different session | any run | `VERIKUN_SESSION` (falls back to `TERM_SESSION_ID`) |
+
+A run you named with `vk run start` is **sticky to idle** — only a hard context change
+(device or session) rolls it over.
+
+Rollover always **archives** the old run, never discards it, and prints the reason and
+destination to stderr.
+
+### Rollover and device overrides
+
+Because [device-state](/verikun/reference/device-state/) snapshots live in the run file, a
+rollover could strand them — carrying the snapshot into the archive while `vk device reset`,
+which reads the *active* run, reports "nothing to restore".
+
+This is measured, not theoretical: two workspaces driving different devices from one working
+directory ping-pong the active run, and a phone was left dark and rotated with nothing
+tracking it.
+
+So:
+
+- On a **same-device** rollover, unrestored overrides are carried **forward** into the new
+  run.
+- On a **device-change** rollover, verikun warns loudly with the exact
+  `vk device set … --device <serial>` needed to undo it. It cannot drive the old device from a
+  process pointed at the new one, and restoring one device's values onto another would be
+  worse than leaving them.
+
+## The suite manifest: `index.json`
+
+A stable, `schemaVersion`ed manifest written to `./.verikun/suites/<id>/`. This is the
+**output contract for reporting** — publish steps compose over it rather than verikun growing
+upload plugins.
+
+| Field | Meaning |
+|---|---|
+| `schemaVersion` | Currently `1`. Additive changes do not bump it. |
+| `tests[]` | Per-test: pass/fail, step count, model repairs, cost, duration, run id |
+| `tests[].flaky` / `.attempts` | Present when `--retries` recovered the test |
+| `totals` | Suite-level counts |
+| `warnings[]` | Recovered flakes and environment retries |
+| `aborted` | `{reason, notRun}` when the suite stopped early |
+
+On an abort, the not-run tests get **no rows and no place in `totals`**, so
+`passed + failed === tests` still holds and nothing downstream mistakes a skipped test for a
+regression.
+
+## Disabling recording
+
+```sh
+VERIKUN_NO_RUN=1 vk tap @x
+```
+
+`beginStep` returns null, so every `note`, `attachImage` and `attachLog` is a no-op. Useful
+when driving a device interactively and you do not want a report.

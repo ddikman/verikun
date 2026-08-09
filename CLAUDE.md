@@ -189,7 +189,7 @@ To add a capability, add the method to the `Driver` interface in `types.ts`, the
 ## Repo doubles as a Claude Code plugin
 
 - `.claude-plugin/marketplace.json` + `.claude-plugin/plugin.json` make this repo installable as a marketplace plugin (`source: "./"`). Validate manifest changes with `claude plugin validate .`.
-- The plugin ships the **skill** at `.claude/skills/verikun/SKILL.md` (referenced via the manifest's `"skills": "./.claude/skills/"` — not moved or duplicated). That SKILL.md is the agent-facing contract: the act→inspect→assert loop, selector grammar, exit-code semantics, the "prefer textual hierarchy lookups over screenshots to save tokens" guidance, and the convention of remembering semantic identifiers across runs. **If you change CLI behaviour (commands, selectors, exit codes, flags), update SKILL.md and README.md in the same change** — they are documentation an agent relies on, not just prose.
+- The plugin ships the **skill** at `.claude/skills/verikun/SKILL.md` (referenced via the manifest's `"skills": "./.claude/skills/"` — not moved or duplicated). That SKILL.md is the agent-facing contract: the act→inspect→assert loop, selector grammar, exit-code semantics, the "prefer textual hierarchy lookups over screenshots to save tokens" guidance, and the convention of remembering semantic identifiers across runs. **If you change CLI behaviour (commands, selectors, exit codes, flags), update SKILL.md, README.md and the docs site in the same change** — they are documentation an agent relies on, not just prose. See *Documentation site* below for which `docs/` page owns which contract.
 - Because `dist/` is gitignored, the installed plugin carries the skill but **not** a runnable `vk` binary; the CLI is a separate build-from-source / npm step. Don't assume an installed-plugin environment has `vk` on PATH. The **npm package** carries both — it ships `.claude/skills/verikun/SKILL.md` at that same path (shipped, not duplicated), alongside `dist/`, `CHANGELOG.md` and `example/*.md`.
 - **`package.json`'s `"files"` is an allowlist, and it is load-bearing.** npm force-includes only five things: `package.json`, `README*`, `LICENSE`/`LICENCE` (either, any case/extension), the `main` file, and the `bin` file(s) — **not** `CHANGELOG.md` (npm 5/6 did; modern npm doesn't), and not the skill. Anything else you want published must be named there explicitly, or it is silently absent from the tarball: `npm publish` succeeds, CI stays green, and nothing reports the omission (that is how every release up to 0.10.0 shipped with no changelog). (This bullet is the **canonical** copy of that force-included list — other files point here rather than restating it, because it has drifted before.) Name the skill **file** rather than the `.claude/skills` directory — `create-pr/SKILL.md` is contributor-only (`metadata.internal: true`) and must not reach end users.
 
@@ -197,3 +197,35 @@ To add a capability, add the method to the `Driver` interface in `types.ts`, the
 
   The `example` entry is the glob **`example/*.md`**, not a bare `example`: that directory also holds `example/flutter-app/`, the Flutter e2e fixture (74 files of Gradle/Xcode/icon PNGs — repo test infrastructure, not end-user guidance). A bare directory entry sweeps all of it into the tarball, which is a quarter of the package. Keep the glob.
 - Non-Claude agents install the skill via [`vercel-labs/skills`](https://github.com/vercel-labs/skills) (`npx skills add ddikman/verikun --skill verikun`), which reads any `SKILL.md` with `name`/`description` frontmatter straight from the repo. `create-pr` carries `metadata.internal: true` so that tool hides it from end-user installs (it's contributor-only); Claude Code ignores the key.
+
+## Documentation site (`docs/`)
+
+An **Astro Starlight** site published to GitHub Pages at <https://ddikman.github.io/verikun/> by `.github/workflows/pages.yml` (push to `main` touching `docs/`; a PR builds it as a check without deploying). `package.json`'s `homepage` points at it.
+
+```sh
+npm ci --prefix docs         # needs Node >= 22.12 (Astro 7); the repo's own CI still runs 20.x + 22.x
+npm run dev --prefix docs    # http://localhost:4321/verikun/
+npm run build --prefix docs  # production build — FAILS on a dead internal link
+```
+
+- **It is a separate npm project, deliberately.** `docs/package.json` + `docs/package-lock.json`, and the root has **no `workspaces` key**, so root `npm ci` never descends into it. Astro must never move into root `devDependencies`: that would balloon the root lockfile (3 packages today), slow every CI job, and `publish.yml`'s `npm install --package-lock-only` + `git diff --exit-code` gate would then police that larger lock. The zero-runtime-dependency rule governs the **published CLI package**; the site's own dep tree is unconstrained.
+- **Nothing under `docs/` ships to npm.** It is not in `"files"`, so `tests/package-files.test.ts` and `scripts/check-package-contents.mjs` need no change. Two latent traps if anyone ever *does* add a docs entry to `"files"`: `check-package-contents.mjs` matches `create-pr` as a **substring of the whole path** (so a page named `create-pr.md` would fail it), and `tests/package-files.test.ts` only understands the `<dir>/*.<ext>` glob shape — `docs/**/*.md` would fail its regex.
+- **`base: '/verikun'` in `astro.config.mjs` is load-bearing.** It is a *project* Pages site; a wrong `base` renders every page unstyled with 404'd assets. Internal links are written as absolute `/verikun/...` paths.
+- **`starlight-links-validator` fails the build on a dead internal link.** Keep it: the README migration rewrote 24 anchors into cross-page links, and a silent 404 is the likely regression. It already caught one during the migration.
+- **Diagrams render client-side** via `src/components/Mermaid.astro`, *not* `rehype-mermaid` — that renders at build time through Playwright and would pull a browser download into every docs CI build. A `<pre>` fallback stays in place if Mermaid throws, so a broken diagram can't blank a page.
+- **`docs/pr/` and `docs/screenshots/` predate the site** — PR-description assets, embedded in old PR bodies via `raw.githubusercontent.com` URLs. They stay where they are (Astro ignores non-`src/`/`public/` dirs at its project root) and the Suites/Reports pages import them relatively via `astro:assets`. Don't move them.
+- **Which page owns which contract** — update these alongside `SKILL.md`/`README.md`:
+
+  | You changed | Update |
+  |---|---|
+  | a command or flag | `reference/commands.md` |
+  | selector rules / state modifiers | `reference/selectors.md` |
+  | auto-wait or auto-scroll | `reference/auto-wait.md` |
+  | an exit code | `reference/exit-codes.md` |
+  | an env var | `reference/environment-variables.md` |
+  | report/run/suite-manifest shape or rollover | `reference/reports-and-test-runs.mdx` |
+  | a `device set` key | `reference/device-state.md` |
+  | the `vk ai` grammar, IR or model list | `reference/ai-plans.md` + `internals/plan-ir-and-engine.md` |
+  | a cross-cutting invariant | `internals/core-principles.md` + `internals/contracts.md` |
+
+  `reference/ai-plans.md` deliberately describes the grammar's **concepts** and links to `src/agent/grammar.ts` + `SKILL.md` rather than pasting the prompt text — the prompt is a runtime artifact with a cache fingerprint attached, and a verbatim fourth copy is a liability.

@@ -1,0 +1,31 @@
+:root {
+  --sl-color-accent-low: #10261f;
+  --sl-color-accent: #1f7a5c;
+  --sl-color-accent-high: #a8e6cd;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #c9ede0;
+  --sl-color-accent: #14785a;
+  --sl-color-accent-high: #0b3527;
+}
+
+/* Reference pages are table-heavy; keep long flag signatures from wrapping mid-token. */
+.sl-markdown-content table code {
+  white-space: nowrap;
+}
+
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+}
+
+/* Mermaid renders client-side; reserve the space so the page doesn't jump on hydrate. */
+.mermaid-figure {
+  margin: 1.5rem 0;
+}
+
+.mermaid-figure svg {
+  max-width: 100%;
+  height: auto;
+}

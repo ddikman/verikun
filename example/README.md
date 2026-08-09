@@ -3,7 +3,7 @@
 Three things live here, and all of them revolve around the same app:
 
 - **[`example-test.md`](./example-test.md)** — the *showcase*: a natural-language
-  [`vk ai`](../README.md#ai--natural-language-tests) test you can read to see what a
+  [`vk ai`](https://ddikman.github.io/verikun/guides/natural-language-tests/) test you can read to see what a
   verikun test looks like, and run on either platform.
 - **[`example-test-devicestate.md`](./example-test-devicestate.md)** — the same idea applied
   to the *device* rather than the app: switch it to dark mode and accessibility-sized text,
@@ -41,7 +41,7 @@ of this test pressed Back on Android and never left the login screen.
 
 The test names the app's semantic identifiers (`vk_user`, `vk_submit`, …) in backticks.
 That is deliberate and mirrors the
-[selector guidance](../README.md#which-selector-to-reach-for-id-first-text-second-desc-never):
+[selector guidance](https://ddikman.github.io/verikun/reference/selectors/#which-selector-to-reach-for):
 `@id` is the only selector that means the same thing on Android and iOS, and it survives
 localisation. It also keeps the test deterministic — it compiles once and replays with no
 model calls, rather than healing a different way on every device.

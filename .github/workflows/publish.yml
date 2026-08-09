@@ -72,6 +72,8 @@ jobs:
           node-version: 22.x
           registry-url: https://registry.npmjs.org
           cache: npm
+          # Root lockfile only — docs/package-lock.json is a separate npm project.
+          cache-dependency-path: package-lock.json
 
       # The cost of pinning 22.x above: trusted publishing landed in npm 11.5.1,
       # but Node 22 still bundles npm 10.x. (Node 24 bundles 11.x, which is why

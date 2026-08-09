@@ -1,0 +1,196 @@
+---
+title: Architecture
+description: Three layers, the Driver/Element seam, and a map of every file in src/.
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../components/Mermaid.astro';
+
+Three layers, separated so that **two of them never touch a platform**.
+
+<Mermaid
+  title="cli.ts and the ui/ layer see only normalized Elements; drivers/ is the only platform-specific code"
+  code={`flowchart TD
+  bin["bin/verikun.ts<br/>(exit-code shim)"] --> cli["cli.ts<br/>(dispatch + handlers)"]
+  cli --> sel["ui/selector.ts<br/>@id / text: / desc: / class:"]
+  cli --> fmt["ui/format.ts<br/>inline / compact / tree / json"]
+  cli --> vp["ui/viewport.ts<br/>reachability geometry"]
+  cli --> ds["device/settings.ts<br/>capability table"]
+  cli --> drv["drivers/index.ts<br/>getDriver(platform, device)"]
+  drv --> adb["drivers/adb.ts<br/>adb"]
+  drv --> ios["drivers/ios.ts<br/>idb + simctl"]
+  adb --> ap["ui/android-parse.ts<br/>uiautomator XML"]
+  ios --> ip["ui/ios-parse.ts<br/>idb describe-all JSON"]
+  ap --> el["Element[]<br/>(normalized)"]
+  ip --> el
+  el --> sel
+  el --> fmt
+  el --> vp`}
+/>
+
+The same thing as the ASCII diagram that has always been in the README:
+
+```
+cli.ts ──> drivers/ ──> adb (Android) / idb + simctl (iOS)   (platform I/O)
+   │           └─ produces normalized Element[]
+   ├─ ui/android-parse.ts   uiautomator XML -> Element[]
+   ├─ ui/ios-parse.ts       idb describe-all JSON -> Element[]
+   ├─ ui/selector.ts        @id / text: / desc: / class: matching
+   └─ ui/format.ts          compact / tree / json rendering
+```
+
+## `src/types.ts` is the seam
+
+The `Driver` interface is what every platform backend implements, and `Element` is the
+normalized node model every other layer consumes.
+
+`cli.ts`, `ui/selector.ts` and `ui/format.ts` operate **only** on `Element[]` and `Driver` —
+they contain zero `adb` or `xcrun` knowledge. **Keep it that way: platform quirks belong in
+`drivers/`.**
+
+`getDriver(platform, device)` in `drivers/index.ts` is the only place a concrete driver is
+constructed. The one exception is `cmdDevices`, which probes both backends directly so it can
+list everything attached.
+
+## The dispatcher
+
+`cli.ts` is the dispatcher:
+
+- `run(argv)` parses arguments and builds a `Ctx { driver, platform, device, positionals, flags, record? }`.
+- `executeCommand(command, ctx)` is the `switch` to each `cmdX(ctx)` handler.
+
+Adding a command means adding a `case` (plus any aliases) **and** a line in `usageText()` —
+and, if it should appear in a test run, an entry in `RECORDABLE` in `run.ts`.
+
+`run.ts` and `report.ts` sit beside `cli.ts`. They may use the driver, like `cli.ts` does —
+they are not part of the platform-agnostic core. `report.ts` is pure: `RunState` → JUnit/HTML
+strings, no filesystem, no driver.
+
+## Nothing is cached between invocations
+
+Every command re-captures the hierarchy fresh — `driver.getElements()` → `uiautomator dump`.
+
+This is intentional: the screen may animate or auto-advance between calls. **Do not add a
+snapshot cache expecting staleness to be acceptable.**
+
+## The two platform backends
+
+### Android — `drivers/adb.ts`
+
+| Capability | Mechanism |
+|---|---|
+| Hierarchy | `uiautomator dump` |
+| Screenshots | `screencap -p` |
+| Interaction | `input tap` / `text` / `swipe` / `keyevent` |
+| Screen size | `wm size` |
+| Logs | `logcat` |
+
+`launch()` resolves the app's default LAUNCHER activity with
+`cmd package resolve-activity --brief` and starts it with `am start -n <component>`.
+
+It deliberately does **not** use `monkey -c LAUNCHER`: monkey hangs indefinitely on some OEM
+skins (MIUI/HyperOS, for example), tripping the exec timeout. If you touch launch, keep the
+`am start` path.
+
+### iOS — `drivers/ios.ts`
+
+Shells to `xcrun simctl` / `devicectl` for discovery and — on a simulator — screenshots,
+launch, stop and logs; and to Facebook's **`idb`** for the accessibility hierarchy, all
+interaction, screen size, and lifecycle on physical devices.
+
+A private `isSimulator()` — is the resolved UDID in `simctl list`? — picks simctl-versus-idb
+for the branchable methods. `resolvedSerial()` must return a **concrete UDID**, because `idb`
+cannot address the simctl-only `booted` alias.
+
+### Honest degradation
+
+Two methods have no clean iOS equivalent and **degrade honestly** rather than half-implement:
+
+- `clearApp` throws exit `3` — there is no per-app data reset.
+- `currentApp` returns `"(unknown)"` — there is no foreground query.
+
+Keep that shape for any similar gap. A half-implementation that quietly returns something
+plausible is worse than an error.
+
+## `device/settings.ts` is a table, not code
+
+It declares every `vk device set` key: its value domain, its per-platform support
+(`supported` / `unsupported` / `noop`), and — where unsupported — the manual equivalent.
+
+**One table drives four consumers**: argument validation, the driver switch, `vk device caps`,
+and the `vk ai` plan validator. Adding a setting is a table row plus a `case` in each driver,
+so a platform gap can never be documented in one place and forgotten in another.
+
+## Map of `src/`
+
+### Entry point and dispatch
+
+| File | Purpose |
+|---|---|
+| `bin/verikun.ts` | The `#!/usr/bin/env node` shim. Calls `run()` and exits with its code, or prints `Fatal:` and exits `3`. |
+| `cli.ts` | Every command handler, `usageText()`, the dispatch switches, `executeOutcome` / `executeParsed` / `executeForServer`, `mapError`, provider selection, and the `ai` / `suite` / `install` orchestration. The one big file. |
+| `args.ts` | Minimal dependency-free argv parser |
+| `errors.ts` | `CliError` plus the exit-code contract, `isEnvError`, `probeFailure`, and the two heal-trigger selector subclasses |
+| `version.ts` | **Generated** from `package.json` by `scripts/gen-version.mjs`. Never hand-edit. |
+
+### Infrastructure
+
+| File | Purpose |
+|---|---|
+| `exec.ts` | All external process spawning, shell-free (args array). Plus `commandExists`. |
+| `output.ts` | Output discipline: results → stdout, diagnostics → stderr, `--json` everywhere. The `quiet` toggle `vk ai` uses. |
+| `types.ts` | Shared types; the platform-normalized `Element` model |
+| `image.ts` | Hand-rolled dependency-free PNG downscaler over `node:zlib` |
+
+### Drivers
+
+| File | Purpose |
+|---|---|
+| `drivers/index.ts` | `getDriver(platform, device)` factory and re-exports |
+| `drivers/adb.ts` | The Android driver, plus `adbTransport` / `severanceRisk` (the wireless-adb airplane guard) |
+| `drivers/ios.ts` | The iOS driver over `idb` plus `simctl` |
+
+### UI layer — pure, no device I/O
+
+| File | Purpose |
+|---|---|
+| `ui/android-parse.ts` | Hand-rolled scanner: `uiautomator` XML → `Element[]` |
+| `ui/ios-parse.ts` | `idb ui describe-all --json` → the same `Element[]`. Exports `IOS_UNREPORTED_STATE`. |
+| `ui/selector.ts` | The selector grammar and the tiered auto-healing matcher |
+| `ui/state-support.ts` | Refuses a state modifier the platform cannot answer for |
+| `ui/format.ts` | Compact one-line element rendering |
+| `ui/viewport.ts` | Pure viewport geometry — the basis of auto-scroll and the `offscreen` marker |
+
+### Runs, reports, remote
+
+| File | Purpose |
+|---|---|
+| `run.ts` | The `Recorder`: disk-persisted run state, implicit start and rollover, step capture, device-override snapshots, archive |
+| `report.ts` | Pure rendering: `RunState` → JUnit/HTML, `SuiteRun` → `index.json`/`index.html` |
+| `suite.ts` | `vk suite`: enumerate, run sequentially, reset between tests, retries, manifest, the CI-gate exit code. Dependency-injected; imports nothing from `cli.ts`. |
+| `server.ts` | `vk server`: HTTP+JSON with mandatory bearer auth, the `validateNode` gate, a device lock |
+| `rpc.ts` | The pure wire contract, including the error codec that preserves thrown-error subclass identity |
+| `device/settings.ts` | The device-settings capability table |
+
+### Agent (`vk ai`)
+
+| File | Purpose |
+|---|---|
+| `agent/ir.ts` | The plan IR: typed node union, `validateNode`, `parsePlan`, and the non-recursive JSON schemas |
+| `agent/engine.ts` | The deterministic interpreter. Imports no `cli.ts`, so no cycle. |
+| `agent/grammar.ts` | `GRAMMAR` + `REPAIR_GRAMMAR`, the cache-controlled stable prompt prefix |
+| `agent/cache.ts` | The plan cache, keyed and fingerprinted |
+| `agent/lint.ts` | Compile-fidelity lint — catches directives silently dropped from the plan |
+| `agent/cost.ts` | Token accounting, the price table, `providerFor(model)`, the budget abort |
+| `agent/provider.ts` | The `AgentProvider` seam |
+| `agent/claude.ts` | Anthropic Messages API over built-in `fetch`, no SDK |
+| `agent/openai.ts` | OpenAI Chat Completions; exports `toStrictSchema` |
+| `agent/cli-provider.ts` | The spec-parameterized provider that shells to `codex` / `cursor-agent` |
+| `agent/remote.ts` | The client-side remote exec backend |
+
+## Where to go next
+
+- [Core principles](/verikun/internals/core-principles/) — the cross-cutting contracts
+- [Plan IR & the replay engine](/verikun/internals/plan-ir-and-engine/)
+- [Contracts](/verikun/internals/contracts/) — the rules a change can be checked against
