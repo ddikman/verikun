@@ -7,6 +7,30 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **A documentation site at <https://ddikman.github.io/verikun/>.** An Astro Starlight site in
+  `docs/`, deployed to GitHub Pages by the new `.github/workflows/pages.yml` (a pull request
+  builds it as a check without deploying). 26 pages across four sections: Getting started
+  (installation, a ten-minute first test, driving it from an AI agent), Guides (writing test
+  cases, natural-language tests, suites, remote devices & CI, iOS setup, troubleshooting),
+  Reference (commands, selectors, auto-wait, global flags, exit codes, environment variables,
+  reports & test runs, device state, screenshots, AI plans & models), and Internals
+  (architecture, core principles, the plan IR and replay engine, contracts, contributing).
+
+  Two things existed nowhere before: a **single environment-variable reference** — all 18 were
+  scattered across ten README locations — and a **troubleshooting guide** that says what a
+  given failure actually means. The `vk server` + GitHub Actions setup is now explained step by
+  step rather than linked as a file. On the contributor side, the load-bearing rules that only
+  lived beside the code (heal-vs-terminal, run rollover, the plan-cache fingerprint, what is
+  and is not recordable, the packaging allowlist) are written down in one place a change can be
+  checked against.
+
+  The site is a **separate npm project** — `docs/package.json` with its own lockfile, and the
+  repo root has no `workspaces` key — so root `npm ci` never descends into it and the CLI
+  package's zero-runtime-dependency rule is untouched. Nothing under `docs/` is in
+  `package.json`'s `"files"`, so the npm tarball is byte-identical.
+  `starlight-links-validator` fails the build on a dead internal link, which is what makes the
+  README's 24 rewritten anchors safe to move.
+
 - **The npm package now ships the agent skill and the `example/*.md` tests.** `npm install -g verikun`
   delivers the CLI *and* `SKILL.md` — the agent-facing contract — in one step, rather than needing a
   separate `npx skills add` / plugin install to obtain it. It lands at

@@ -1,0 +1,71 @@
+---
+/**
+ * Client-side Mermaid renderer.
+ *
+ * Deliberately not `rehype-mermaid`: that renders at build time via Playwright, which
+ * would pull a browser download into every CI docs build. A diagram is decoration here,
+ * not content the reader must have, so paying that cost is not worth it.
+ *
+ * Usage:
+ *   <Mermaid code={`flowchart LR\n  a --> b`} title="What this shows" />
+ */
+interface Props {
+  code: string;
+  title?: string;
+}
+
+const { code, title } = Astro.props;
+---
+
+<figure class="mermaid-figure">
+  <div class="mermaid-graph" data-mermaid={code}>
+    <pre class="mermaid-fallback">{code}</pre>
+  </div>
+  {title && <figcaption>{title}</figcaption>}
+</figure>
+
+<script>
+  import mermaid from 'mermaid';
+
+  const render = async () => {
+    const isDark = document.documentElement.dataset.theme !== 'light';
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: isDark ? 'dark' : 'neutral',
+      fontFamily: 'var(--sl-font)',
+      securityLevel: 'strict',
+    });
+
+    const nodes = document.querySelectorAll<HTMLElement>('.mermaid-graph');
+    for (const [i, node] of [...nodes].entries()) {
+      const code = node.dataset.mermaid;
+      if (!code) continue;
+      try {
+        const { svg } = await mermaid.render(`mermaid-${i}-${isDark ? 'd' : 'l'}`, code);
+        node.innerHTML = svg;
+      } catch {
+        // Leave the <pre> fallback in place — a broken diagram must not blank the page.
+      }
+    }
+  };
+
+  render();
+  // Starlight's theme toggle swaps `data-theme` on <html>; re-render so the diagram follows.
+  new MutationObserver(render).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  });
+</script>
+
+<style>
+  .mermaid-fallback {
+    font-size: var(--sl-text-xs);
+    opacity: 0.7;
+  }
+  figcaption {
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+    text-align: center;
+    margin-top: 0.5rem;
+  }
+</style>

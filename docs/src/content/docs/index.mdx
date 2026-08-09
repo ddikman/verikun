@@ -1,0 +1,88 @@
+---
+title: verikun
+description: Drive Android devices and iOS simulators the way Puppeteer drives a browser — for AI agents and CI.
+template: splash
+hero:
+  tagline: Agent-driven, natural-language mobile tests — during agent development or in CI. Self-healing, with cost caps and test reports.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get started
+      link: /verikun/getting-started/installation/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/ddikman/verikun
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+```
+$ vk ui
+[0] TextView "Welcome back" (540,360)
+[1] EditText @email_input (540,720) focused
+[2] EditText @password_input (540,860) pwd
+[3] Button "Sign in" @sign_in_btn (540,1020) tap
+[4] TextView "Forgot password?" @forgot (540,1140) tap
+
+$ vk tap @sign_in_btn
+tapped [3] Button "Sign in" @sign_in_btn (540,1020) tap
+```
+
+## What it is
+
+`verikun` (CLI binaries `verikun` and `vk`) drives a connected Android device or emulator,
+or an iOS simulator or device — like Puppeteer drives a browser. Tap, type, swipe,
+screenshot, and above all **inspect the UI hierarchy by semantic identifiers**.
+
+It is built to be invoked by AI agents, so its output and exit codes are a deliberate
+machine contract rather than only human ergonomics.
+
+<CardGrid stagger>
+  <Card title="Agent CLI" icon="laptop">
+    `vk <command>` — one-shot commands to read the screen as a semantic tree (or a
+    screenshot) and act on it. Selector lookups
+    [auto-wait](/verikun/reference/auto-wait/) and
+    [scroll into view](/verikun/reference/auto-wait/#auto-scroll-into-view), so a flow needs
+    far fewer explicit waits than you would expect.
+  </Card>
+  <Card title="Puppeteer for native mobile" icon="rocket">
+    A thin wrapper over the native Android and iOS automation runners, with
+    [zero runtime dependencies](/verikun/internals/core-principles/#zero-runtime-dependencies-is-a-design-constraint).
+  </Card>
+  <Card title="Natural-language tests" icon="pencil">
+    [`vk ai <file>`](/verikun/guides/natural-language-tests/) runs plain-English tests:
+    compiled once, then replayed model-free at roughly \$0, calling a model only to
+    self-heal a step that drifted.
+  </Card>
+  <Card title="CI-ready" icon="approve-check">
+    [`vk suite`](/verikun/guides/suites/) runs a folder of tests as one gated pass/fail run.
+    [`vk server`](/verikun/guides/remote-devices-and-ci/) exposes a real device over an
+    authenticated tunnel, so a disposable CI runner with no phone attached can still drive it.
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+| If you want to… | Read |
+|---|---|
+| Install it and drive a device in ten minutes | [Your first test](/verikun/getting-started/your-first-test/) |
+| Have an AI agent drive the device for you | [Using it from an AI agent](/verikun/getting-started/using-from-an-agent/) |
+| Write a repeatable test | [Writing test cases](/verikun/guides/writing-test-cases/) |
+| Gate a pull request on a real device | [Remote devices & CI](/verikun/guides/remote-devices-and-ci/) |
+| Look up a command, flag or exit code | [Reference](/verikun/reference/commands/) |
+| Understand why it is built this way | [Internals](/verikun/internals/architecture/) |
+| Work out what a failure means | [Troubleshooting](/verikun/guides/troubleshooting/) |
+
+## Skill and plugin, not MCP
+
+verikun ships as a skill and a plugin rather than an MCP server, and that is deliberate. A
+skill lets us **guide the agent on how to use verikun** — when to inspect the hierarchy,
+what to assert, which command fits the step, and how to read the result back. That domain
+knowledge travels with the tool, so the agent drives the device *well*, not merely
+correctly.
+
+There is also no need for MCP here: verikun runs locally with all its dependencies, and the
+agent calls it through the plain `vk` CLI — there is no shared session, data, or
+authentication to broker.

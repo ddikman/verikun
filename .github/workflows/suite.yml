@@ -53,6 +53,8 @@ jobs:
         with:
           node-version: 22.x
           cache: npm
+          # Root lockfile only — docs/package-lock.json is a separate npm project.
+          cache-dependency-path: package-lock.json
 
       - name: Build verikun
         run: |

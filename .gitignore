@@ -6,6 +6,10 @@ dist/
 .test-build/
 *.tsbuildinfo
 
+# Astro's generated types/content cache (docs site). `dist/` above already covers
+# docs/dist, and `node_modules/` covers docs/node_modules — both patterns are unanchored.
+.astro/
+
 # Unit-test CI output (spec log + markdown step summary)
 test-results/
 
@@ -27,3 +31,4 @@ npm-debug.log*
 # Local run artifacts (screenshots, hierarchy dumps, temp files)
 .verikun/
 tmp/
+.gstack/

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="verikun">
+  <rect x="6" y="2" width="20" height="28" rx="3.5" stroke="currentColor" stroke-width="2"/>
+  <path d="M13 2h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <path d="M11.5 15.5l9 3.2-3.6 1.4-1.4 3.6-4-8.2z" fill="currentColor"/>
+  <path d="M11 9h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".45"/>
+</svg>
