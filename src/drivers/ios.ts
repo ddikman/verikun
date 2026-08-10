@@ -1,7 +1,10 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync, unlinkSync } from 'node:fs';
-import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
+import {
+  Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport,
+  StartOpts, StartResult, StopOpts, StopResult,
+} from '../types';
 import { CliError, probeFailure } from '../errors';
 import { runText } from '../exec';
 import { parseIosHierarchy } from '../ui/ios-parse';
@@ -14,6 +17,7 @@ import {
 } from '../device/settings';
 import { assertClaimable, claimsEnabled, selectAndClaim } from '../device/claims';
 import { err } from '../output';
+import { pollUntil, throttledProgress } from '../wait';
 
 // iOS driver. `xcrun simctl` / `devicectl` cover device discovery and — on a
 // simulator — screenshots, app lifecycle, and logs (no extra install needed).
@@ -117,7 +121,46 @@ const IOS_BUTTONS: Record<string, string> = {
   apple_pay: 'APPLE_PAY',
 };
 
-function listPhysicalDevices(): DeviceInfo[] {
+/**
+ * Parse `simctl list devices available --json` into DeviceInfo[]. PURE — exported
+ * for unit tests and reused by the device-lifecycle layer. Tolerates unexpected
+ * output by returning [] rather than throwing: a listing must degrade, not fail.
+ *
+ * NOTE simulator NAMES repeat across runtimes (an "iPhone 17 Pro" exists under both
+ * iOS 26.4 and 26.5 with different UDIDs), which is why target resolution has to
+ * honour the ambiguity contract — see chooseTarget in drivers/lifecycle.ts.
+ */
+export function parseSimulatorList(stdout: string): DeviceInfo[] {
+  const devices: DeviceInfo[] = [];
+  try {
+    const data = JSON.parse(stdout) as {
+      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
+    };
+    for (const [runtime, list] of Object.entries(data.devices)) {
+      for (const d of list) {
+        devices.push({
+          serial: d.udid,
+          state: d.state.toLowerCase(),
+          model: d.name,
+          product: runtime.split('.').pop(),
+          platform: 'ios',
+          kind: 'simulator',
+          name: d.name,
+        });
+      }
+    }
+  } catch {
+    /* tolerate unexpected simctl output */
+  }
+  return devices;
+}
+
+/** All available simulators (booted or shutdown) via simctl. Device-unbound. */
+export function listSimulators(): DeviceInfo[] {
+  return parseSimulatorList(runText(XCRUN, ['simctl', 'list', 'devices', 'available', '--json']).stdout);
+}
+
+export function listPhysicalDevices(): DeviceInfo[] {
   const r = runText(XCRUN, ['devicectl', 'list', 'devices']);
   if (r.code !== 0) return [];
   const lines = r.stdout.split('\n');
@@ -144,10 +187,114 @@ function listPhysicalDevices(): DeviceInfo[] {
       model: name,
       product: productMatch?.[1],
       platform: 'ios',
+      kind: 'physical',
       note: 'physical — via idb (Developer mode + idb_companion; logs limited)',
     });
   }
   return devices;
+}
+
+// --- simulator lifecycle ----------------------------------------------------
+
+/** One bounded `bootstatus` probe. Short on purpose — see bootSimulator. */
+const BOOTSTATUS_PROBE_MS = 3000;
+
+function simulatorState(udid: string): string | undefined {
+  return listSimulators().find((d) => d.serial === udid)?.state;
+}
+
+/**
+ * Has the simulator finished booting? `simctl bootstatus` BLOCKS until it has, and
+ * returns in ~0.2s once it already is — so a bounded probe reads as a clean
+ * "ready / not yet", and a killed probe costs nothing (it only monitors).
+ *
+ * This is the readiness gate because it is the one signal that actually correlates
+ * with the device being DRIVABLE. Measured on a cold iPhone 17e: simctl flips the
+ * device to `Booted` — and `simctl getenv` starts succeeding — within ~1s, but
+ * `idb ui describe-all` returns a stub 1-node tree until ~6s, when bootstatus exits
+ * 0 and the real hierarchy appears. Gating on state alone would hand back a device
+ * whose screen reads as empty rather than as not-ready: a false green.
+ */
+function bootCompleted(udid: string): boolean {
+  try {
+    return runText(XCRUN, ['simctl', 'bootstatus', udid], { timeout: BOOTSTATUS_PROBE_MS }).code === 0;
+  } catch {
+    return false; // ETIMEDOUT — still booting
+  }
+}
+
+/**
+ * Boot a simulator and wait until it is genuinely drivable (see bootCompleted).
+ *
+ * `simctl boot` returns immediately and we poll, rather than handing the whole wait
+ * to the blocking `simctl bootstatus -b`: one spawnSync spanning the entire boot
+ * would freeze the event loop, and inside `vk server` that means /v1/health goes
+ * dark for the duration of a recovery (see wait.ts). We keep bootstatus's SIGNAL
+ * and bound each probe instead.
+ */
+export async function bootSimulator(udid: string, opts: StartOpts): Promise<StartResult> {
+  const t0 = Date.now();
+  if (simulatorState(udid) === 'booted' && bootCompleted(udid)) {
+    // --wipe is rejected upstream for a running target (simctl erase requires a
+    // shutdown device), so this is a plain start: idempotent no-op.
+    return { serial: udid, started: false, ready: true, waitedMs: 0 };
+  }
+
+  if (opts.wipe) {
+    opts.onProgress?.(`erasing ${udid}…`);
+    const e = runText(XCRUN, ['simctl', 'erase', udid], { timeout: 120_000 });
+    if (e.code !== 0) throw new CliError(`simctl erase failed: ${e.stderr.trim() || `exit code ${e.code}`}`, 3);
+  }
+
+  opts.onProgress?.(`booting simulator ${udid}…`);
+  const r = runText(XCRUN, ['simctl', 'boot', udid], { timeout: 60_000 });
+  // An already-booted device exits non-zero with "Unable to boot device in current
+  // state: Booted" — a no-op success, same shape as IdbDriver.stop()'s handling.
+  if (r.code !== 0 && !/current state:\s*Booted/i.test(`${r.stdout}${r.stderr}`)) {
+    throw new CliError(`simctl boot failed: ${r.stderr.trim() || `exit code ${r.code}`}`, 3);
+  }
+
+  if (!opts.wait) return { serial: udid, started: true, ready: false, waitedMs: Date.now() - t0 };
+
+  const ready = await pollUntil(() => (bootCompleted(udid) ? true : undefined), {
+    timeoutMs: opts.timeoutMs,
+    onTick: throttledProgress(opts.onProgress, 10_000, (ms) =>
+      `waiting for ${udid} to boot… ${Math.round(ms / 1000)}s`,
+    ),
+  });
+  if (!ready) {
+    throw new CliError(
+      `simulator ${udid} did not finish booting within ${Math.round(opts.timeoutMs / 1000)}s ` +
+        '— it may still be starting, so retrying can succeed.',
+      1,
+    );
+  }
+
+  const waitedMs = Date.now() - t0;
+  opts.onProgress?.(`simulator ${udid} ready (${(waitedMs / 1000).toFixed(1)}s)`);
+  return { serial: udid, started: true, ready: true, waitedMs };
+}
+
+/** Shut a simulator down and wait for simctl to report it `shutdown`. */
+export async function shutdownSimulator(udid: string, opts: StopOpts): Promise<StopResult> {
+  if (simulatorState(udid) !== 'booted') return { serial: udid, stopped: false };
+
+  opts.onProgress?.(`shutting down ${udid}…`);
+  const r = runText(XCRUN, ['simctl', 'shutdown', udid], { timeout: 60_000 });
+  if (r.code !== 0 && !/current state:\s*Shutdown/i.test(`${r.stdout}${r.stderr}`)) {
+    throw new CliError(`simctl shutdown failed: ${r.stderr.trim() || `exit code ${r.code}`}`, 3);
+  }
+  const down = await pollUntil(() => (simulatorState(udid) === 'booted' ? undefined : true), {
+    timeoutMs: opts.timeoutMs,
+  });
+  if (!down) {
+    throw new CliError(
+      `simulator ${udid} was still booted ${Math.round(opts.timeoutMs / 1000)}s after shutdown.`,
+      1,
+    );
+  }
+  opts.onProgress?.(`${udid} shut down`);
+  return { serial: udid, stopped: true };
 }
 
 export class IdbDriver implements Driver {
@@ -192,38 +339,13 @@ export class IdbDriver implements Driver {
     }
   }
 
-  /** All available simulators (booted or shutdown) via simctl. Tolerates odd output. */
-  private simulators(): DeviceInfo[] {
-    const devices: DeviceInfo[] = [];
-    const { stdout } = runText(XCRUN, ['simctl', 'list', 'devices', 'available', '--json']);
-    try {
-      const data = JSON.parse(stdout) as {
-        devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
-      };
-      for (const [runtime, list] of Object.entries(data.devices)) {
-        for (const d of list) {
-          devices.push({
-            serial: d.udid,
-            state: d.state.toLowerCase(),
-            model: d.name,
-            product: runtime.split('.').pop(),
-            platform: 'ios',
-          });
-        }
-      }
-    } catch {
-      /* tolerate unexpected simctl output */
-    }
-    return devices;
-  }
-
   listDevices(): DeviceInfo[] {
-    return [...this.simulators(), ...listPhysicalDevices()];
+    return [...listSimulators(), ...listPhysicalDevices()];
   }
 
   resolvedSerial(): string {
     if (this.cachedSerial) return this.cachedSerial;
-    const sims = this.simulators();
+    const sims = listSimulators();
     const simUdids = new Set(sims.map((d) => d.serial));
 
     if (this.requested) {

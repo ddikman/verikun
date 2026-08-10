@@ -91,6 +91,8 @@ column. The three that bite in practice:
 <tr><td><code>run</code> <em>(start/status/archive/clear)</em></td><td>✅</td><td>✅</td><td>✅</td><td>⚠️ archive carries no device log</td></tr>
 <tr><th colspan="5">Environment</th></tr>
 <tr><td><code>devices</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>devices start</code> / <code>stop</code> / <code>restart</code></td><td>❌ <code>2</code> — never power-cycled</td><td>✅ via <code>emulator</code> / <code>adb emu kill</code></td><td>✅ via <code>simctl</code></td><td>❌ <code>2</code> — never power-cycled</td></tr>
+<tr><td><code>devices start|restart --wipe</code></td><td>❌ <code>2</code></td><td>✅ <code>-wipe-data</code></td><td>✅ <code>simctl erase</code></td><td>❌ <code>2</code></td></tr>
 <tr><td><code>doctor</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--fix</code> is Android-only</td><td>⚠️ <code>--fix</code> is Android-only</td></tr>
 <tr><td><code>companion</code></td><td>✅</td><td>✅</td><td>❌ Android-only</td><td>❌ Android-only</td></tr>
 <tr><td><code>server</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>

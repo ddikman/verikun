@@ -114,3 +114,35 @@ test('parseArgs: a leading state modifier does not swallow the selector', () => 
     assert.equal(r.flags[flag.replace(/^--/, '')], true);
   }
 });
+
+// --- tri-state flags (deliberately NOT in BOOLEAN) --------------------------
+//
+// `allow-device-control` and `ensure-device` are absent / on / on-with-a-value.
+// Listing them in BOOLEAN would make the `=value` spelling parse but the
+// space-separated one silently become `true` plus a stray positional.
+
+test('parseArgs: --allow-device-control is boolean-ish when bare, a string with =names', () => {
+  assert.equal(parseArgs(['server', '--allow-device-control']).flags['allow-device-control'], true);
+  // followed by another flag: still bare
+  assert.equal(
+    parseArgs(['server', '--allow-device-control', '--port', '8391']).flags['allow-device-control'],
+    true,
+  );
+  assert.equal(
+    parseArgs(['server', '--allow-device-control=Pixel_6,iPhone 17']).flags['allow-device-control'],
+    'Pixel_6,iPhone 17',
+  );
+});
+
+test('parseArgs: --ensure-device bare vs =name', () => {
+  assert.equal(parseArgs(['suite', 'tests/', '--ensure-device']).flags['ensure-device'], true);
+  assert.equal(parseArgs(['suite', 'tests/', '--ensure-device=Pixel_6']).flags['ensure-device'], 'Pixel_6');
+});
+
+test('parseArgs: --ensure-device BEFORE a positional swallows it — use the = form', () => {
+  // Pinned so the docs match reality: this is why README/usage show
+  // `vk suite tests/ --ensure-device` (flag last) or `--ensure-device=<name>`.
+  const parsed = parseArgs(['suite', '--ensure-device', 'tests/']);
+  assert.equal(parsed.flags['ensure-device'], 'tests/');
+  assert.deepEqual(parsed.positionals, []);
+});

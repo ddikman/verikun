@@ -6,9 +6,29 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-17
+
 ### Added
 - **`npm run docs` / `docs:install` / `docs:build`**: run the documentation site from the repo
   root; README covers the local setup.
+- **`vk devices start|stop|restart <name>`**: boot, shut down or power-cycle an Android AVD or iOS
+  simulator. `start` is idempotent and waits until the device is actually drivable.
+- **`vk devices --all`**: also lists startable (not-yet-booted) AVDs and simulators.
+- **`vk devices start|restart --wipe`**: erase the device's data first (`-wipe-data` / `simctl erase`).
+- **`vk server --allow-device-control[=names]`**: let a client restart/stop the server's device;
+  `=names` also permits starting those targets. The server may then listen with no device bound.
+- **`--ensure-device[=name]`** on `ai`/`suite`/`install`: boot a device once before the first step.
+- **`VERIKUN_EMULATOR`**: path to the SDK `emulator` binary when it is not on `PATH`.
+
+### Changed
+- **`vk devices`**: gains `KIND` and `NAME` columns, so an emulator shows the AVD name you pass to
+  `stop`/`restart`.
+- **`/v1/health`**: `serial` may now be `null`; adds `deviceControlEnabled`, `deviceNamingEnabled`
+  and `deviceState` for feature detection.
+
+### Fixed
+- **`vk devices start --server`**: releases the device lock when it finishes, instead of `409`ing
+  the run it just booted the device for.
 
 ## [0.22.2] - 2026-08-17
 
@@ -451,22 +471,6 @@ All notable changes to this project are documented here. The format is based on
   e2e fixture app, 74 files of Gradle/Xcode/PNG that no end user installing the CLI should download.
 - `publish.yml` also verifies `package-lock.json` is in sync with `package.json`'s version. `npm ci`
   does not catch this — it errors only on dependency drift, never on the root `version` field.
-
-### Fixed
-- **The Claude Code plugin no longer ships the contributor-only `create-pr` skill.** The manifest
-  pointed `skills` at the container `.claude/skills/`, and that field only ever *adds* to the scan,
-  so every skill in it reached end users — costing roughly 260 always-on tokens per session for one
-  they cannot use. It now lists the two user-facing skills explicitly. Naming a single skill would
-  not do: that drops `suggest-verikun-improvement`, which the main skill hands off to.
-
-- **`CHANGELOG.md` is now included in the published npm package.** `package.json`'s `"files"` is an
-  allowlist, and npm force-includes only `package.json`, `README`, `LICENSE`, the `main` file and the
-  `bin` file(s) — a changelog is *not* on that list (npm 5/6 included one; modern npm does not).
-  Every release up to 0.19.0 therefore published without a changelog, and did so silently: the
-  publish succeeded, CI was green, and nothing anywhere reported the omission.
-  `tests/package-files.test.ts` now guards the allowlist, including against an entry whose path no
-  longer exists.
-
 ## [0.19.0] - 2026-08-08
 
 ### Added

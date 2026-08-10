@@ -19,6 +19,9 @@ import {
   ExecRequest,
   ExecResponse,
   ElementsResponse,
+  DeviceListResponse,
+  DeviceOpRequest,
+  DeviceOpResponse,
   HealthResponse,
   LogsResponse,
   RpcErrorBody,
@@ -40,6 +43,11 @@ const HEALTH_TIMEOUT_MS = 10_000;
 const ELEMENTS_TIMEOUT_MS = 60_000;
 const EXEC_TIMEOUT_MS = 10 * 60_000;
 const INSTALL_TIMEOUT_MS = 15 * 60_000;
+const DEVICE_LIST_TIMEOUT_MS = 30_000;
+// Above the server's own 4-minute boot ceiling, so the SERVER reports why a boot
+// timed out rather than the client aborting into a generic "timed out after 300s".
+const DEVICE_START_TIMEOUT_MS = 5 * 60_000;
+const DEVICE_STOP_TIMEOUT_MS = 60_000;
 
 const trimUrl = (url: string): string => url.replace(/\/+$/, '');
 
@@ -50,6 +58,9 @@ function describeStatus(status: number, body: RpcErrorBody | null, url: string):
   }
   if (status === 409) {
     return new CliError(`verikun server device is busy (409)${detail || ' — another run holds the device; retry when it finishes'}.`, 3);
+  }
+  if (status === 503) {
+    return new CliError(`verikun server has no device attached (503)${detail}.`, 3);
   }
   // The server sends the intended exit code (usage 2 / env 3) in the body; fall
   // back on the HTTP class when it didn't.
@@ -107,6 +118,15 @@ class RemoteTransport {
   postJson<T>(path: string, payload: unknown, timeoutMs: number): Promise<T> {
     return this.request<T>('POST', path, JSON.stringify(payload), timeoutMs, { 'content-type': 'application/json' });
   }
+
+  /** Best-effort: give the device lock back. A lock we fail to release ages out. */
+  async release(): Promise<void> {
+    try {
+      await this.postJson<{ ok: boolean }>('/v1/release', {}, HEALTH_TIMEOUT_MS);
+    } catch {
+      /* the idle takeover covers it */
+    }
+  }
 }
 
 /** GET /v1/health — the `--server` preflight. Reachability, the server's platform +
@@ -119,6 +139,36 @@ export async function pingServer(opts: RemoteOpts): Promise<HealthResponse> {
     throw new CliError(`'${trimUrl(opts.url)}' does not look like a verikun server (unexpected /v1/health payload).`, 3);
   }
   return health;
+}
+
+/**
+ * POST /v1/devices/{start,restart,stop}. Standalone beside pingServer rather than on
+ * the ExecBackend seam: that seam is the engine's DEVICE WORK (exec/getElements/
+ * install/reset), and adding administration to it would oblige the local backend to
+ * implement a verb nothing in the engine ever calls.
+ */
+export async function remoteDeviceOp(
+  opts: RemoteOpts,
+  op: 'start' | 'restart' | 'stop',
+  body: DeviceOpRequest = {},
+): Promise<DeviceOpResponse> {
+  const t = new RemoteTransport(opts);
+  const timeout = op === 'stop' ? DEVICE_STOP_TIMEOUT_MS : DEVICE_START_TIMEOUT_MS;
+  try {
+    return await t.postJson<DeviceOpResponse>(`/v1/devices/${op}`, body, timeout);
+  } finally {
+    // This is a one-shot administrative call under its own run token, not a run —
+    // so hand the device lock straight back. Without this, `vk devices start
+    // --server` (and the --ensure-device preflight, which uses its own token) would
+    // 409 the very run it just booted the device for, until the 5-minute idle takeover.
+    await t.release();
+  }
+}
+
+/** GET /v1/devices — what the server can see and what it will boot on request. */
+export async function remoteDeviceList(opts: RemoteOpts): Promise<DeviceListResponse> {
+  const t = new RemoteTransport(opts);
+  return t.request<DeviceListResponse>('GET', '/v1/devices', undefined, DEVICE_LIST_TIMEOUT_MS);
 }
 
 function decodeArtifacts(encoded: Record<string, string> | undefined): Record<string, Buffer> {

@@ -54,6 +54,12 @@ prints an out-of-date CLI or plugin, and the command that fixes it, then still e
 | Element has no reachable on-screen pixel | `1` |
 | `run archive` where the run contained failures | `1` |
 | Tool missing, no usable device, dump/screencap failed | `3` |
+| `devices start`/`restart` where the device did not finish booting in time | `1` |
+| `devices start`/`stop`/`restart` naming a device that does not exist | `1` |
+| Device name matching more than one target (e.g. a simulator in two runtimes) | `2` |
+| `devices start`/`stop`/`restart` against a **physical** device | `2` |
+| `--wipe` against an already-running target, or on `devices stop` | `2` |
+| The SDK `emulator` binary cannot be found (set `VERIKUN_EMULATOR`) | `3` |
 | Unsupported device setting for the platform | `3` |
 | State modifier the platform cannot report (`--selected`/`--focused` on iOS) | `3` |
 | iOS `clear` (no per-app data reset exists) | `3` |

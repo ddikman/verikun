@@ -110,14 +110,38 @@ Every `/v1/exec` request passes the same `validateNode` gate that guards `vk ai`
 repairs: action verbs only (`tap`, `text`, `assert`, `launch`, …), never `ui` or `log`, and
 never a shell.
 
-The device and platform are **fixed when the server starts** — client flags cannot repoint
-them.
+The device and platform are **fixed when the server starts** — no flag on an `exec` request
+can repoint them. Only `/v1/devices/*` can change that binding, and it is off unless you opt
+in (below).
 
 ### Installs are opt-in
 
 `POST /v1/install` requires `--allow-install`; a read-only server refuses builds. It accepts
 only single-file `.apk` / `.ipa` uploads, writes to a **server-generated** temp path (never a
 client-supplied one), and verifies a sha256 of the body.
+
+### Device control is opt-in, and naming is allowlisted
+
+`--allow-device-control` lets an authenticated client `restart` or `stop` **the server's own
+device** — the recovery path for a device that has gone flaky mid-suite. It names nothing.
+
+`--allow-device-control=Pixel_6_API_34,...` additionally lets a client **start** one of those
+operator-declared targets. Enumerating the host's AVDs is autocomplete, not authorization, so
+the allowlist is the boundary: a request naming anything else is rejected with a message that
+does not reveal whether it exists.
+
+Every mutation takes the device lock, so a restart while another run holds the device is a
+`409` — but the **holder** may power-cycle its own device, which is what makes recovery work.
+
+With the flag the server will also start with **no device attached**: `/v1/health` reports
+`serial: null` and the device endpoints answer `503` telling you to boot one. Without that, a
+server whose device is down could never be fixed remotely. An *ambiguous* device still fails
+fast at startup — that is an operator error, and booting another device makes it worse.
+
+:::caution
+Enabling device control also lets that client **erase** the device (`--wipe`). That is the
+honest cost of the flag; leave it off if you do not want it.
+:::
 
 ### One run at a time
 
@@ -285,6 +309,29 @@ verikun plugins. Two examples, commented out in the reference workflow:
   if: always()
   run: aws s3 cp .verikun/suites "s3://my-reports/${{ github.run_id }}/" --recursive
 ```
+
+## Recovering a dead or flaky device
+
+```sh
+# On the server host — let clients boot the AVD by name:
+vk server --device emulator-5554 --allow-device-control=Pixel_6_API_34 --allow-install
+
+# From the client:
+vk devices --server "$VERIKUN_SERVER"                         # what can it see / boot?
+vk devices restart --server "$VERIKUN_SERVER"                 # its device is wedged
+vk devices start Pixel_6_API_34 --server "$VERIKUN_SERVER"    # it has none bound
+vk suite tests/ --ensure-device --server "$VERIKUN_SERVER"    # boot once, then run
+```
+
+`--ensure-device[=<name>]` also works locally and on `vk ai` / `vk install`. It runs **once,
+before the first step** — never between tests and never mid-run, so it cannot turn a red test
+green. It means "boot something if nothing is usable"; when a device is already available it
+is a no-op and says so, even if you named a different one.
+
+There is deliberately **no** automatic mid-run restart. The most common exit `3` is a failed
+`uiautomator dump` on a busy screen, so rebooting for it would punish a transient with a
+two-minute detour — and a reboot destroys the app session, so the retried step would either
+pass meaninglessly or cascade into confusing failures.
 
 ## Running the server as a long-lived service
 

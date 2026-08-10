@@ -53,8 +53,13 @@ const BOOLEAN = new Set([
   'no-cache',
   'no-restart',
   'no-logs',
+  'wipe',
   'allow-install',
   'allow-unsafe-anonymous',
+  // NOT here on purpose: 'allow-device-control' and 'ensure-device' are tri-state
+  // (absent / on / on-with-a-value), and the inline `--flag=value` branch is checked
+  // BEFORE this set — listing them would make `--allow-device-control=Pixel_6` parse
+  // fine but `--ensure-device Pixel_6` silently become a boolean plus a positional.
   // Selector state modifiers (STATE_ATTRS in ui/selector.ts) and their negations.
   // `enabled` was missing here until 0.15.0, and the omission was not cosmetic: a
   // non-BOOLEAN flag swallows the next token, so `vk tap --enabled @submit` bound

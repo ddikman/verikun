@@ -1,5 +1,5 @@
-import { spawnSync } from 'node:child_process';
-import { accessSync, statSync, constants } from 'node:fs';
+import { spawnSync, spawn } from 'node:child_process';
+import { accessSync, statSync, constants, closeSync, openSync } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { CliError } from './errors';
 
@@ -75,6 +75,54 @@ function isExecutableFile(p: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Start a long-running process that must OUTLIVE this CLI process — today only the
+ * Android emulator. Everything else in verikun is one blocking `spawnSync` per
+ * command; this is the single exception, and it stays here so `node:child_process`
+ * has exactly one importer.
+ *
+ * Two things are load-bearing:
+ *
+ *  - **stdio is NEVER 'inherit' or 'pipe'.** An inherited stdout means the emulator
+ *    holds the write end of the CLI's stdout pipe open forever after `vk` exits, so
+ *    an agent (or a shell) capturing `vk`'s output never sees EOF and hangs. Output
+ *    goes to `logFile` or /dev/null, nowhere else.
+ *  - **`spawn` reports ENOENT asynchronously**, on the 'error' event, unlike
+ *    `spawnSync`'s `r.error`. An 'error' event with no listener is an uncaught
+ *    exception, so `onError` is always wired; callers surface it via their progress
+ *    channel, and the boot timeout catches whatever slips past.
+ */
+export function spawnDetached(
+  cmd: string,
+  args: string[],
+  opts: { logFile?: string; cwd?: string; env?: NodeJS.ProcessEnv; onError?: (e: Error) => void } = {},
+): { pid: number; logFile?: string } {
+  let fd: number | undefined;
+  if (opts.logFile) {
+    try {
+      fd = openSync(opts.logFile, 'a');
+    } catch {
+      /* an unwritable log path must not block the boot — fall back to discarding */
+    }
+  }
+  try {
+    const child = spawn(cmd, args, {
+      detached: true, // own process group: survives our exit and a Ctrl-C on our terminal
+      stdio: ['ignore', fd ?? 'ignore', fd ?? 'ignore'],
+      cwd: opts.cwd,
+      env: opts.env,
+      windowsHide: true,
+    });
+    child.on('error', (e) => opts.onError?.(e as Error));
+    child.unref();
+    if (child.pid === undefined) throw new CliError(`Could not start '${cmd}'`, 3);
+    return { pid: child.pid, logFile: fd !== undefined ? opts.logFile : undefined };
+  } finally {
+    // The child holds its own duplicate of the descriptor; ours would otherwise leak.
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

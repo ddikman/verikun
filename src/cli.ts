@@ -4,7 +4,11 @@ import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, NoWindowError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
-import { adbTransport, severanceRisk } from './drivers/adb';
+import { adbTransport, severanceRisk, avdNameOf, listAvds } from './drivers/adb';
+import {
+  allLifecycles, assertActionable, chooseTarget, isRunning, lifecycleFor, restartTarget, targetLabel,
+  LifecycleTarget, LifecycleVerb,
+} from './drivers/lifecycle';
 import { Bounds, Driver, DeviceInfo, Element, HierarchySource, Platform, Point, ToolProbe } from './types';
 import {
   SETTINGS,
@@ -65,13 +69,12 @@ import { AgentProvider } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
 import { Plan } from './agent/ir';
-import { ExecBackend } from './rpc';
-import { createRemoteBackend, pingServer, RemoteOpts } from './agent/remote';
+import { ExecBackend, HealthResponse } from './rpc';
+import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
 import { cmdSuite, AiRunResult } from './suite';
+import { sleep, DEFAULT_BOOT_TIMEOUT_MS, DEFAULT_STOP_TIMEOUT_MS } from './wait';
 import { VERSION } from './version';
 import { updateProbes } from './update-check';
-
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 interface Ctx {
   driver: Driver;
@@ -433,18 +436,36 @@ async function resolveTappable(ctx: Ctx, sel: Selector, opts: { all?: boolean } 
 // Commands
 // ---------------------------------------------------------------------------
 
-function cmdDevices(ctx: Ctx): number {
+function cmdDevices(flags: Flags): number {
+  const all = flagBool(flags, 'all');
   const allDevices: DeviceInfo[] = [];
   try {
-    allDevices.push(...new AdbDriver().listDevices());
+    const android = new AdbDriver().listDevices();
+    // Name each running emulator by its AVD, so the listing shows the token you'd
+    // pass to `vk devices stop|restart`. Best-effort: the console may not answer.
+    for (const d of android) {
+      if (d.kind === 'emulator') d.name = avdNameOf(d.serial) || undefined;
+    }
+    allDevices.push(...android);
+    if (all) {
+      // Startable-but-not-running AVDs have no adb address yet — they are addressed
+      // by name, so `serial` stays empty rather than being invented.
+      const running = new Set(android.map((d) => (d.name ?? '').toLowerCase()).filter(Boolean));
+      for (const name of listAvds()) {
+        if (running.has(name.toLowerCase())) continue;
+        allDevices.push({ serial: '', state: 'shutdown', platform: 'android', kind: 'emulator', name });
+      }
+    }
   } catch (e) {
     // adb not on PATH is the common (expected) case, but surface anything else so a real
     // adb listing failure isn't hidden behind a silently-empty device list.
     err(`devices: adb backend unavailable (${(e as Error).message})`);
   }
   try {
-    // Only include booted simulators; always include physical devices (they carry a note)
-    allDevices.push(...new IdbDriver().listDevices().filter((d) => d.state === 'booted' || d.note));
+    // By default only booted simulators (a shutdown one isn't drivable); physical
+    // devices always show (they carry a note). --all lists everything startable.
+    const ios = new IdbDriver().listDevices();
+    allDevices.push(...(all ? ios : ios.filter((d) => d.state === 'booted' || d.note)));
   } catch (e) {
     err(`devices: iOS backend unavailable (${(e as Error).message})`);
   }
@@ -458,22 +479,153 @@ function cmdDevices(ctx: Ctx): number {
     }
   }
 
-  if (flagBool(ctx.flags, 'json')) {
+  if (flagBool(flags, 'json')) {
     json(allDevices);
     return 0;
   }
   if (!allDevices.length) {
-    err('No devices found.');
+    err(all ? 'No devices or startable AVDs/simulators found.' : 'No devices found.');
     return 0;
   }
   for (const line of formatDeviceTable(allDevices)) out(line);
   return 0;
 }
 
+/** Aliases for the lifecycle verbs, mirroring the top-level command aliases. */
+const DEVICE_VERBS: Record<string, LifecycleVerb> = {
+  start: 'start',
+  boot: 'start',
+  stop: 'stop',
+  shutdown: 'stop',
+  kill: 'stop',
+  restart: 'restart',
+  reboot: 'restart',
+};
+
+/**
+ * `vk devices [list|start|stop|restart]`. Dispatched as a META-command (before the
+ * recording machinery) whenever a subcommand is present: lifecycle needs no local
+ * driver — it is what you run when there ISN'T one — and a `--server` invocation
+ * must not build one either. Bare `vk devices` keeps the ordinary path.
+ */
+async function cmdDevicesEntry(positionals: string[], flags: Flags): Promise<number> {
+  const sub = String(positionals[0] ?? 'list').toLowerCase();
+  const server = serverFromFlags(flags);
+  if (sub === 'list') return server ? cmdDevicesRemoteList(server, flags) : cmdDevices(flags);
+  const verb = DEVICE_VERBS[sub];
+  if (!verb) {
+    throw new CliError(`Unknown 'devices' subcommand '${sub}'. Use: list | start | stop | restart.`, 2);
+  }
+  return server
+    ? cmdDevicesRemote(verb, positionals[1], server, flags)
+    : cmdDeviceLifecycle(verb, positionals[1], flags);
+}
+
+/**
+ * Refuse to power-cycle a device another job is actively driving.
+ *
+ * The local counterpart of the server's `409`: you may restart YOUR OWN device, never
+ * someone else's. Without this, device claims and device lifecycle would each work and
+ * together be a hole — one job could reboot the phone another job is mid-suite on,
+ * which is precisely the collision claims exist to prevent.
+ *
+ * `start` is exempt: it only ever brings up something that is not running, so there is
+ * nothing to pull out from under anyone.
+ */
+function assertNotClaimedByOthers(target: LifecycleTarget, verb: LifecycleVerb): void {
+  if (verb === 'start' || !target.serial || !claimsEnabled()) return;
+  const claim = summarize(target.serial);
+  if (!claim || claim.mine) return;
+  throw new CliError(
+    `${targetLabel(target)} (${target.serial}) is in use by ${claim.by} — ` +
+      `${verb} would pull the device out from under it.\n` +
+      `If that job is gone, hand the device back first: vk device release ${target.serial}`,
+    2,
+  );
+}
+
+async function cmdDeviceLifecycle(
+  verb: LifecycleVerb,
+  rawTarget: string | undefined,
+  flags: Flags,
+): Promise<number> {
+  const wipe = flagBool(flags, 'wipe');
+  const wait = !flagBool(flags, 'no-wait');
+  const timeoutFlag = flagStr(flags, 'timeout');
+  const timeoutMs = timeoutFlag
+    ? parseDuration(timeoutFlag, 'timeout')
+    : verb === 'stop'
+      ? DEFAULT_STOP_TIMEOUT_MS
+      : DEFAULT_BOOT_TIMEOUT_MS;
+
+  // An explicit --ios/--android/--platform narrows the search; otherwise probe both
+  // backends, exactly as bare `vk devices` does, so `devices start Pixel_6_API_34`
+  // works without also naming the platform. A name that hits BOTH is still exit 2.
+  const explicitPlatform =
+    flagBool(flags, 'ios') || flagBool(flags, 'android') || flagStr(flags, 'platform') !== undefined;
+  const lifecycles = explicitPlatform ? [lifecycleFor(platformFromFlags(flags))] : allLifecycles();
+  const targets = lifecycles.flatMap((l) => l.targets());
+
+  if (!rawTarget) {
+    const startable = targets.filter((t) => t.kind !== 'physical').map(targetLabel).filter(Boolean);
+    const hint = startable.length
+      ? `\nStartable: ${[...new Set(startable)].join(', ')}`
+      : '\nRun `vk devices --all` to list startable devices.';
+    throw new CliError(`Usage: verikun devices ${verb} <name|serial> [--timeout <dur>]${hint}`, 2);
+  }
+
+  // `start` wants the one that ISN'T up; `stop`/`restart` want the live one.
+  const chosen = chooseTarget(targets, rawTarget, { prefer: verb === 'start' ? 'startable' : 'running' });
+  assertActionable(chosen, verb, { wipe });
+  assertNotClaimedByOthers(chosen, verb);
+  const lc = lifecycleFor(chosen.platform);
+  const onProgress = (m: string) => err(`[verikun] ${m}`);
+  const asJson = flagBool(flags, 'json');
+
+  if (verb === 'stop') {
+    const r = await lc.shutdown(chosen, { timeoutMs, onProgress });
+    if (asJson) {
+      json({ action: 'stop', requested: rawTarget, platform: chosen.platform, kind: chosen.kind, serial: r.serial, name: chosen.name, stopped: r.stopped });
+    } else {
+      err(r.stopped ? `stopped ${targetLabel(chosen)}` : `${targetLabel(chosen)} was not running`);
+      out(r.serial);
+    }
+    return 0;
+  }
+
+  const opts = { timeoutMs, wait, wipe, onProgress };
+  const r =
+    verb === 'restart'
+      ? await restartTarget(lc, chosen, opts)
+      : { ...(await lc.boot(chosen, opts)), stopped: false };
+
+  if (asJson) {
+    json({
+      action: verb,
+      requested: rawTarget,
+      platform: chosen.platform,
+      kind: chosen.kind,
+      serial: r.serial,
+      name: chosen.name,
+      started: r.started,
+      ready: r.ready,
+      waitedMs: r.waitedMs,
+      ...(r.logPath ? { logPath: r.logPath } : {}),
+    });
+  } else {
+    if (verb === 'start' && !r.started) err(`${targetLabel(chosen)} is already running`);
+    // stdout is the one machine-usable datum: the serial, so
+    // `vk -d "$(vk devices start X)" ui` composes. Under --no-wait on Android there
+    // is genuinely no serial yet, so print nothing rather than invent one.
+    out(r.serial ?? '');
+  }
+  return 0;
+}
+
 /**
  * Render the device list as an aligned, headed table (header line first, then one
- * line per device). Optional columns (MODEL/PRODUCT/NOTE) are dropped when no device
- * populates them; every shown cell is padded to its column width so columns line up
+ * line per device). Optional columns (KIND/NAME/MODEL/PRODUCT/NOTE) are dropped when no
+ * device populates them; every shown cell is padded to its column width so columns line up
  * regardless of which cells are empty — the previous `.filter(Boolean).join('\t')`
  * dropped empty cells, sliding later cells into earlier tab stops. Exported for unit
  * testing.
@@ -481,8 +633,10 @@ function cmdDevices(ctx: Ctx): number {
 export function formatDeviceTable(devices: DeviceInfo[]): string[] {
   const columns: Array<{ header: string; get: (d: DeviceInfo) => string; optional?: boolean }> = [
     { header: 'PLATFORM', get: (d) => d.platform },
+    { header: 'KIND', get: (d) => d.kind ?? '', optional: true },
     { header: 'SERIAL', get: (d) => d.serial },
     { header: 'STATE', get: (d) => d.state },
+    { header: 'NAME', get: (d) => d.name ?? '', optional: true },
     { header: 'MODEL', get: (d) => d.model ?? '', optional: true },
     { header: 'PRODUCT', get: (d) => d.product ?? '', optional: true },
     // Optional like the rest, which is load-bearing twice over: nothing changes for a
@@ -1729,9 +1883,154 @@ interface ResolvedBackend {
   remote?: { url: string; version: string; reads?: HierarchySource };
 }
 
+/** The `--server` URL, or VERIKUN_SERVER. Exported-shape helper so `resolveBackend`
+ *  and `vk devices --server` can never disagree about what "remote" means. */
+export function serverFromFlags(flags: Flags): string | undefined {
+  return flagStr(flags, 'server') || process.env.VERIKUN_SERVER || undefined;
+}
+
+function remoteOptsFrom(url: string, flags: Flags): RemoteOpts {
+  return { url, authKey: flagStr(flags, 'auth-key') || process.env.VERIKUN_SERVER_AUTH_KEY || undefined };
+}
+
+/**
+ * `--ensure-device[=<target>]` — the requested target, or `undefined` for the bare
+ * form, or `null` when the flag is absent. Exported for unit tests.
+ */
+export function ensureDeviceTarget(flags: Flags): string | undefined | null {
+  const raw = flags['ensure-device'];
+  if (raw === undefined || raw === false) return null;
+  if (raw === true || raw === 'true') return undefined;
+  return String(raw);
+}
+
+/** The one target that is startable without guessing, else exit 2 with the options. */
+function soleStartable(targets: LifecycleTarget[]): LifecycleTarget {
+  const startable = targets.filter((t) => t.kind !== 'physical' && !isRunning(t));
+  if (startable.length === 1) return startable[0];
+  const names = [...new Set(startable.map(targetLabel).filter(Boolean))];
+  throw new CliError(
+    startable.length === 0
+      ? '--ensure-device: no startable device found. Run `vk devices --all` to check the toolchain.'
+      : `--ensure-device: ${startable.length} devices could be started — name one, ` +
+        `e.g. --ensure-device="${names[0]}"\n  ${names.join('\n  ')}`,
+    2,
+  );
+}
+
+/**
+ * Boot a device before the first step, when `--ensure-device` asks for it. Runs here
+ * — inside resolveBackend, before runCtx is fixed — rather than inside `vk suite`,
+ * so the booted serial is the one every recorded step is attributed to. It is
+ * structurally unable to turn a red test green: it happens before any step executes,
+ * never between tests and never mid-run.
+ */
+async function ensureLocalDevice(platform: Platform, device: string | undefined, flags: Flags): Promise<void> {
+  const want = ensureDeviceTarget(flags);
+  if (want === null) return;
+  try {
+    const serial = getDriver(platform, device).resolvedSerial();
+    // `--ensure-device=X` means "boot X if nothing is usable", not "make X the
+    // device" — so say so plainly when a different device is already serving,
+    // rather than reporting a serial the caller didn't ask for.
+    err(`[verikun] --ensure-device: ${serial} is already available${want ? ` — not booting '${want}'` : ''}`);
+    return;
+  } catch (e) {
+    // Ambiguity (exit 2) is an operator error — booting another device makes it worse.
+    if (!(e instanceof CliError) || e.exitCode !== 3) throw e;
+  }
+  const lc = lifecycleFor(platform);
+  const targets = lc.targets();
+  const chosen = want ? chooseTarget(targets, want, { prefer: 'startable' }) : soleStartable(targets);
+  assertActionable(chosen, 'start');
+  err(`[verikun] --ensure-device: booting ${targetLabel(chosen)}…`);
+  await lc.boot(chosen, {
+    timeoutMs: DEFAULT_BOOT_TIMEOUT_MS,
+    wait: true,
+    wipe: false,
+    onProgress: (m) => err(`[verikun] ${m}`),
+  });
+}
+
+/** The remote half of `--ensure-device`: ask the server to boot, then re-ping so the
+ *  run context carries the serial the device actually came up as. */
+async function ensureRemoteDevice(
+  health: HealthResponse,
+  opts: RemoteOpts,
+  url: string,
+  flags: Flags,
+): Promise<HealthResponse> {
+  const want = ensureDeviceTarget(flags);
+  if (want === null) return health;
+  if (health.serial) {
+    err(`[verikun] --ensure-device: ${health.serial} is already bound on ${url}${want ? ` — not booting '${want}'` : ''}`);
+    return health;
+  }
+  assertDeviceControl(health, url, want);
+  err(`[verikun] --ensure-device: asking ${url} to boot a device…`);
+  await remoteDeviceOp(opts, 'start', want ? { target: want } : {});
+  return pingServer(opts);
+}
+
+/** Feature-detect device control from /v1/health. Never compare versions: a client
+ *  cannot tell "old server" from "new server, flag off", and both need this answer. */
+function assertDeviceControl(health: HealthResponse, url: string, target?: string): void {
+  if (!health.deviceControlEnabled) {
+    throw new CliError(
+      `device control is not available on the verikun server at ${url} (verikun ${health.version}). ` +
+        'Restart it with --allow-device-control.',
+      3,
+    );
+  }
+  if (target && !health.deviceNamingEnabled) {
+    throw new CliError(
+      `the server at ${url} was started with a bare --allow-device-control — it can only act on its own ` +
+        `device, not '${target}'. Restart it with --allow-device-control=<names>.`,
+      2,
+    );
+  }
+}
+
+async function cmdDevicesRemote(
+  verb: LifecycleVerb,
+  target: string | undefined,
+  url: string,
+  flags: Flags,
+): Promise<number> {
+  const opts = remoteOptsFrom(url, flags);
+  const health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
+  assertDeviceControl(health, url, target);
+  const wipe = flagBool(flags, 'wipe');
+  err(`[verikun] ${verb} device on ${url}${target ? ` (${target})` : ''}${wipe ? ' with WIPE' : ''}…`);
+  const r = await remoteDeviceOp(opts, verb, { ...(target ? { target } : {}), ...(wipe ? { wipe } : {}) });
+  err(
+    `[verikun] ${r.changed ? `${verb} ok` : 'already running'} · ${r.serial ?? '(none)'} · ` +
+      `${(r.durationMs / 1000).toFixed(1)}s`,
+  );
+  if (flagBool(flags, 'json')) json({ action: verb, server: url, ...r });
+  else out(r.serial ?? '');
+  return 0;
+}
+
+async function cmdDevicesRemoteList(url: string, flags: Flags): Promise<number> {
+  const opts = remoteOptsFrom(url, flags);
+  const health = await pingServer(opts);
+  assertDeviceControl(health, url);
+  const r = await remoteDeviceList(opts);
+  if (flagBool(flags, 'json')) {
+    json({ server: url, ...r });
+    return 0;
+  }
+  if (r.devices.length) for (const line of formatDeviceTable(r.devices)) out(line);
+  else err('No devices visible on the server.');
+  err(`[verikun] bound: ${r.bound ?? '(none)'}${r.startable.length ? ` · startable: ${r.startable.join(', ')}` : ''}`);
+  return 0;
+}
+
 async function resolveBackend(platform: Platform, device: string | undefined, flags: Flags): Promise<ResolvedBackend> {
-  const server = flagStr(flags, 'server') || process.env.VERIKUN_SERVER || undefined;
+  const server = serverFromFlags(flags);
   if (!server) {
+    await ensureLocalDevice(platform, device, flags);
     const driver = getDriver(platform, device);
     // Fail fast on a broken toolchain BEFORE any model spend — the mirror of the
     // remote branch's pingServer below. Without this, a missing `idb` isn't noticed
@@ -1783,9 +2082,13 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     onStep: (step, artifacts, logStart) =>
       Recorder.appendForeignStep(step, artifacts, { ...runCtx, logStart }),
   };
-  const health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
-  runCtx = { platform: health.platform, device: health.serial };
-  err(`[verikun] server ${server}: ${health.platform} · device ${health.serial} · verikun ${health.version}`);
+  let health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
+  // `--ensure-device` boots BEFORE runCtx is fixed: resolveBackend bakes the serial
+  // into the run context and the returned device, so booting afterwards would
+  // attribute every spliced step to a device that didn't exist yet.
+  health = await ensureRemoteDevice(health, opts, server, flags);
+  runCtx = { platform: health.platform, device: health.serial ?? undefined };
+  err(`[verikun] server ${server}: ${health.platform} · device ${health.serial ?? '(none)'} · verikun ${health.version}`);
   // Say the read path once, here. Reads execute server-side, so this is the only end of the
   // connection that knows it — and without it a companion that had silently stood down was
   // indistinguishable from one that never engaged, for a whole suite (issue #77). An older
@@ -1816,7 +2119,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       },
     },
     platform: health.platform,
-    device: health.serial,
+    device: health.serial ?? undefined,
     remote: { url: server, version: health.version, reads: health.reads },
   };
 }
@@ -2211,8 +2514,6 @@ function cmdCompanion(ctx: Ctx): number {
 
 async function executeCommand(command: string, ctx: Ctx): Promise<number> {
   switch (command) {
-    case 'devices':
-      return cmdDevices(ctx);
     case 'doctor':
       return cmdDoctor(ctx);
     case 'companion':
@@ -2406,6 +2707,18 @@ async function executeParsed(command: string, positionals: string[], flags: Flag
   // driver of their own and are dispatched before the recording machinery.
   if (command === 'run') return cmdRun(positionals, flags, platform, device);
   if (command === 'batch') return cmdBatch(positionals, flags);
+  // `devices` is wholly a meta-command: it must not build a local driver. Lifecycle is
+  // what you run when there ISN'T one, a `--server` call needs no local device at all,
+  // and even the bare listing probes both backends itself rather than using ctx.driver.
+  // Dispatched in exactly one place on purpose — a command split across the switch AND
+  // this chain reads as two commands to anything parsing the dispatch (tests/docs-coverage).
+  if (command === 'devices') {
+    try {
+      return await cmdDevicesEntry(positionals, flags);
+    } catch (e) {
+      return mapError(e, flags);
+    }
+  }
   // `ai`/`suite`/`install`/`server` orchestrate their own steps; map their thrown
   // CliErrors to exit codes here (usage 2 / env 3 / …) so they honor the exit-code
   // contract instead of escaping to the top-level "Fatal" handler (exit 3).
@@ -2562,6 +2875,7 @@ SUITE (run a directory of natural-language tests as one gated suite)
 
 SERVER (expose a locally-connected device to remote verikun clients)
   server [--bind addr] [--port n] [--auth-key k] [--allow-install]
+         [--allow-device-control[=names]]
          [--allow-unsafe-anonymous]  Serve THIS machine's device over HTTP+JSON for
                                       \`vk ai/suite/install --server <url>\`. Only
                                       verikun's validated action grammar is runnable
@@ -2573,16 +2887,31 @@ SERVER (expose a locally-connected device to remote verikun clients)
                                       Env: VERIKUN_SERVER_AUTH_KEY (keeps it off argv).
   Clients: pass --server <url> (or VERIKUN_SERVER) + --auth-key (or
   VERIKUN_SERVER_AUTH_KEY) to ai/suite/install. The server's device+platform apply.
+  --allow-device-control lets a client restart/stop the server's OWN device (for a
+  device gone flaky mid-suite); --allow-device-control=<avd,sim> additionally lets it
+  START one of those named targets — and, with it, ERASE the device (--wipe). With
+  the flag the server also starts even when no device is attached, so a client can
+  boot one: \`vk devices start|stop|restart [name] --server <url>\`, or add
+  --ensure-device[=name] to ai/suite/install to boot once before the first step.
 
 ENVIRONMENT
-  devices [--json]                    List attached devices/simulators, and which job is
-                                      already driving each (USED BY)
+  devices [--all] [--json]            List attached devices/simulators, and which job is
+                                      already driving each (USED BY); --all also lists
+                                      startable (not-yet-booted) AVDs/simulators
+  devices start <name> [--wipe]       Boot an AVD/simulator; prints its serial. Already
+        [--timeout dur] [--no-wait]   running = a no-op. --wipe erases its data first
+  devices stop <name|serial>          Shut a running emulator/simulator down
+  devices restart <name> [--wipe]     Stop then boot (use for a wedged/flaky device)
   doctor [--fix]                      Diagnose adb/device, and warn if this CLI or the
                                       Claude Code plugin is out of date (a warning only —
                                       it never changes the exit code). --fix disables
                                       animations. VERIKUN_NO_UPDATE_CHECK skips the check
   companion <status|stop> [--json]    On-device hierarchy reader (Android, on by default;
                                       VERIKUN_COMPANION=0 opts out)
+  Note: \`devices stop\` powers a DEVICE off; \`stop <appId>\` force-stops an APP, and
+  \`device set\` (singular) changes settings on the device you are driving.
+  Physical devices are never power-cycled. Env: VERIKUN_EMULATOR (path to the SDK's
+  \`emulator\` binary, if it isn't on PATH or under \$ANDROID_HOME).
 
 TEST RUNS (actions are recorded; a run auto-starts on first action)
   run start [name] [--force]          Begin a named run (else one starts implicitly)

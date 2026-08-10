@@ -3,7 +3,7 @@
 // only imported by the real test files.
 
 import { deflateSync } from 'node:zlib';
-import { Bounds, Element } from '../src/types';
+import { Bounds, Driver, Element } from '../src/types';
 import { LeafStep, PlanNode } from '../src/agent/ir';
 
 /** Narrow a node from a control body to a leaf. Control bodies are PlanNode[] since
@@ -102,4 +102,38 @@ export function makePng(
     pngChunk('IDAT', deflateSync(rawWithFilter)),
     pngChunk('IEND', Buffer.alloc(0)),
   ]);
+}
+
+/**
+ * A Driver that touches no device. Every method throws unless a test overrides it,
+ * so an accidental device call in a unit test is loud rather than silently empty.
+ */
+export function makeDriver(overrides: Partial<Driver> = {}): Driver {
+  const unused = (name: string) => () => {
+    throw new Error(`fake driver: ${name}() should not have been called`);
+  };
+  const base: Driver = {
+    platform: 'android',
+    listDevices: () => [],
+    resolvedSerial: () => 'emulator-5554',
+    getElements: () => [],
+    screenshot: unused('screenshot'),
+    screenSize: () => ({ width: 1080, height: 2400 }),
+    tap: unused('tap'),
+    swipe: unused('swipe'),
+    inputText: unused('inputText'),
+    pressKey: unused('pressKey'),
+    launch: unused('launch'),
+    install: unused('install'),
+    stop: unused('stop'),
+    clearApp: unused('clearApp'),
+    currentApp: () => '(unknown)',
+    getLogs: () => '',
+    deviceTime: () => '',
+    preflight: () => undefined,
+    viewport: () => null,
+    getDeviceSetting: unused('getDeviceSetting'),
+    setDeviceSetting: unused('setDeviceSetting'),
+  };
+  return { ...base, ...overrides };
 }
