@@ -22,18 +22,22 @@ vk device get --json
 vk device caps                                           # what this platform supports
 ```
 
-## The key matrix
+## The keys
 
-| key | values | Android | iOS simulator | iOS device |
-|---|---|---|---|---|
-| `airplane` | `on\|off` | ✅ | ❌ no radio to switch off | ❌ |
-| `dark` | `on\|off` | ✅ | ✅ | ❌ |
-| `font-scale` | `0.5`–`3.0`, or `default` | ✅ | ✅ mapped to the nearest Dynamic Type category | ❌ |
-| `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` | ✅ | ❌ neither simctl nor idb rotates | ❌ |
-| `stay-awake` | `on\|off` | ✅ | ⊘ no-op — simulators do not sleep | ❌ |
+| key | values |
+|---|---|
+| `airplane` | `on\|off` |
+| `dark` | `on\|off` |
+| `font-scale` | `0.5`–`3.0`, or `default` |
+| `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` |
+| `stay-awake` | `on\|off` |
 
-`vk device caps --json` is the same matrix for whatever platform you are pointed at, read
-live.
+Android supports all five. iOS does not, and a simulator and a physical device differ —
+[Platform support](/verikun/guides/platform-support/#device-settings) is the per-key matrix.
+
+`vk device caps` prints what the active platform supports, but note that on iOS it reports the
+**simulator** answer whether or not you resolved a physical device: the capability table is
+static, and only the driver knows what it found.
 
 ### Value domains
 

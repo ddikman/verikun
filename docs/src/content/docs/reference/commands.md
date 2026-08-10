@@ -7,6 +7,10 @@ sidebar:
 
 `vk help` prints this same list from the CLI itself. Aliases are noted where they exist.
 
+Not every command works everywhere — [Platform support](/verikun/guides/platform-support/) is
+the matrix of what runs on Android and iOS, on physical hardware and on an emulator or
+simulator.
+
 ## Inspect
 
 The semantic hierarchy is the core feature. These commands never change the screen and never

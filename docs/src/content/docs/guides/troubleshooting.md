@@ -2,7 +2,7 @@
 title: Troubleshooting
 description: What common verikun failures actually mean, and what to do about each.
 sidebar:
-  order: 6
+  order: 7
 ---
 
 ## Start here: read the exit code
@@ -245,7 +245,8 @@ vk assert @content --wait 10s     # not an immediate tap
 | `idb` not found | Install it, or set `IDB=/path/to/idb`. Run `vk doctor --ios`. |
 | No logs from a physical device | Simulator-only. Use Console.app or `idb log`. |
 
-Full detail: [iOS setup](/verikun/guides/ios-setup/#documented-limitations).
+Every one of these, plus what a physical device supports:
+[Platform support](/verikun/guides/platform-support/).
 
 ## `vk ai` and suites
 

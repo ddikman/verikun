@@ -7,6 +7,52 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **A `Platform support` page in the docs, and it is now the canonical platform matrix.** Every
+  command, state modifier, `device set` key and reporting feature, split **Android** × **iOS**
+  and each of those into **physical** and **emulator/simulator**. Previously "does this work on
+  my setup?" had no single answer: the facts were spread across nine places in three different
+  shapes, no column anywhere covered an Android emulator, and the selector-portability table
+  existed verbatim in two files.
+
+  Three things it states that nothing did before. **A physical iOS device supports none of the
+  five device-setting keys** — `simctl` drives simulators only and `idb` covers interaction
+  rather than preferences — while `vk device caps --ios` reports the *simulator* answer either
+  way, because the capability table is static and only the driver knows what it resolved. So
+  `caps` says `dark` is supported and `set` exits `3`. **`stay-awake` is a no-op on a simulator
+  but a refusal on a device**, which the previous table flattened into one cell. And the
+  **iOS-physical column is asserted from the source rather than measured** — the Flutter fixture
+  cannot be installed on one without code signing, so no physical iPhone has been exercised end
+  to end; the page says so rather than implying a measurement that never happened.
+
+  The pages that carried a partial copy now link to it instead: `guides/ios-setup.md`'s
+  seven-bullet limitations list and its duplicated selector table, and
+  `reference/device-state.md`'s three-column key matrix. `guides/troubleshooting.md` keeps its
+  symptom→meaning table, which answers a different question. Also corrects `ios-setup.md`'s
+  advice to "prefer `text:`/`desc:`" on iOS, which contradicted the measured `@id`-first rule
+  three lines below it in the same file.
+
+  No version bump: no CLI behaviour changed.
+
+- **Docs coverage is now enforced in CI.** `tests/docs-coverage.test.ts` reads `src/cli.ts` and
+  `src/device/settings.ts` as text, extracts every dispatchable command (aliases included — they
+  are fall-through `case` labels sharing a handler) and every `device set` key, and fails if any
+  is missing from `reference/commands.md` or `guides/platform-support.md`.
+
+  It closes a hole rather than adding ceremony: `pages.yml` is the only job that builds the docs
+  site, and therefore the only thing that validates its links, and it is **path-filtered to
+  `docs/**`**. A pull request that added a command to `src/cli.ts` and touched no docs file never
+  triggered it, so nothing anywhere reported the omission. `ci.yml` runs the unit suite on every
+  PR regardless of paths. The extraction asserts a floor on how many commands it found, so a
+  regex that silently stops matching fails loudly instead of passing vacuously.
+
+  `CLAUDE.md`'s versioning section is restated to match: one trigger, three inseparable
+  consequences — version bump, changelog entry, **and** the docs page that owns the contract.
+  Adding a command is now documented as five edits rather than two.
+
+- **The docs home page shows the sidebar again.** It used Starlight's `template: splash`, a
+  full-width landing layout that drops the sidebar *and* the table of contents — so the page most
+  people land on was the one page with no navigation. Now `template: doc`; the hero is unchanged.
+
 - **A documentation site at <https://ddikman.github.io/verikun/>.** An Astro Starlight site in
   `docs/`, deployed to GitHub Pages by the new `.github/workflows/pages.yml` (a pull request
   builds it as a check without deploying). 26 pages across four sections: Getting started
