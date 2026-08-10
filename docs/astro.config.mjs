@@ -42,6 +42,7 @@ export default defineConfig({
             { label: 'Suites', slug: 'guides/suites' },
             { label: 'Remote devices & CI', slug: 'guides/remote-devices-and-ci' },
             { label: 'iOS setup', slug: 'guides/ios-setup' },
+            { label: 'Platform support', slug: 'guides/platform-support' },
             { label: 'Troubleshooting', slug: 'guides/troubleshooting' },
           ],
         },

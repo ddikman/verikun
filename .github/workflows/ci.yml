@@ -50,7 +50,14 @@ jobs:
       # `test:ci` runs the suite through two reporters at once: `spec` to stdout
       # (the readable ✔/✖ list you see in this log) and a small custom reporter
       # (scripts/github-test-summary.mjs) to test-results/summary.md.
-      - name: Test (unit suite)
+      #
+      # This step also gates DOCS COVERAGE (tests/docs-coverage.test.ts): every command the
+      # CLI dispatches, and every `device set` key, must appear in reference/commands.md and
+      # guides/platform-support.md. It has to live here rather than in pages.yml, which is
+      # path-filtered to `docs/**` — a PR that adds a command and touches no docs file never
+      # triggers that workflow, which is precisely the case worth catching. This job runs on
+      # every PR regardless of paths.
+      - name: Test (unit suite + docs coverage)
         run: npm run test:ci
         env:
           TEST_SUMMARY_LABEL: Node ${{ matrix.node-version }}

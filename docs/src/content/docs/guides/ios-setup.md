@@ -10,6 +10,10 @@ sidebar:
 [`vk batch`](/verikun/guides/writing-test-cases/), [`vk ai`](/verikun/guides/natural-language-tests/),
 and the JUnit + HTML reports — on both simulators and physical devices.
 
+Parity is not total, and it differs between a simulator and a physical device.
+[Platform support](/verikun/guides/platform-support/) is the command-by-command matrix; this
+page is how to get the toolchain working.
+
 ## Install idb
 
 Everything interactive is powered by **[`idb`](https://github.com/facebook/idb)** (Facebook's
@@ -58,48 +62,37 @@ simctl-only `booted` alias.
 These are deliberate honest degradations, not bugs. Where a platform has no clean
 equivalent, verikun says so rather than half-implementing it.
 
-- **`clear` is unsupported.** iOS has no per-app data reset. Exits `3` with an explanation.
-  The manual equivalent is uninstall plus reinstall, but that removes the app too — which is
-  why it is not done automatically. [`vk suite --app`](/verikun/guides/suites/) degrades to a
-  force-stop here.
-- **`current` returns `(unknown)`.** iOS exposes no reliable foreground-app query.
-- **`swipe` duration is not honoured** — `idb` has no millisecond duration knob.
+**[Platform support](/verikun/guides/platform-support/) is the full matrix** — every command
+and feature, per platform, with simulator and physical device separated. Two entries there
+decide which target you should pick:
+
+- **A physical iOS device supports no device settings at all.** `simctl` drives simulators
+  only and `idb` covers interaction rather than preferences, so `dark` and `font-scale` — the
+  two keys that work on a simulator — refuse on a device. Note that `vk device caps --ios`
+  reports the simulator answer either way, because the capability table is static.
 - **`log` capture is simulator-only.** For a physical device use Console.app or `idb log`
-  directly.
-- **`--tree` renders flat** — `idb`'s accessibility list carries no nesting depth.
-- **`--selected` and `--focused` selectors exit `3`.** `idb` emits no such key at all — not
-  merely unset, the key does not exist — so a filter that could only ever match nothing is
-  refused rather than silently returning zero results. `--enabled` and `--checked` work on
-  both platforms. See [Selectors](/verikun/reference/selectors/#state-modifiers).
-- **`device set` is partial.** `dark` and `font-scale` work on a **simulator**;
-  `stay-awake` is a no-op (simulators do not sleep); `airplane` and `rotation` are
-  unsupported — neither `simctl ui` nor `idb ui` exposes a radio or an orientation. A
-  physical device supports none of them. Run `vk device caps --ios` for the live matrix.
+  directly. That also means an archived run from a physical device carries no device log.
 
 ## Writing selectors that work on iOS
 
-iOS accessibility ids are often unset, which changes the usual advice.
+The advice does not change on iOS: **`@id` first, `text:` second, `desc:` never.** `@id` is
+the only selector that means the same thing on both platforms, and it is the only one that
+survives localisation. The per-kind mapping and the reasoning are in
+[Selectors](/verikun/reference/selectors/#which-selector-to-reach-for).
 
-| selector | Android | iOS | portable? |
-|---|---|---|---|
-| `@id` | `resource-id` | `AXUniqueId` | **yes — always prefer this** |
-| `text:` | visible text, falling back to `content-desc` | `AXLabel` / `title` / `AXValue` | yes |
-| `desc:` | `content-desc` | `accessibilityHint` only | **no — Android in practice** |
-| `class:` | widget class | element role | no |
+What *is* iOS-specific is where a label ends up. An accessibility label arrives as `desc` on
+Android but as `text` on iOS, so a `desc:` selector written against Android **silently stops
+matching** when you point the same test at a simulator. `desc:` on iOS reaches only the
+accessibility *hint*, which almost nothing sets.
 
-Two traps worth knowing:
+For a Flutter app, `@id` comes from `Semantics(identifier:)` and `Semantics(label:)` is the
+label that moves fields. Note that an element carrying an identifier but **no** label, value
+or action survives in the Android hierarchy and vanishes from the iOS one entirely — so
+anything that has to be findable on both needs a label as well as an id.
 
-- **`desc:` does not fall back.** `text:` falls back to `desc` when no text matches, so
-  `text:Submit` finds an element carrying only an accessibility label. The reverse is not
-  true. On iOS an accessibility label arrives as `text`, so a `desc:` selector written
-  against Android **silently stops matching** there.
-- **`class:` is mostly useless on a cross-platform toolkit.** Flutter text inputs report as
-  `android.widget.EditText` / `TextField`, but almost everything else is
-  `android.view.View` — so `class:Button` cannot match a Flutter button regardless of what
-  the widget is.
-
-For a Flutter app, `@id` comes from `Semantics(identifier:)`; `Semantics(label:)` gives you
-`desc` on Android but `text` on iOS.
+`--selected` and `--focused` exit `3` on iOS rather than matching nothing; `--enabled` and
+`--checked` work on both. See
+[Platform support](/verikun/guides/platform-support/#selectors-and-state-modifiers).
 
 ## Measured Flutter facts
 
@@ -118,6 +111,7 @@ The full measured list lives in
 
 ## Where to go next
 
+- [Platform support](/verikun/guides/platform-support/) — the full per-platform matrix
 - [Troubleshooting](/verikun/guides/troubleshooting/#ios-and-idb) — idb-specific failures
-- [Device state](/verikun/reference/device-state/) — the full per-platform matrix
+- [Device state](/verikun/reference/device-state/) — how snapshot and restore work
 - [Selectors](/verikun/reference/selectors/) — the complete grammar
