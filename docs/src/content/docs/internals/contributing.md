@@ -219,11 +219,16 @@ account turns on "require 2FA and disallow tokens".
 as a marketplace plugin. Validate manifest changes with `claude plugin validate .`.
 
 The plugin ships the skill at `.claude/skills/verikun/SKILL.md` — referenced via the
-manifest's `"skills": "./.claude/skills/"`, not moved or duplicated.
+manifest's `"skills": "./.claude/skills/verikun/"`, not moved or duplicated.
 
-Because `dist/` is gitignored, the installed plugin carries the skill but **not** a runnable
-`vk` binary. Do not assume an installed-plugin environment has `vk` on `PATH`.
+`skills` lists **one entry per shipped skill** — never the container `./.claude/skills/`,
+which published every skill in it including contributor-only `create-pr` up to 0.19.0, and
+never just one, which would drop `suggest-verikun-improvement` even though the main skill
+hands off to it. `tests/plugin-manifest.test.ts` derives the expected set from
+`metadata.internal: true` on disk, so a new skill fails the test until the manifest lists it.
 
-Name the skill **file** rather than the `.claude/skills` directory in `"files"` —
-`create-pr/SKILL.md` is contributor-only (`metadata.internal: true`) and must not reach end
-users. See [Contracts](/verikun/internals/contracts/#packaging-files-is-an-allowlist).
+Because `dist/` is gitignored, an installed plugin carries the skill but **not** a runnable
+`vk`; the CLI is a separate npm step.
+
+For what `"files"` must name and why, see
+[Contracts](/verikun/internals/contracts/#packaging-files-is-an-allowlist).

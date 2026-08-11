@@ -127,7 +127,7 @@ apply** — client flags cannot repoint them.
 | Command | Description |
 |---|---|
 | `devices [--json]` | List attached devices and simulators. Probes both backends. |
-| `doctor [--fix]` | Diagnose adb + device. `--fix` sets the three animation scales to `0` for deterministic UI. `--ios` checks the idb toolchain. |
+| `doctor [--fix]` | Diagnose adb + device, and report the CLI/plugin versions. `--fix` sets the three animation scales to `0` for deterministic UI. `--ios` checks the idb toolchain. Version staleness is reported as a **warning** and does not affect the exit code — only a genuinely unusable setup gives `3`. |
 
 ## Test runs
 

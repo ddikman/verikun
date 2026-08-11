@@ -30,6 +30,13 @@ immediately with an install hint instead of halfway through a flow. A `suite` wh
 dies mid-run stops with `3` rather than reporting every remaining test as a failure — which
 would read exactly like a mass regression.
 
+## Warnings have no code of their own
+
+There is no fifth code for "worth knowing about", deliberately: `set -e` makes any new
+non-zero value a failure, so a warning code would be read as one by exactly the scripts it
+was meant to spare. Warnings go to **stderr and leave the exit code alone** — `vk doctor`
+prints an out-of-date CLI or plugin, and the command that fixes it, then still exits `0`.
+
 ## What produces each code
 
 | Situation | Code |

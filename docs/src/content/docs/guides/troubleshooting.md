@@ -186,6 +186,16 @@ They are not redacted. Treat archived reports accordingly; `VERIKUN_NO_RUN=1` di
 recording entirely.
 :::
 
+### The agent used a flag or command that does not exist
+
+Almost always a **version skew**. The Claude Code plugin ships the skill that teaches an
+agent how to drive verikun, and it updates separately from the CLI, so an agent reading a
+months-old skill will confidently use a flag your `vk` no longer has.
+
+`vk doctor` names whichever half is behind, as a warning. Fix it, then restart Claude Code
+so the new skill loads. See
+[Keeping it up to date](/verikun/getting-started/installation/#keeping-it-up-to-date).
+
 ### My phone was left dark, rotated, or offline
 
 A bare `vk device set` from a shell **stays applied** — deliberately. Inside `batch`, `ai`

@@ -30,7 +30,7 @@ Requires Node ≥ 18 and the Android platform-tools (`adb`) on your `PATH`.
 npm install -g verikun    # installs the `verikun` and `vk` commands globally
 ```
 
-Then run `vk doctor` to check your setup. Re-run the same command later to upgrade.
+Then run `vk doctor` to check your setup. Re-run the install later to upgrade — `vk doctor` warns you when there is a newer release, or when the Claude Code plugin's skill docs have fallen behind the CLI, without failing on either.
 
 The package also carries the agent [`SKILL.md`](.claude/skills/verikun/SKILL.md), the [`CHANGELOG`](CHANGELOG.md) and the [`example/`](example) tests, so they ship with your install. *Registering* that skill with a particular agent is a separate step — see [Installation](https://ddikman.github.io/verikun/getting-started/installation/) for Claude Code, Cursor, Copilot, Windsurf and others.
 

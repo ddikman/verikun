@@ -32,6 +32,19 @@ The command is `vk` (after `npm install -g verikun`, or `npm link` from a source
 clone) or, if not linked, `node dist/bin/verikun.js` from the repo root. All
 examples below use `vk`.
 
+## Before you start (once per session)
+
+Run `vk doctor` once before the first device command. Alongside the adb/device checks it
+reports version staleness on stderr — it never fails on that, so treat it as information:
+
+- **`claude-code-plugin: … behind this CLI`** → **this skill file is out of date.** Trust
+  `vk --help` over what you read here when they disagree, and tell the user to run
+  `claude plugin update verikun@verikun` and restart Claude Code.
+- **`verikun: … npm has <newer>`** → tell the user `npm install -g verikun@latest`.
+
+**Tell the user, don't run it.** Upgrading changes their machine, and the plugin path needs
+a Claude Code restart to take effect. Mention it once and move on.
+
 ## The loop: act → inspect → assert
 
 1. **See** the screen → `vk ui`
