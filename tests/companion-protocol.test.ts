@@ -1,0 +1,82 @@
+import { test } from 'node:test';
+import { strict as assert } from 'node:assert';
+import {
+  COMPANION_PROTOCOL,
+  dumpCommand,
+  isHierarchy,
+  isLiveReply,
+  pingMatches,
+  portForSerial,
+} from '../src/companion/protocol';
+
+const buf = (s: string) => Buffer.from(s, 'utf8');
+
+test('isLiveReply: an empty reply is not a live companion', () => {
+  // The one that matters: `adb forward` keeps the host port open whether or not anything
+  // is listening on the device end, so a dead companion CONNECTS fine and returns nothing.
+  // Reading that as a valid (empty) response is the "absent" lie that skips a guard.
+  assert.equal(isLiveReply(Buffer.alloc(0)), false);
+  assert.equal(isLiveReply(buf('anything')), true);
+});
+
+test('pingMatches: accepts only our companion at our protocol version', () => {
+  assert.equal(pingMatches(buf(`verikun-companion ${COMPANION_PROTOCOL}\n`)), true);
+  assert.equal(pingMatches(buf(`verikun-companion ${COMPANION_PROTOCOL}`)), true, 'no trailing newline');
+});
+
+test('pingMatches: a companion from another verikun version is not talked to', () => {
+  // It is still holding the device's UiAutomation connection, so the caller must restart
+  // it rather than ignore it — but it must not be treated as usable.
+  assert.equal(pingMatches(buf('verikun-companion 999\n')), false);
+});
+
+test('pingMatches: rejects an empty reply and anything that is not us', () => {
+  assert.equal(pingMatches(Buffer.alloc(0)), false);
+  assert.equal(pingMatches(buf('some other service 1\n')), false);
+  assert.equal(pingMatches(buf('verikun-companion\n')), false, 'no version');
+});
+
+test('isHierarchy: only a real dump counts', () => {
+  assert.equal(isHierarchy(buf("<?xml version='1.0'?><hierarchy rotation=\"0\"><node /></hierarchy>")), true);
+});
+
+test('isHierarchy: the companion\'s own error replies are not hierarchies', () => {
+  // These arrive on the same channel as a dump. Letting one reach the XML parser would
+  // yield zero elements — indistinguishable from an empty screen.
+  assert.equal(isHierarchy(buf('released — call acquire first')), false);
+  assert.equal(isHierarchy(buf('ERROR unknown command: dumpp')), false);
+  assert.equal(isHierarchy(Buffer.alloc(0)), false);
+});
+
+test('dumpCommand: carries the idle window and the calibrated dimension source', () => {
+  assert.equal(dumpCommand(1000, 'app'), 'dump 1000 app');
+  assert.equal(dumpCommand(0, 'real'), 'dump 0 real');
+});
+
+test('dumpCommand: a negative or fractional idle window is normalised', () => {
+  // It is concatenated into a command line the companion parses with Long.parseLong —
+  // "-1" or "12.5" would throw on the device instead of failing here.
+  assert.equal(dumpCommand(-5, 'app'), 'dump 0 app');
+  assert.equal(dumpCommand(12.5, 'app'), 'dump 13 app');
+});
+
+test('portForSerial: the same device always resolves to the same port', () => {
+  // Two verikun processes driving one device must find the SAME companion: only one
+  // UiAutomation may be connected, so a second forward would start a second companion
+  // that immediately loses the connection.
+  assert.equal(portForSerial('R58R42SGVNR'), portForSerial('R58R42SGVNR'));
+});
+
+test('portForSerial: different devices get different ports', () => {
+  const serials = ['R58R42SGVNR', 'emulator-5554', 'emulator-5556', '192.168.1.5:5555'];
+  const ports = new Set(serials.map((s) => portForSerial(s)));
+  assert.equal(ports.size, serials.length, 'a collision would make two devices share one companion');
+});
+
+test('portForSerial: stays inside the configured span', () => {
+  for (const serial of ['a', 'emulator-5554', 'R58R42SGVNR', '::1:5555', '']) {
+    const port = portForSerial(serial, 8299, 200);
+    assert.ok(port >= 8299 && port < 8499, `${serial} -> ${port}`);
+    assert.equal(Number.isInteger(port), true);
+  }
+});

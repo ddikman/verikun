@@ -91,6 +91,7 @@ column. The three that bite in practice:
 <tr><th colspan="5">Environment</th></tr>
 <tr><td><code>devices</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>doctor</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--fix</code> is Android-only</td><td>⚠️ <code>--fix</code> is Android-only</td></tr>
+<tr><td><code>companion</code></td><td>✅</td><td>✅</td><td>❌ Android-only</td><td>❌ Android-only</td></tr>
 <tr><td><code>server</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>help</code> / <code>version</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 </tbody>
@@ -119,6 +120,10 @@ Notes on the rows that carry a caveat:
   [Suites](/verikun/guides/suites/).
 - **`doctor --fix` is Android-only.** It zeroes the three animation scales; iOS has no
   equivalent knob. `vk doctor --ios` still checks the toolchain.
+- **`companion` is Android-only**, and exits `3` on iOS. It speeds up the UI-hierarchy read,
+  which on Android costs ~2.4s per call because `uiautomator dump` starts a fresh VM every
+  time. iOS has no equivalent problem: `idb` already keeps a companion process alive and
+  reads in ~0.2s, so there is nothing to win. See the companion guide.
 
 ## Selectors and state modifiers
 

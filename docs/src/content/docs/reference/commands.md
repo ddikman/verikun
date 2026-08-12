@@ -128,6 +128,7 @@ apply** — client flags cannot repoint them.
 |---|---|
 | `devices [--json]` | List attached devices and simulators. Probes both backends. |
 | `doctor [--fix]` | Diagnose adb + device, and report the CLI/plugin versions. `--fix` sets the three animation scales to `0` for deterministic UI. `--ios` checks the idb toolchain. Version staleness is reported as a **warning** and does not affect the exit code — only a genuinely unusable setup gives `3`. |
+| `companion <status\|stop> [--json]` | Inspect or stop the on-device hierarchy reader (Android only). `stop` hands back the device's single `UiAutomation` connection so Appium or Layout Inspector can use it. See [Companion](/verikun/guides/companion/). |
 
 ## Test runs
 

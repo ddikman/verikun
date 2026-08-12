@@ -6,23 +6,47 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-### Changed
-- **Android screenshots are about twice as fast**, and byte-for-byte identical. `screencap -p`
-  makes the *phone* PNG-encode a full-resolution image, which we then immediately decode and
-  shrink — so the encode was pure waste. Captures now come off the device as raw pixels
-  (`screencap`, no `-p`) and are encoded here, at the size we actually keep. Measured on a
-  physical SM-A415F: **`vk screenshot` 2.60s → 1.12s**, and `--full` 2.60s → 1.19s. The larger
-  transfer is not the problem it looks like — 10MB of RGBA box-downscales in ~10ms and deflates
-  in ~110ms on the host, against ~1.4s of on-device encoding avoided. Verified on-device: the
-  PNG the old and new paths produce is identical byte-for-byte.
-
-  This is a new **optional** `Driver.screenshotRaw()`, and `null` is a first-class answer: a
-  backend without a raw path (iOS — `simctl` is already ~0.2s, so there is nothing to win) or a
-  capture whose header we do not recognise falls back to `screenshot()`. Failure-evidence
-  captures take the same route and stay full-resolution. An OEM laying the framebuffer out
-  differently gets the old speed, never a wrong image.
-
 ### Added
+- **An opt-in on-device companion that makes an Android UI-hierarchy read ~60x faster** —
+  `VERIKUN_COMPANION=1`, and `vk ui` goes from **2.40s to 0.21s** end to end on a physical
+  SM-A415F, with **identical** output. Reading the hierarchy is the dominant cost of any
+  suite, so this moves the whole runtime, not a rounding error.
+
+  Profiling `adb shell uiautomator dump` showed only ~0.10s of its ~2.4s is work. The rest is
+  paid fresh every call: ~1.22s starting ART and loading `uiautomator.jar`, and ~1.00s in
+  `waitForIdle(1000, 10000)`. That second one is not a flat sleep — it waits for the
+  accessibility event stream to have been *quiet* for a second, and a freshly connected
+  bridge has no history of quiet, so it must observe one. A long-lived connection already
+  does. The companion therefore keeps the full idle semantics and still returns in
+  milliseconds; it is not trading safety for speed.
+
+  It is Java compiled to dex (4KB), pushed to `/data/local/tmp` and run by the phone's own
+  runtime via `app_process` — scrcpy's approach. **Nothing is installed**: no APK, no root,
+  package list untouched. It shuts itself down after 15 minutes idle. It does **not** cache
+  the hierarchy — every read walks the live tree; only the *connection* is kept, so the
+  "re-capture fresh every command" rule is intact. It borrows the platform's own serialiser,
+  so its XML is byte-identical to `uiautomator dump`'s.
+
+  **Opt-in, because a device has exactly one `UiAutomation` connection and the companion
+  holds it** — while it runs, `uiautomator dump` is SIGKILLed, and Appium, Layout Inspector
+  and TalkBack cannot attach. `vk companion status` / `vk companion stop` hand it back.
+
+  It cannot fail a test. Every failure route releases the connection *before* falling back,
+  because the stock path is not merely slower while the companion holds it — it is
+  unavailable. A dead companion frees the connection by dying; one that cannot be asked
+  nicely is killed. A fallback read costs ~3.4s against 2.4s if the companion had never
+  existed.
+
+  Before trusting it, verikun takes **one** real `uiautomator dump` and checks the companion
+  reproduces it byte for byte, then remembers the answer in the companion itself. The dumper
+  clips node bounds to a display size, and which size the platform uses varies by build
+  (AOSP reads the physical display; an SM-A415F's stock dump matches the app window — 216px
+  apart). Guessing wrong would not fail loudly, it would shift every element near the bottom
+  of the screen and land taps elsewhere while still reporting success. If neither candidate
+  matches, the companion is declined and the stock path is used.
+
+  New: `vk companion <status|stop>`, `VERIKUN_COMPANION`, `tools/` for on-device programs,
+  and a [companion guide](https://ddikman.github.io/verikun/guides/companion/).
 - **A `Self-healing in CI` docs page, and a plan-cache step in the reference workflow.** The
   question it answers came from a team running verikun in CI: *should it be allowed to heal a
   drifted step, or should that just fail the build?* The answer was spread across five pages,
@@ -60,7 +84,37 @@ All notable changes to this project are documented here. The format is based on
 
   No version bump: no CLI behaviour changed.
 
+### Changed
+- **Android screenshots are about twice as fast**, and byte-for-byte identical. `screencap -p`
+  makes the *phone* PNG-encode a full-resolution image, which we then immediately decode and
+  shrink — so the encode was pure waste. Captures now come off the device as raw pixels
+  (`screencap`, no `-p`) and are encoded here, at the size we actually keep. Measured on a
+  physical SM-A415F: **`vk screenshot` 2.60s → 1.12s**, and `--full` 2.60s → 1.19s. The larger
+  transfer is not the problem it looks like — 10MB of RGBA box-downscales in ~10ms and deflates
+  in ~110ms on the host, against ~1.4s of on-device encoding avoided. Verified on-device: the
+  PNG the old and new paths produce is identical byte-for-byte.
+
+  This is a new **optional** `Driver.screenshotRaw()`, and `null` is a first-class answer: a
+  backend without a raw path (iOS — `simctl` is already ~0.2s, so there is nothing to win) or a
+  capture whose header we do not recognise falls back to `screenshot()`. Failure-evidence
+  captures take the same route and stay full-resolution. An OEM laying the framebuffer out
+  differently gets the old speed, never a wrong image.
+
 ### Fixed
+- **A failed `uiautomator dump` could silently return the PREVIOUS screen.** `dumpXml` ran
+  `uiautomator dump <path>` and then `cat <path>`, accepting anything containing
+  `<hierarchy>` — but it never checked that *this* dump had written the file. The dump writes
+  to a fixed path and leaves the last successful result there whenever it fails, and it fails
+  without saying so in its exit code: AOSP's `DumpCommand` prints `ERROR: could not get idle
+  state` and returns normally when `waitForIdle` times out on an animating screen. The stale
+  XML is perfectly well-formed, so every check passed and the caller resolved selectors —
+  and tapped coordinates — from a screen that could be minutes old. Measured: a dump killed
+  at 18:46 happily served the 18:44 hierarchy.
+
+  The file is now removed in the same device shell immediately before the dump, so `cat` can
+  only succeed if this dump produced it; a genuinely failed capture now fails loudly (exit
+  `3`) instead of quietly lying. Pre-existing — the companion below made it easy to hit, and
+  is how it was found.
 - **The release gate stopped understanding `npm pack --json`, which blocked the 0.20.0
   publish.** `scripts/check-package-contents.mjs` read the pack result as
   `JSON.parse(raw)[0]`, but **npm 12 returns an object keyed by package name** where npm ≤ 11

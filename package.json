@@ -1,6 +1,6 @@
 {
   "name": "verikun",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "description": "Drive Android emulators/devices and iOS simulators for AI agents: tap, type, swipe, screenshot, and inspect the UI hierarchy by semantic identifiers — like Puppeteer for native apps.",
   "keywords": [
     "android",
@@ -30,7 +30,8 @@
     "dist",
     "CHANGELOG.md",
     ".claude/skills/verikun/SKILL.md",
-    "example/*.md"
+    "example/*.md",
+    "tools/verikun-companion/prebuilt/*.jar"
   ],
   "scripts": {
     "prebuild": "node scripts/gen-version.mjs",

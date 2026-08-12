@@ -59,6 +59,10 @@ const required = [
   '.claude/skills/verikun/SKILL.md',
   'dist/bin/verikun.js',
   'dist/cli.js',
+  // The on-device companion. Shipped prebuilt because `npm install verikun` must not need
+  // an Android SDK — so if this is missing, every install silently loses the fast
+  // hierarchy read and falls back to the ~2.4s stock dump with nothing to explain why.
+  'tools/verikun-companion/prebuilt/verikun-companion.jar',
 ];
 
 // Patterns that must NOT appear. create-pr is contributor-only (metadata.internal: true);
@@ -75,6 +79,13 @@ const forbidden = [
     match: (p) => /(^|\/)\.env/.test(p) || /\.(pem|key|p12|keystore|jks)$/.test(p),
   },
   { label: 'the contributor-only create-pr skill', match: (p) => p.includes('create-pr') },
+  // Only the built jar ships. The Java, the build script and the READMEs are repo
+  // infrastructure like example/flutter-app/ — a bare `tools` entry in "files" would sweep
+  // them in, which is the same mistake `example/*.md` exists to prevent.
+  {
+    label: 'companion sources (only prebuilt/*.jar should ship)',
+    match: (p) => p.startsWith('tools/') && !p.startsWith('tools/verikun-companion/prebuilt/'),
+  },
   { label: 'TypeScript sources (is "files" still set?)', match: (p) => p.startsWith('src/') },
   { label: 'the test suite (is "files" still set?)', match: (p) => p.startsWith('tests/') },
   // example/ ships as the glob `example/*.md` — the end-user NL examples only, never a

@@ -44,6 +44,7 @@ export default defineConfig({
             { label: 'Self-healing in CI', slug: 'guides/self-healing-in-ci' },
             { label: 'iOS setup', slug: 'guides/ios-setup' },
             { label: 'Platform support', slug: 'guides/platform-support' },
+            { label: 'The Android companion', slug: 'guides/companion' },
             { label: 'Troubleshooting', slug: 'guides/troubleshooting' },
           ],
         },
