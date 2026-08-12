@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **`npm link` produced a `vk` that died with "permission denied".** `tsc` writes
+  `dist/bin/verikun.js` as 0644 and nothing set the executable bit, so the global symlink
+  `npm link` creates pointed straight at a non-executable file. It never showed up for
+  `npm install -g verikun`, because npm chmods `bin` targets itself while unpacking a
+  tarball — only a source checkout was affected, which is to say only contributors, on a
+  fresh clone, with an error that reads like a broken install rather than a missing mode bit.
+
+  A `postbuild` step (`scripts/chmod-bin.mjs`) now chmods every path named in `package.json`'s
+  `bin`, reading them from there so a renamed entry point cannot silently be left behind. It
+  is silent on success on purpose: `npm pack --json` runs the `prepare` hook and then expects
+  its own JSON on stdout, so a chatty build step is parsed as part of the pack result and
+  takes the release gate down with it.
+
+  `scripts/check-package-contents.mjs` now also asserts the packed tarball's `bin` is
+  executable, not merely present — the mode is exactly the kind of thing that regresses
+  without anyone noticing, since `npm install -g` keeps working either way.
+
+  No version bump: no CLI behaviour changed.
+
 ## [0.21.0] - 2026-08-13
 
 ### Added

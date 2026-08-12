@@ -20,8 +20,10 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const pkgJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 
 // `npm pack --dry-run` writes no tarball. --json describes the tarball it would have
 // written: one entry carrying `files: [{ path, size, mode }]`, paths relative to the package
@@ -48,6 +50,7 @@ if (!Array.isArray(result?.files)) {
   process.exit(1);
 }
 const paths = result.files.map((f) => f.path);
+const modeOf = new Map(result.files.map((f) => [f.path, f.mode]));
 
 // Every entry that must be in the tarball. `dist/bin/verikun.js` is the CLI itself: if the
 // build or the allowlist breaks, the package installs but `vk` does not exist.
@@ -108,6 +111,27 @@ for (const entry of required) {
 // maintenance, shipping none of them is the regression.
 if (!paths.some((p) => p.startsWith('example/'))) {
   errors.push('MISSING from the tarball: example/ (no example files were packed)');
+}
+
+// The bin must be EXECUTABLE in the tarball, not merely present. `tsc` emits 0644 and only
+// the postbuild chmod fixes that; drop the hook and `npm install -g` still works (npm chmods
+// bin targets while unpacking) while `npm link` produces a global `vk` that dies with
+// "permission denied". That asymmetry is why this is checked on the artifact: the mode is the
+// thing that regresses silently, and nothing else looks at it.
+// Grouped by FILE, not by bin name: `verikun` and `vk` are two names for one file, and
+// reporting it twice reads like two separate faults.
+const binNames = new Map();
+for (const [name, rel] of Object.entries(pkgJson.bin ?? {})) {
+  binNames.set(rel, [...(binNames.get(rel) ?? []), name]);
+}
+for (const [rel, names] of binNames) {
+  const mode = modeOf.get(rel);
+  if (mode === undefined) continue; // already reported as MISSING above
+  if (!(mode & 0o111)) {
+    errors.push(
+      `NOT EXECUTABLE in the tarball: ${rel} (mode ${mode.toString(8)}, bin ${names.map((n) => `"${n}"`).join(' + ')}) — is the postbuild chmod still wired up?`,
+    );
+  }
 }
 
 for (const { label, match } of forbidden) {
