@@ -43,6 +43,29 @@ All notable changes to this project are documented here. The format is based on
   possible at runtime, so a cache hit with no key still exits `3`.
 
   No version bump: no CLI behaviour changed.
+
+## [0.20.0] - 2026-08-12
+
+### Added
+- **`vk doctor` now warns when your verikun is out of date**
+  ([#59](https://github.com/ddikman/verikun/issues/59)). Two checks alongside the device probes: is
+  this CLI behind npm's `latest`, and is the installed Claude Code plugin's skill documentation
+  behind this CLI. `SKILL.md` asks the agent to run `vk doctor` once at the start of a session and
+  to *tell you* rather than upgrade on your behalf.
+
+  The skill is the agent-facing *contract*, so a stale copy is worse than no copy: an agent reads it
+  and confidently uses a flag the installed CLI no longer has. The reporter's machine had a plugin 8
+  minor versions behind its CLI, with nothing anywhere saying so — and that cannot be fixed from the
+  plugin side, because marketplace auto-update is off by default for third-party marketplaces, the
+  setting lives in the user's own config, and no plugin author can enable it.
+
+  Both are **warnings**: printed on stderr with the command that fixes them, but they do not change
+  doctor's exit code, because being out of date is not the same as a machine that cannot drive a
+  device — and `3` is documented as "a machine to fix". (`ToolProbe` gained an `advisory` severity
+  for this; a firewalled CI box must not go red either.) The whole check degrades to silence —
+  offline, a captive portal's HTML body, an unreadable plugin registry — since an advisory must never
+  fail a device run. Opt out with `VERIKUN_NO_UPDATE_CHECK`.
+
 - **A `Platform support` page in the docs, and it is now the canonical platform matrix.** Every
   command, state modifier, `device set` key and reporting feature, split **Android** × **iOS**
   and each of those into **physical** and **emulator/simulator**. Previously "does this work on
@@ -137,6 +160,12 @@ All notable changes to this project are documented here. The format is based on
   does not catch this — it errors only on dependency drift, never on the root `version` field.
 
 ### Fixed
+- **The Claude Code plugin no longer ships the contributor-only `create-pr` skill.** The manifest
+  pointed `skills` at the container `.claude/skills/`, and that field only ever *adds* to the scan,
+  so every skill in it reached end users — costing roughly 260 always-on tokens per session for one
+  they cannot use. It now lists the two user-facing skills explicitly. Naming a single skill would
+  not do: that drops `suggest-verikun-improvement`, which the main skill hands off to.
+
 - **`CHANGELOG.md` is now included in the published npm package.** `package.json`'s `"files"` is an
   allowlist, and npm force-includes only `package.json`, `README`, `LICENSE`, the `main` file and the
   `bin` file(s) — a changelog is *not* on that list (npm 5/6 included one; modern npm does not).

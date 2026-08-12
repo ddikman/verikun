@@ -72,6 +72,7 @@ default. See [Screenshots](/verikun/reference/screenshots/).
 | Variable | Controls |
 |---|---|
 | `VERIKUN_DEBUG` | When set, prints the stack trace of an unexpected (non-`CliError`) error to stderr |
+| `VERIKUN_NO_UPDATE_CHECK` | When set to any non-empty value, `vk doctor` skips its CLI/plugin version probes and makes no network request. For airgapped machines and anywhere the check is unwanted. |
 
 ## Read by the host, not by verikun
 

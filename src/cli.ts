@@ -59,6 +59,7 @@ import { ExecBackend } from './rpc';
 import { createRemoteBackend, pingServer, RemoteOpts } from './agent/remote';
 import { cmdSuite, AiRunResult } from './suite';
 import { VERSION } from './version';
+import { updateProbes } from './update-check';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -457,8 +458,17 @@ export function formatDeviceTable(devices: DeviceInfo[]): string[] {
 
 /** Render one shared ToolProbe the way doctor always has: present -> stdout, failure +
  *  hint -> stderr. Unlike `Driver.preflight()` (which throws on the first failure),
- *  doctor reports every probe so one run lists everything that needs fixing. */
+ *  doctor reports every probe so one run lists everything that needs fixing.
+ *
+ *  An `advisory` probe (see ToolProbe) renders like a failure — stderr, with its hint,
+ *  because the hint is the useful part — but returns true, so it is visible without
+ *  claiming the setup is broken. Returns whether this counts as OK for doctor's verdict. */
 function reportProbe(p: ToolProbe): boolean {
+  if (p.advisory) {
+    err(`${p.name}: ${p.detail}`);
+    if (p.hint) err(`  ${p.hint}`);
+    return true;
+  }
   if (p.ok) {
     // A multi-line detail (simctl's booted-device listing) reads as its own block
     // rather than smashed onto the `name:` line.
@@ -475,7 +485,13 @@ function reportProbe(p: ToolProbe): boolean {
   return p.ok;
 }
 
-function cmdDoctor(ctx: Ctx): number {
+async function cmdDoctor(ctx: Ctx): Promise<number> {
+  // First, and platform-independent: a skewed plugin makes an agent emit commands this CLI
+  // does not have, which is worth knowing before any device diagnosis. Every version probe
+  // is advisory, though — being out of date is not a broken machine, and exit 3 is reserved
+  // for one. So these render (with their remediation hints) without touching the verdict.
+  for (const probe of await updateProbes()) reportProbe(probe);
+
   if (ctx.platform === 'ios') {
     // xcrun is the floor: without it there is no device list to reason about.
     if (!reportProbe(probeXcrun())) return 3;
@@ -2388,7 +2404,10 @@ SERVER (expose a locally-connected device to remote verikun clients)
 
 ENVIRONMENT
   devices [--json]                    List attached devices/simulators
-  doctor [--fix]                      Diagnose adb/device; --fix disables animations
+  doctor [--fix]                      Diagnose adb/device, and warn if this CLI or the
+                                      Claude Code plugin is out of date (a warning only —
+                                      it never changes the exit code). --fix disables
+                                      animations. VERIKUN_NO_UPDATE_CHECK skips the check
 
 TEST RUNS (actions are recorded; a run auto-starts on first action)
   run start [name] [--force]          Begin a named run (else one starts implicitly)

@@ -76,12 +76,12 @@ This repository doubles as a Claude Code
 
 ```sh
 /plugin marketplace add ddikman/verikun   # add this repo as a marketplace
-/plugin install verikun@verikun           # install the plugin (ships the skill)
+/plugin install verikun@verikun           # install the plugin
 ```
 
-The plugin ships the **skill**; the `vk` **CLI** is a separate Node package. The compiled
-`dist/` is gitignored, so it is not bundled into the installed plugin — install it with
-`npm install -g verikun` as above so `vk` lands on your `PATH`.
+The plugin ships the **skill**; the `vk` **CLI** is a separate Node package, so install it
+with `npm install -g verikun` as above. Because they update independently they can fall out
+of step — [Keeping it up to date](#keeping-it-up-to-date) covers how to notice.
 
 ### Cursor, Copilot, Windsurf, and others
 
@@ -97,6 +97,30 @@ Add `--agent cursor` (or `windsurf`, `github-copilot`, `opencode`, …) to targe
 directly, and `-g` to install globally rather than into the current project. As with the
 plugin, this installs the **skill** only — the CLI still comes from
 `npm install -g verikun`.
+
+## Keeping it up to date
+
+`vk doctor` warns when either half is stale:
+
+```
+verikun: 0.19.0 — npm has 0.20.0
+  npm install -g verikun@latest
+claude-code-plugin: 0.11.0 — behind this CLI (0.20.0); the agent is reading stale skill docs
+  claude plugin update verikun@verikun   (then restart Claude Code)
+```
+
+The second matters more than it looks: the skill teaches an agent *how* to drive verikun, so
+a stale one means an agent confidently using a flag your CLI no longer has. That is why the
+skill asks the agent to run `vk doctor` once at the start of a session.
+
+Both are warnings — being out of date does not change doctor's exit code. Set
+`VERIKUN_NO_UPDATE_CHECK=1` to skip the check entirely.
+
+:::caution[Claude Code will not update the plugin for you by default]
+Marketplace auto-update is **off by default for third-party marketplaces**, and no plugin
+author can turn it on — the setting lives in your own config. Turn it on under `/plugin` →
+**Marketplaces** → **verikun**, or refresh by hand with `/plugin marketplace update verikun`.
+:::
 
 ## Build from source
 

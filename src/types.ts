@@ -84,11 +84,22 @@ export interface DeviceInfo {
 export interface ToolProbe {
   /** Display name, e.g. "adb". */
   name: string;
+  /** Whether this counts as OK for the caller's verdict — doctor's exit code, preflight's throw. */
   ok: boolean;
   /** On success, a short version/status line worth showing; on failure, the error message. */
   detail: string;
-  /** Install/repair hint, shown only on failure. */
+  /** Install/repair hint, shown on failure and on an advisory. */
   hint?: string;
+  /**
+   * Worth telling the user about, but not a broken setup: rendered with its hint like a
+   * failure, yet `ok` stays true so it does not change any exit code.
+   *
+   * Exists because an out-of-date verikun is not the same thing as a machine that cannot
+   * drive a device, and exit `3` means "a machine to fix" (see the exit-code contract).
+   * Only meaningful alongside `ok: true`; `preflight()` ignores it, which is correct — an
+   * advisory must never abort a flow.
+   */
+  advisory?: boolean;
 }
 
 /**
