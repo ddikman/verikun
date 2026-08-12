@@ -268,6 +268,12 @@ that does not depend on how complex the screen is. iOS is ~10x cheaper. So prefe
 re-checking between every step, and don't add a redundant `vk ui` just to confirm what an
 `assert` already proved.
 
+On Android, `VERIKUN_COMPANION=1` cuts that read to ~40ms by keeping an accessibility
+connection alive on the device — the same output, ~14x faster end to end. It is opt-in
+because it holds the device's single `UiAutomation` connection while it runs (blocking
+Appium and Layout Inspector), so **suggest it, don't silently enable it** for someone
+else's device. `vk companion stop` hands the connection back.
+
 **Remember identifiers across runs.** After a flow succeeds, save the selectors
 you found to memory — the mapping from human intent to selector, plus the screen
 and step order, e.g.:

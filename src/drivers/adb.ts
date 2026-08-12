@@ -1,5 +1,6 @@
 import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
 import type { RawImage } from '../image';
+import { Companion, companionEnabled, releaseCompanionOn } from '../companion/manager';
 import { CliError, probeFailure } from '../errors';
 import { runText, runBinary, sleepSync, TextResult } from '../exec';
 import { parseHierarchy, parseRotation } from '../ui/android-parse';
@@ -73,6 +74,13 @@ const KEYCODES: Record<string, number> = {
 };
 
 const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'];
+
+/** Idle window the companion waits for before dumping. Kept at the stock command's own
+ *  1000ms so behaviour is unchanged — and it is free: on a warm accessibility bridge the
+ *  screen has already been quiet, so waitForIdle returns at once (measured: `dump 1000`
+ *  costs the same ~10ms as `dump 0`). The stock path pays a full second for it only
+ *  because a freshly connected bridge has no history of quiet to draw on. */
+const COMPANION_IDLE_MS = 1000;
 
 /** Header sizes `screencap` writes before the pixels: width/height/format, plus a
  *  colorspace word since Android 9. Newest first — see `screenshotRaw`. */
@@ -156,6 +164,8 @@ export class AdbDriver implements Driver {
   private cachedScreen?: { width: number; height: number } | null;
   /** Rotation of the most recent dump — see viewport(). */
   private lastRotation?: number;
+  /** undefined = not built yet, null = opted out. See companionOrNull(). */
+  private companion?: Companion | null;
 
   constructor(serial?: string) {
     this.requested = serial;
@@ -263,15 +273,58 @@ export class AdbDriver implements Driver {
     return this.cachedScreen;
   }
 
+  /** The resident companion, when opted in. Built lazily so a run that never reads the
+   *  hierarchy never touches the device with it. */
+  private companionOrNull(): Companion | null {
+    if (!companionEnabled()) return null;
+    if (this.companion === undefined) {
+      this.companion = new Companion({
+        adb: ADB,
+        serial: this.resolvedSerial(),
+        // Calibration compares the companion against exactly the dump the rest of verikun
+        // would otherwise have used, so pass the stock path itself.
+        stockDump: () => this.stockDumpXml(),
+      });
+    }
+    return this.companion;
+  }
+
   private dumpXml(): string {
+    // The companion answers in ~40ms against ~2400ms for the stock path. A null here means
+    // it could not serve the read AND has already handed the UiAutomation connection back —
+    // which matters, because the stock dump below is SIGKILLed while it is held.
+    const fast = this.companionOrNull()?.dump(COMPANION_IDLE_MS);
+    if (fast) return fast;
+    return this.stockDumpXml();
+  }
+
+  private stockDumpXml(): string {
     let lastErr = '';
     for (let attempt = 0; attempt < 3; attempt++) {
       const path = DUMP_PATHS[Math.min(attempt, DUMP_PATHS.length - 1)];
-      const dump = runText(ADB, this.withSerial(['shell', 'uiautomator', 'dump', path]), { timeout: 15000 });
+      // DELETE THE FILE FIRST, in the same device shell. `uiautomator dump` writes to a
+      // fixed path and leaves the PREVIOUS dump there whenever it fails — and it fails
+      // without saying so in the exit code: AOSP's DumpCommand prints "ERROR: could not get
+      // idle state" and returns normally when waitForIdle times out (an animating screen),
+      // and the whole process is SIGKILLed if something else holds the device's single
+      // UiAutomation connection. Reading the file back then returns a stale screen that is
+      // perfectly well-formed, so every check below passes and the caller taps coordinates
+      // from a screen that is minutes old. MEASURED: a dump killed at 18:46 happily served
+      // the 18:44 hierarchy. Removing it first makes that impossible — `cat` can only
+      // succeed if THIS dump wrote it.
+      const dump = runText(ADB, this.withSerial(['shell', `rm -f ${path}; uiautomator dump ${path}`]), {
+        timeout: 15000,
+      });
       const cat = runBinary(ADB, this.withSerial(['exec-out', 'cat', path]));
       const xml = cat.stdout.toString('utf8');
       if (xml.includes('<hierarchy')) return xml;
       lastErr = `${dump.stdout} ${dump.stderr} ${cat.stderr}`.replace(/\s+/g, ' ').trim();
+      // A companion holds the device's ONE UiAutomation connection and SIGKILLs anything
+      // else that wants it — including this dump. It outlives the process that started it,
+      // so a later command that never opted in would fail for as long as it lives. Ask it
+      // to let go and try again: verikun's own helper must not be why verikun cannot read
+      // the screen. No companion running is the normal case and costs one refused connect.
+      if (attempt === 0) releaseCompanionOn(this.resolvedSerial());
     }
     throw new CliError(
       `Failed to capture UI hierarchy after 3 attempts. ${lastErr}\n` +

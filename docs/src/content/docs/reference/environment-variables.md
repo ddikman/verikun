@@ -62,6 +62,7 @@ needs step detail to return to the client, which splices it into the client's ru
 | Variable | Default | Controls |
 |---|---|---|
 | `VERIKUN_SHOT_MAX_EDGE` | `700` | Default screenshot longest-edge cap in pixels. Ignored unless finite and ≥ 1. |
+| `VERIKUN_COMPANION` | — | `1` opts in to the [Android companion](/verikun/guides/companion/): hierarchy reads drop from ~2.4s to ~40ms, at the cost of holding the device's single `UiAutomation` connection. |
 | `VERIKUN_GUARD_SETTLE_MS` | — | `vk ai` `if-present` guard settle window. `0` restores the old single-shot probe. |
 
 Screenshot precedence is `--full` > `--max <px>` > `--more` > `VERIKUN_SHOT_MAX_EDGE` > the

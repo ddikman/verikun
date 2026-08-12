@@ -46,6 +46,7 @@ import {
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
 import { Recorder, isRecordable, RunStep, archiveLogWindow, wantsArchiveLogs, inferRunAppId } from './run';
 import { capturePng } from './capture';
+import { Companion, companionEnabled } from './companion/manager';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
 import { lintPlan } from './agent/lint';
 import { ClaudeProvider } from './agent/claude';
@@ -2047,6 +2048,45 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
 
 // ---------------------------------------------------------------------------
 // Dispatch
+/**
+ * Inspect or stop the on-device companion (`tools/verikun-companion`).
+ *
+ * `stop` exists because the companion holds the device's ONE UiAutomation connection for as
+ * long as it runs, which locks out Appium, Layout Inspector and a second verikun. Without a
+ * way to hand that back, the only recourse would be `adb shell pkill`.
+ */
+function cmdCompanion(ctx: Ctx): number {
+  const action = ctx.positionals[0] ?? 'status';
+  if (action !== 'status' && action !== 'stop') {
+    throw new CliError(`Usage: verikun companion <status|stop>`, 2);
+  }
+  if (ctx.platform !== 'android') {
+    throw new CliError('The companion is Android-only; iOS reads the hierarchy through idb, which is already fast.', 3);
+  }
+  const companion = new Companion({
+    adb: process.env.ADB || 'adb',
+    serial: ctx.driver.resolvedSerial(),
+    // `status`/`stop` never calibrate, so this is unreachable — but a throwing stub is
+    // honest about that, where a silent no-op would hide a future miswiring.
+    stockDump: () => {
+      throw new CliError('the companion command never calibrates', 3);
+    },
+  });
+  if (action === 'stop') {
+    companion.stop();
+    if (flagBool(ctx.flags, 'json')) json({ companion: 'stopped' });
+    else out('companion stopped');
+    return 0;
+  }
+  const state = companion.describe();
+  if (flagBool(ctx.flags, 'json')) json({ companion: state, enabled: companionEnabled() });
+  else {
+    out(state);
+    if (!companionEnabled()) err('note: set VERIKUN_COMPANION=1 to use it for hierarchy reads');
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 
 async function executeCommand(command: string, ctx: Ctx): Promise<number> {
@@ -2055,6 +2095,8 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
       return cmdDevices(ctx);
     case 'doctor':
       return cmdDoctor(ctx);
+    case 'companion':
+      return cmdCompanion(ctx);
     case 'ui':
     case 'dump':
       return cmdUi(ctx);
@@ -2407,6 +2449,7 @@ ENVIRONMENT
                                       Claude Code plugin is out of date (a warning only —
                                       it never changes the exit code). --fix disables
                                       animations. VERIKUN_NO_UPDATE_CHECK skips the check
+  companion <status|stop> [--json]    On-device hierarchy reader (Android; VERIKUN_COMPANION=1)
 
 TEST RUNS (actions are recorded; a run auto-starts on first action)
   run start [name] [--force]          Begin a named run (else one starts implicitly)

@@ -121,7 +121,13 @@ the `uiautomator` wrapper script saves nothing. Every read starts a fresh VM and
 accessibility connection, and that is the bill. **iOS is ~10× cheaper** (`idb` at 0.2–0.4s)
 precisely because `idb` keeps a companion process alive between reads.
 
-So the lever that matters is **how many reads a test makes**, not how fast each one is:
+On Android you can make the read itself cheap instead: the opt-in
+[companion](/verikun/guides/companion/) keeps one accessibility connection alive on the
+device and answers in **~40ms**, which removes both fixed costs above. It holds the
+device's single `UiAutomation` connection while it runs, so it is opt-in — read that page
+before turning it on in a shared environment.
+
+Failing that, the lever is **how many reads a test makes**, not how fast each one is:
 
 - **Every selector command is one read** — `tap`, `text`, `find`, `assert`, `swipe --on`. A
   step that has to wait costs one read per poll.
