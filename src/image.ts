@@ -28,6 +28,24 @@ export interface ScaleResult {
   reason?: string;
 }
 
+/**
+ * Uncompressed pixels: `ch` interleaved 8-bit channels per pixel, row-major, no
+ * row padding. What a backend hands us when it can skip a device-side PNG encode
+ * (Android's `screencap` without `-p`) — see `pngFromRaw`.
+ */
+export interface RawImage {
+  width: number;
+  height: number;
+  /** Channels per pixel: 1 = gray, 2 = gray+alpha, 3 = RGB, 4 = RGBA. */
+  ch: number;
+  pixels: Buffer;
+}
+
+/** PNG color type for a channel count, mirroring `channelsFor`. */
+function colorTypeFor(ch: number): number {
+  return ch === 1 ? 0 : ch === 2 ? 4 : ch === 3 ? 2 : 6;
+}
+
 /** Channel count for a supported PNG color type, or 0 if unsupported (e.g. palette). */
 function channelsFor(colorType: number): number {
   switch (colorType) {
@@ -148,6 +166,43 @@ function buildPng(w: number, h: number, bitDepth: number, colorType: number, ida
   ihdr[9] = colorType;
   // compression, filter, interlace methods are all 0 (the only standard values)
   return Buffer.concat([PNG_SIG, chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))]);
+}
+
+/**
+ * Encode raw pixels to a PNG, box-downscaling to `maxEdge` first when the image is
+ * bigger (`null` = encode at full size). The counterpart to `downscalePng` for a
+ * backend that can hand over pixels directly.
+ *
+ * Skipping the device-side PNG encode is the point, and it is worth much more than
+ * the compression: MEASURED on an SM-A415F, `screencap -p` costs 2.50s while raw
+ * `screencap` costs 1.04s — the phone spends ~1.4s deflating an image we then
+ * immediately re-encode smaller anyway. Moving that work to the host costs almost
+ * nothing (10MB of RGBA box-downscales in ~10ms and deflates in ~110ms), so both
+ * the default and `--full` paths come out well ahead.
+ */
+export function pngFromRaw(img: RawImage, maxEdge: number | null): ScaleResult {
+  const { width, height, ch, pixels } = img;
+  const colorType = colorTypeFor(ch);
+  const encode = (w: number, h: number, px: Buffer): Buffer =>
+    buildPng(w, h, 8, colorType, deflateSync(applyNoneFilter(px, w, h, ch)));
+
+  const full = (reason?: string): ScaleResult => ({
+    buf: encode(width, height, pixels),
+    width, height, scaled: false, origWidth: width, origHeight: height, reason,
+  });
+
+  if (maxEdge === null) return full();
+  if (!(maxEdge >= 1)) return full('no target size');
+  if (Math.max(width, height) <= maxEdge) return full('already within target');
+
+  const scale = maxEdge / Math.max(width, height);
+  const tw = Math.max(1, Math.round(width * scale));
+  const th = Math.max(1, Math.round(height * scale));
+  const small = boxDownscale(pixels, width, height, tw, th, ch);
+  return {
+    buf: encode(tw, th, small),
+    width: tw, height: th, scaled: true, origWidth: width, origHeight: height,
+  };
 }
 
 /**

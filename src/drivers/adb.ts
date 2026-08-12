@@ -1,4 +1,5 @@
 import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
+import type { RawImage } from '../image';
 import { CliError, probeFailure } from '../errors';
 import { runText, runBinary, sleepSync, TextResult } from '../exec';
 import { parseHierarchy, parseRotation } from '../ui/android-parse';
@@ -72,6 +73,12 @@ const KEYCODES: Record<string, number> = {
 };
 
 const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'];
+
+/** Header sizes `screencap` writes before the pixels: width/height/format, plus a
+ *  colorspace word since Android 9. Newest first — see `screenshotRaw`. */
+const RAW_HEADER_SIZES = [16, 12];
+/** android.graphics.PixelFormat.RGBA_8888 */
+const PIXEL_FORMAT_RGBA_8888 = 1;
 
 const DEFAULT_LOG_LINES = 200;
 
@@ -279,6 +286,35 @@ export class AdbDriver implements Driver {
       throw new CliError(`screencap did not return a PNG. ${r.stderr}`.trim(), 3);
     }
     return r.stdout;
+  }
+
+  /**
+   * `screencap` without `-p`: the framebuffer as-is, skipping the on-device PNG
+   * encode that dominates a capture (MEASURED on an SM-A415F: 2.50s with `-p`,
+   * 1.04s without — the bigger transfer is far cheaper than the deflate it avoids).
+   *
+   * Returns null rather than throwing on anything unexpected, so an OEM or Android
+   * version that lays the buffer out differently silently falls back to the PNG
+   * path. Getting a wrong-but-plausible image would be far worse than being slow.
+   */
+  screenshotRaw(): RawImage | null {
+    const r = runBinary(ADB, this.withSerial(['exec-out', 'screencap']));
+    const buf = r.stdout;
+    if (buf.length < RAW_HEADER_SIZES[0]) return null;
+    const width = buf.readUInt32LE(0);
+    const height = buf.readUInt32LE(4);
+    const format = buf.readUInt32LE(8);
+    // Only RGBA_8888 — the one format every `screencap` we have seen emits, and the
+    // only one whose channel order we can assume without guessing.
+    if (format !== PIXEL_FORMAT_RGBA_8888) return null;
+    if (width < 1 || height < 1) return null;
+    const pixelBytes = width * height * 4;
+    // Android 9 added a colorspace word, so the header is 16 bytes on anything
+    // modern and 12 before that. Pick whichever the payload length agrees with
+    // rather than branching on an OS version we would have to go and ask for.
+    const header = RAW_HEADER_SIZES.find((size) => buf.length - size === pixelBytes);
+    if (header === undefined) return null;
+    return { width, height, ch: 4, pixels: buf.subarray(header) };
   }
 
   screenSize(): { width: number; height: number } {

@@ -3,6 +3,7 @@
 // Driver is responsible only for producing Element[] from its native source.
 
 import type { SettingKey } from './device/settings';
+import type { RawImage } from './image';
 
 export type Platform = 'android' | 'ios';
 
@@ -128,6 +129,14 @@ export interface Driver {
   getElements(opts?: { all?: boolean }): Element[];
   /** Raw PNG bytes of the current screen. */
   screenshot(): Buffer;
+  /**
+   * Uncompressed pixels of the current screen, skipping the device-side PNG encode —
+   * markedly faster where the platform offers it (see `pngFromRaw`). OPTIONAL, and
+   * `null` is a first-class answer: a backend without a raw path omits the method,
+   * and one whose capture came back in an unexpected shape returns null. Either way
+   * `capturePng` falls back to `screenshot()`, so this can only ever be a speedup.
+   */
+  screenshotRaw?(): RawImage | null;
   screenSize(): { width: number; height: number };
   /**
    * The screen rectangle the CURRENT hierarchy's coordinates live in — i.e.

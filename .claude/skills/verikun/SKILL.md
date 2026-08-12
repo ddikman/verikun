@@ -251,10 +251,22 @@ outweigh dozens of `vk ui` calls. When you do, `vk` already downscales the PNG
 **Two uses of a screenshot — keep them apart.** The cost above is about *reading a
 screenshot back into context* to decide your next move; that is what to avoid (perceive
 and verify with the hierarchy instead). A screenshot taken purely as **report evidence
-and never read back** costs nothing at runtime. So when you drive a flow to produce a
-report, **do** `vk screenshot` around each significant transition (and before a risky or
-verification step) — then leave it in the report, don't read the PNG back. A visual trail
-makes post-run review far easier, and a failing step already auto-captures its own screen.
+and never read back** costs no tokens. So when you drive a flow to produce a report, **do**
+`vk screenshot` around each significant transition (and before a risky or verification step)
+— then leave it in the report, don't read the PNG back. A visual trail makes post-run review
+far easier, and a failing step already auto-captures its own screen.
+
+It is not free in wall clock, though: a capture is ~1.1s on a physical Android phone. That is
+cheap next to a hierarchy read (~2.4s — see below) but it is not zero, so screenshot the
+transitions worth reviewing rather than every step.
+
+**Most of a run's time is reading the UI hierarchy.** Every selector command (`tap`, `text`,
+`find`, `assert`, `swipe --on`) costs one read; measured on a physical mid-range Android
+phone, one read is ~2.4s, nearly all of it fixed per-invocation cost inside `uiautomator`
+that does not depend on how complex the screen is. iOS is ~10x cheaper. So prefer one
+`vk assert` over a `vk ui` you have to scan, batch a known flow with `vk batch` rather than
+re-checking between every step, and don't add a redundant `vk ui` just to confirm what an
+`assert` already proved.
 
 **Remember identifiers across runs.** After a flow succeeds, save the selectors
 you found to memory — the mapping from human intent to selector, plus the screen
