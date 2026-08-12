@@ -23,10 +23,31 @@ import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-// `npm pack --dry-run` writes no tarball. --json gives [{ files: [{ path, size, mode }] }],
-// with paths relative to the package root (no "package/" prefix).
+// `npm pack --dry-run` writes no tarball. --json describes the tarball it would have
+// written: one entry carrying `files: [{ path, size, mode }]`, paths relative to the package
+// root (no "package/" prefix).
+//
+// The SHAPE of that entry depends on the npm major, and publish.yml deliberately runs
+// `npm@latest` (trusted publishing needs >= 11.5.1) — so this script gets whatever npm ships
+// on release day, which is exactly how it broke once: npm <= 11 returns an ARRAY of pack
+// results, npm 12 returns an OBJECT keyed by package name, and `[0]` on it was `undefined`
+// (a TypeError, mid-release, that no CI run saw because ci.yml uses the bundled npm).
+// Accept both, and if a future npm invents a third shape, say so instead of throwing a
+// stack trace at whoever is trying to cut a release.
 const raw = execFileSync('npm', ['pack', '--dry-run', '--json'], { cwd: root, encoding: 'utf8' });
-const paths = JSON.parse(raw)[0].files.map((f) => f.path);
+const parsed = JSON.parse(raw);
+const result = Array.isArray(parsed) ? parsed[0] : Object.values(parsed ?? {})[0];
+if (!Array.isArray(result?.files)) {
+  console.error(
+    'Could not read a file list out of `npm pack --dry-run --json`.\n' +
+      `npm version: ${execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim()}\n` +
+      'Its output shape is not one this script knows (expected an array of pack results, or\n' +
+      'an object keyed by package name, each entry carrying a "files" array). Raw output:\n' +
+      raw,
+  );
+  process.exit(1);
+}
+const paths = result.files.map((f) => f.path);
 
 // Every entry that must be in the tarball. `dist/bin/verikun.js` is the CLI itself: if the
 // build or the allowlist breaks, the package installs but `vk` does not exist.

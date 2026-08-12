@@ -44,6 +44,24 @@ All notable changes to this project are documented here. The format is based on
 
   No version bump: no CLI behaviour changed.
 
+### Fixed
+- **The release gate stopped understanding `npm pack --json`, which blocked the 0.20.0
+  publish.** `scripts/check-package-contents.mjs` read the pack result as
+  `JSON.parse(raw)[0]`, but **npm 12 returns an object keyed by package name** where npm ≤ 11
+  returned an array — so the script died on `Cannot read properties of undefined (reading
+  'files')` after every other release check had passed, with the tarball itself perfectly fine.
+  It now accepts either shape.
+
+  Nothing in CI could have caught it: `ci.yml` runs the check under the Node-bundled npm (10.x
+  on Node 20, 11.x on Node 22), while `publish.yml` deliberately installs `npm@latest` because
+  trusted publishing needs ≥ 11.5.1 — so the release job, and only the release job, gets
+  whatever npm major shipped that morning. That is not a bug to pin away: the fix is for the
+  script to survive an npm it has never seen, so an unrecognised shape now prints the npm
+  version and the raw output and exits 1, instead of throwing a stack trace at whoever is
+  mid-release.
+
+  No version bump: no CLI behaviour changed.
+
 ## [0.20.0] - 2026-08-12
 
 ### Added
