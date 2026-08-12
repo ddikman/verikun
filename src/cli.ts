@@ -45,7 +45,7 @@ import {
 } from './ui/viewport';
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
 import { Recorder, isRecordable, RunStep, archiveLogWindow, wantsArchiveLogs, inferRunAppId } from './run';
-import { downscalePng } from './image';
+import { capturePng } from './capture';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
 import { lintPlan } from './agent/lint';
 import { ClaudeProvider } from './agent/claude';
@@ -782,20 +782,19 @@ export function assertSafeAppId(appId: string): string {
 }
 
 function cmdScreenshot(ctx: Ctx): number {
-  const raw = ctx.driver.screenshot();
   // Precedence: --full (original) > --max <px> (explicit) > --more (preset) > default.
   const maxEdge = flagNum(ctx.flags, 'max') ?? (flagBool(ctx.flags, 'more') ? MORE_SHOT_MAX_EDGE : shotMaxEdge());
-  const res = flagBool(ctx.flags, 'full') ? null : downscalePng(raw, maxEdge);
-  const buf = res?.scaled ? res.buf : raw;
+  const res = capturePng(ctx.driver, flagBool(ctx.flags, 'full') ? null : maxEdge);
+  const buf = res.buf;
 
   const outFlag = flagStr(ctx.flags, 'out');
   const path = outFlag ? confineToCwd(outFlag) : defaultScreenshotPath();
   writeFileSync(path, buf);
   ctx.record?.attachImage(buf);
-  ctx.record?.note({ message: res?.scaled ? `${path} (${res.width}×${res.height})` : path });
+  ctx.record?.note({ message: res.scaled ? `${path} (${res.width}×${res.height})` : path });
 
   // Surface the one case worth knowing about: we wanted to shrink but couldn't.
-  if (res && !res.scaled && res.reason?.startsWith('unsupported')) {
+  if (!res.scaled && res.reason?.startsWith('unsupported')) {
     err(`screenshot not downscaled: ${res.reason}`);
   }
 
@@ -803,13 +802,13 @@ function cmdScreenshot(ctx: Ctx): number {
     json({
       path,
       bytes: buf.length,
-      ...(res?.scaled
+      ...(res.scaled
         ? { width: res.width, height: res.height, scaledFrom: { width: res.origWidth, height: res.origHeight } }
         : {}),
     });
   } else {
     out(path);
-    if (res?.scaled) err(`scaled ${res.origWidth}×${res.origHeight} -> ${res.width}×${res.height} (max edge ${maxEdge}px; --more for detail, --full for original)`);
+    if (res.scaled) err(`scaled ${res.origWidth}×${res.origHeight} -> ${res.width}×${res.height} (max edge ${maxEdge}px; --more for detail, --full for original)`);
   }
   return 0;
 }
@@ -1648,7 +1647,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
           // vice versa), and neither is allowed to derail recording the failure.
           const out: { png?: Buffer; hierarchy?: Element[] } = {};
           try {
-            out.png = driver.screenshot();
+            out.png = capturePng(driver, null).buf;
           } catch {
             /* device may be gone — that may be why we failed */
           }

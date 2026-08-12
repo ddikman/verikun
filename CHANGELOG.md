@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Android screenshots are about twice as fast**, and byte-for-byte identical. `screencap -p`
+  makes the *phone* PNG-encode a full-resolution image, which we then immediately decode and
+  shrink — so the encode was pure waste. Captures now come off the device as raw pixels
+  (`screencap`, no `-p`) and are encoded here, at the size we actually keep. Measured on a
+  physical SM-A415F: **`vk screenshot` 2.60s → 1.12s**, and `--full` 2.60s → 1.19s. The larger
+  transfer is not the problem it looks like — 10MB of RGBA box-downscales in ~10ms and deflates
+  in ~110ms on the host, against ~1.4s of on-device encoding avoided. Verified on-device: the
+  PNG the old and new paths produce is identical byte-for-byte.
+
+  This is a new **optional** `Driver.screenshotRaw()`, and `null` is a first-class answer: a
+  backend without a raw path (iOS — `simctl` is already ~0.2s, so there is nothing to win) or a
+  capture whose header we do not recognise falls back to `screenshot()`. Failure-evidence
+  captures take the same route and stay full-resolution. An OEM laying the framebuffer out
+  differently gets the old speed, never a wrong image.
+
 ### Added
 - **A `Self-healing in CI` docs page, and a plan-cache step in the reference workflow.** The
   question it answers came from a team running verikun in CI: *should it be allowed to heal a

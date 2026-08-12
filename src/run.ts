@@ -6,6 +6,7 @@ import { formatCompact } from './ui/format';
 import { CliError, isEnvError } from './errors';
 import { artifactDir, err } from './output';
 import { toJUnitXml, toHtml } from './report';
+import { capturePng } from './capture';
 
 // A "test run" is a recording of the commands an agent issues, turned into a
 // JUnit suite + an HTML report on archive. Because every `vk` invocation is a
@@ -608,7 +609,9 @@ export class Recorder {
   private capture(driver?: Driver, quiet = false): void {
     if (!driver) return;
     try {
-      this.writeArtifact(failImagePath(this.step.index), driver.screenshot());
+      // Full resolution on purpose — a human reads this in the report — but via the
+      // raw path, which reaches the same PNG without the device-side encode.
+      this.writeArtifact(failImagePath(this.step.index), capturePng(driver, null).buf);
       this.step.failImage = failImagePath(this.step.index);
     } catch (e) {
       // Best-effort evidence: the device may be gone (often why the step failed). Surface

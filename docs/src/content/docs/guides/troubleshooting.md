@@ -101,6 +101,41 @@ all.
 **Disable animations once**: `vk doctor --fix`. Live animations are the main cause of flaky
 dumps. verikun already retries a dump 3 times, but a running animation defeats that.
 
+### Why a test run takes as long as it does
+
+Almost all of it is **reading the UI hierarchy**, and that cost is not verikun's to spend
+differently — it is what `uiautomator dump` costs. Measured end to end on a physical
+SM-A415F (Android 12):
+
+| Stage | Cost | Share |
+|---|--:|--:|
+| ART startup + loading `uiautomator.jar` | ~1.22s | 53% |
+| Connecting to accessibility, waiting for idle, walking + serialising the tree | ~1.10s | 45% |
+| Transferring the XML (11–22 KB) and parsing it | ~0.05s | 2% |
+| **One `vk ui` / one selector lookup** | **~2.4s** | |
+
+The two big terms are **fixed per invocation** — they do not depend on how big the screen's
+tree is. A 57-node home screen and a deep app screen both cost ~2.4s, `--compressed` saves
+~0.1s, writing the dump to `/data/local/tmp` instead of `/sdcard` saves nothing, and bypassing
+the `uiautomator` wrapper script saves nothing. Every read starts a fresh VM and a fresh
+accessibility connection, and that is the bill. **iOS is ~10× cheaper** (`idb` at 0.2–0.4s)
+precisely because `idb` keeps a companion process alive between reads.
+
+So the lever that matters is **how many reads a test makes**, not how fast each one is:
+
+- **Every selector command is one read** — `tap`, `text`, `find`, `assert`, `swipe --on`. A
+  step that has to wait costs one read per poll.
+- **An `if-present` / `while-present` guard that finds nothing costs *two*.** The guard takes a
+  second look before concluding "absent", because a settle window shorter than one dump would
+  otherwise be a silent no-op. On a slow device that makes an absent guard ~4.8s. Set
+  [`VERIKUN_GUARD_SETTLE_MS=0`](/verikun/reference/environment-variables/) to restore the
+  single-shot probe, which roughly halves the cost of a guard-heavy plan — at the price of
+  less patience for a slow screen.
+- **Screenshots are ~1.1s each** and are *not* free, even though they cost no tokens when
+  never read back. See [Screenshots](/verikun/reference/screenshots/).
+- Prefer one `assert` over a `screenshot` you intend to read back: it is cheaper in both
+  wall clock and tokens.
+
 ### A tap right after `launch` did nothing
 
 The first dump after `launch` can be stale — measured on real hardware. Assert on something
