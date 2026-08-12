@@ -2,7 +2,7 @@
 title: Platform support
 description: Which commands and features work on Android and iOS, on physical hardware and on an emulator or simulator — and what each gap degrades to.
 sidebar:
-  order: 6
+  order: 7
 ---
 
 Android is the fullest surface. iOS reaches parity for the loop that matters — inspect, act,

@@ -2,7 +2,7 @@
 title: iOS setup
 description: Install idb, drive a simulator or physical device with --ios, and understand the documented gaps.
 sidebar:
-  order: 5
+  order: 6
 ---
 
 `vk --ios` reaches feature parity with Android — `ui` / `find`, `tap`, `text` / `type`,

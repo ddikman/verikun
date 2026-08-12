@@ -27,6 +27,10 @@ Each step's detail — selector, heal tier, resolved element, failure screenshot
 — returns with the response and is spliced into the client's run, so the archived report is
 **identical to a local run's**.
 
+Because the engine and the model both live on the runner, a drifted step is repaired there too.
+Whether that should fail your build, and what a repair can and cannot hide, is
+[Self-healing in CI](/verikun/guides/self-healing-in-ci/).
+
 ## Start the server
 
 On the machine with the device attached:
@@ -176,6 +180,23 @@ device server is reliably reachable from PR builds.
 
 In your own repository you would install the published package instead —
 `npm install -g verikun` — and skip the build.
+
+### Restore the plan cache
+
+```yaml
+- name: Restore the vk ai plan cache
+  uses: actions/cache/restore@v6
+  with:
+    path: .verikun/plans
+    key: verikun-plans-${{ github.run_id }}
+    restore-keys: verikun-plans-
+```
+
+A fresh runner has no `./.verikun/plans/`, so **without this every test recompiles on every
+run** and the suite never reaches the near-\$0 steady state. There is a matching
+`actions/cache/save` with `if: always()` after the suite — a failed run's compiles are worth
+keeping too. Why the key does not have to be exact, and the caveats:
+[Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache).
 
 ### Install the app build on the remote device
 

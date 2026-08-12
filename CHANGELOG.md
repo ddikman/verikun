@@ -7,6 +7,42 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **A `Self-healing in CI` docs page, and a plan-cache step in the reference workflow.** The
+  question it answers came from a team running verikun in CI: *should it be allowed to heal a
+  drifted step, or should that just fail the build?* The answer was spread across five pages,
+  none of which framed it as a policy decision, and no page named the two fields you would
+  gate on. It now states plainly that healing **cannot be turned off** (`maxRepairs` is a fixed
+  3), and why that is safe: only a selector miss or an ambiguity is healable, an `assert`
+  failure is structurally unhealable (it *returns* exit `1` rather than throwing, so the engine
+  never sees a healable error), and `give_up` is terminal. Every repair leaves a `model-healed:`
+  note in the report, a `modelRepairs` count in `index.json`, and a suggested prose fix — so the
+  real choice is *heal and tell you* versus fail, not *heal silently* versus fail. For teams
+  that want the strict gate anyway, it ships a `jq` step over the manifest rather than a new
+  flag. It opens with a diagram of the split, because the common misreading is that the engine
+  runs inside `vk server` — it does not; compile, cache, replay, repair and report assembly are
+  all on the CI runner, and the device box holds no model key. The diagram's source prompt,
+  model and required post-processing are kept beside the asset in
+  `docs/src/assets/ci-architecture-overview.prompt.md`, since Starlight silently strips unknown
+  frontmatter keys and would have discarded them.
+
+  It also corrects a claim two pages made without qualification. **The plan cache is
+  `./.verikun/plans/`, relative to the working directory, so a disposable CI runner starts cold
+  and recompiles every test on every run** — the "a green suite costs roughly \$0" steady state
+  was never reachable in CI as documented. `guides/natural-language-tests.md` and
+  `internals/plan-ir-and-engine.md` now say so, `guides/troubleshooting.md` lists it as the
+  first thing to check when a CI run costs more than expected, and
+  `.github/workflows/suite.yml` — which `guides/remote-devices-and-ci.md` presents as a
+  reference to copy — gained `actions/cache` restore/save steps so it stops teaching the
+  mistake. The `restore`/`save` split is deliberate: the combined action does not save on a
+  failed job, and a red run is precisely the one whose fresh compiles are worth keeping.
+
+  Two facts documented for the first time: `reference/reports-and-test-runs.mdx` now names
+  `tests[].modelRepairs` as its own manifest row (it was folded into a prose list, so the field
+  a gate needs had no name in the docs), and the page records that a **100%-cached suite still
+  needs a model key** — the provider is preflighted unconditionally because a repair must be
+  possible at runtime, so a cache hit with no key still exits `3`.
+
+  No version bump: no CLI behaviour changed.
 - **A `Platform support` page in the docs, and it is now the canonical platform matrix.** Every
   command, state modifier, `device set` key and reporting feature, split **Android** × **iOS**
   and each of those into **physical** and **emulator/simulator**. Previously "does this work on
