@@ -10,7 +10,9 @@ compile the prose into a deterministic plan IR once, replay it model-free, and w
 only to *repair* a step whose selector stops resolving.
 
 That is the cost model. A green suite costs roughly \$0 in tokens; you pay only on first
-compile and on a genuine repair, and a green run persists the repaired plan.
+compile and on a genuine repair, and a green run persists the repaired plan — on a machine that
+keeps the plan cache, which a disposable CI runner does not
+([Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache)).
 
 All of this lives in `src/agent/`. The rest of the CLI is **reused, not reinvented**.
 

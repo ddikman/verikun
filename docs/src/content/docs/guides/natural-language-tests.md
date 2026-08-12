@@ -22,6 +22,10 @@ This is the idea the whole feature is built around:
 That is what keeps a CI suite's steady-state token cost near zero. A green suite costs
 roughly \$0; you pay on first compile and on a genuine repair.
 
+That steady state assumes a machine that **keeps** `./.verikun/plans/`. A throwaway CI runner
+starts cold and recompiles every test on every run unless you persist it — see
+[Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache).
+
 ```sh
 vk ai onboarding.md                       # first run: compile, then run
 vk ai onboarding.md                       # cached: replays with no model call

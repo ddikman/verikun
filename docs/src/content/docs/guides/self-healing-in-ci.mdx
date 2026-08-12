@@ -1,0 +1,185 @@
+---
+title: Self-healing in CI
+description: Should verikun heal a drifted step on CI, or just fail the build? What a heal can and cannot hide, why it is never silent, and what it costs when the plan cache is cold.
+sidebar:
+  order: 5
+---
+
+import { Image } from 'astro:assets';
+import ciArchitecture from '../../../assets/ci-architecture-overview.png';
+
+{/* The diagram's source prompt, model and required post-processing live beside the asset,
+    in ci-architecture-overview.prompt.md — frontmatter cannot hold it (Starlight silently
+    strips unknown keys). Claims the image encodes, to re-check if the architecture changes:
+    the engine and both model calls are runner-side, and exactly one labelled channel crosses
+    to the device box. It does NOT encode "an assert failure is never healed" — the prose
+    below is the only place that claim appears, so it must survive any trim. */}
+
+`vk ai` repairs a step whose selector stopped resolving, and it does that on CI exactly as it
+does on your laptop. There is **no flag to turn it off**.
+
+That sounds alarming for a gate — a test suite that fixes itself is a test suite that could
+pass when it should not. It is not, and this page is why: a heal is deliberately **narrow**
+(only two failure kinds qualify) and deliberately **loud** (every one is recorded and named in
+the report). The choice is not *heal silently* versus *fail loudly*. It is **heal and tell you**
+versus fail.
+
+## What actually runs where
+
+<Image src={ciArchitecture} alt="Two zones. Left: a throwaway CI runner holding the model API key, where tests compile to a plan IR, get cached, replay, and are assembled into a report uploaded as a CI artifact; the model is woken there to compile and to repair. Right: a device box running vk server, which drives the app over adb or idb. Exactly one channel crosses between them, carrying one validated command per HTTP round-trip." />
+
+The part people get backwards: **the engine is on the CI runner, not on the device box.**
+Compiling the prose, the plan cache, replaying the plan, deciding a repair and assembling the
+report all happen runner-side. `vk server` receives **one validated command per HTTP
+round-trip**, runs it over `adb`/`idb`, and hands back pass/fail plus that step's evidence. It
+holds no API key and never talks to a model.
+
+That is also the security story: no pull-request code and no model credential ever reach the
+machine with the phone. Full responsibility split in
+[Remote devices & CI](/verikun/guides/remote-devices-and-ci/#the-shape-of-it).
+
+## Should it heal, or just fail?
+
+It heals, and you cannot stop it — the repair budget is a fixed three attempts per step.
+
+What matters is how little that can hide. Exactly two failures are healable: a selector that
+**did not resolve**, and one that was **ambiguous**. Everything else is terminal.
+
+- **A heal can hide a renamed or moved control.** That is the point. A button that became
+  `@submit_button` still gets tapped, and the report tells you it changed. Failing the build
+  for a cosmetic rename is noise, not signal.
+- **A heal cannot hide a failed `assert`.** Assertions are never healed — healing one would
+  mask the exact regression the test exists to catch. The mechanism is worth knowing: `assert`
+  *returns* exit `1` rather than throwing, so the engine never sees a healable error at all.
+  It is structural, not a policy check someone could relax.
+- **A heal cannot hide a flow that went to the wrong screen.** When the live screen has nothing
+  serving the failed step's intent, the model answers `give_up`, which is terminal. Without
+  that answer a "too kind" fallback tap would pass as a false green — worse than a failure,
+  because nobody investigates a green run.
+
+A repair is also re-validated against the same grammar gate as the original compile, so a
+hallucinated command is rejected rather than run. The full matrix is in
+[Contracts](/verikun/internals/contracts/#heal-vs-terminal).
+
+## A heal is loud, not silent
+
+Every repair leaves three traces. This is what makes healing safe to leave on:
+
+| Where | What you see |
+|---|---|
+| The step, in JUnit + HTML | A `model-healed:` note naming the original failure and the replacement |
+| The suite overview and `index.json` | A `modelRepairs` count, per test |
+| The report's `vk ai` panel | A **suggested improvement** — the exact replacement to paste into your prose |
+
+That last one is the useful one. verikun does not just work around the drift, it tells you what
+to write so the next run does not have to. A step that heals on **every** run is a standing
+tax, not a success — usually a label-only control with no stable identifier. See
+[Troubleshooting](/verikun/guides/troubleshooting/#a-step-heals-on-every-replay).
+
+### If you want the strict gate anyway
+
+Some teams want "a repair means the test is wrong, fail the build." That is a policy decision,
+and it composes as a CI step over the
+[`index.json` manifest](/verikun/reference/reports-and-test-runs/#the-suite-manifest-indexjson)
+rather than a verikun flag:
+
+```yaml
+- name: Fail the build if any test needed a model repair
+  if: always()
+  run: |
+    repairs=$(jq -s '[.[].tests[].modelRepairs] | add // 0' .verikun/suites/*/index.json)
+    echo "model repairs: $repairs"
+    [ "$repairs" -eq 0 ]
+```
+
+Gate on `modelRepairs` for a **correctness** policy, and on the per-test `costUsd` for a
+**spend** policy — they are not the same signal. A recompile after a verikun upgrade costs
+money but is not a repair, so a repairs gate fires only on genuine UI drift.
+
+:::note
+Put this *after* the suite step with `if: always()`, not instead of it. The suite's own exit
+code is still the primary gate — see
+[The exit code is the CI gate](/verikun/guides/suites/#the-exit-code-is-the-ci-gate).
+:::
+
+## What it costs — and the cold cache
+
+[The cost model](/verikun/guides/natural-language-tests/#the-cost-model) says a green suite
+costs roughly \$0, because a cached plan replays with no model calls. **That is a claim about a
+machine that keeps its cache.** A CI runner usually does not.
+
+The plan cache lives in `./.verikun/plans/`, relative to the working directory. A fresh
+`ubuntu-latest` checkout has no such directory, so **every test recompiles on every run** —
+you pay the first-compile price every time, forever, and never reach the steady state the
+cost model describes.
+
+Persist it:
+
+```yaml
+- name: Restore the plan cache
+  uses: actions/cache/restore@v6
+  with:
+    path: .verikun/plans
+    key: verikun-plans-${{ github.run_id }}
+    restore-keys: verikun-plans-
+
+# ... install, then run the suite ...
+
+- name: Save the plan cache
+  if: always()
+  uses: actions/cache/save@v6
+  with:
+    path: .verikun/plans
+    key: verikun-plans-${{ github.run_id }}
+```
+
+A unique key per run so `save` always writes, with `restore-keys` prefix-matching the most
+recent previous entry — the standard rolling-cache shape. Plans are small JSON, so the
+accumulation is immaterial against the repository cache budget.
+
+**The key does not have to be right.** Every entry is gated on a compiler fingerprint at read
+time, and the filename already folds in the prose, package, build and platform — so a wrong or
+stale restore produces a *miss*, which recompiles. It can never cause a wrong replay. That is
+what makes a coarse key safe here.
+
+**A cache is portable, by design.** Entries embed no absolute paths — the plan is selectors and
+commands, and the grammar excludes every command that takes one. So the same cache replays on
+any machine with the same verikun version, platform, package and test text. Sharing one between
+runners, or seeding a runner from a developer's machine, is intended rather than a hack.
+
+Use the `restore` + `save` pair rather than the combined `actions/cache` action: the combined
+action does not save when the job fails, and a red run is precisely the one whose fresh
+compiles you want to keep.
+
+Four things worth knowing before you rely on it:
+
+- **A verikun upgrade invalidates everything.** The fingerprint folds in the version *and* the
+  grammar text, so the first run after an upgrade recompiles every test — deliberately, so a
+  new engine never replays an old compiler's plan. Details in
+  [Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint).
+- **`--app-build $GITHUB_SHA` defeats the exact key.** The build id is part of the cache key, so
+  a per-commit value misses every run. Pass `--app-build` at the granularity you actually want
+  to invalidate at — a release or version string. Even then a restored cache still pays off: a
+  missed key falls back to *seeding* from a prior plan for the same prose and package, which is
+  a cheaper adapt than a cold compile.
+- **A restored cache is not behaviourally inert.** Because seeding ignores the build and the
+  fingerprint, what is on disk can influence what the compiler produces. If a compiled plan
+  looks wrong, clear the directory and re-run with `--recompile` before debugging anything else.
+- **The path is relative to the working directory.** If your suite step sets
+  `working-directory:`, the cache `path:` has to match it.
+
+:::caution
+Caching cuts spend, not the key requirement. A suite that hits the cache 100% of the time
+**still needs `ANTHROPIC_API_KEY`** (or a CLI backend) — the provider is checked up front
+because a repair has to be possible at runtime. A run with no provider exits `3` even on a
+full cache hit.
+:::
+
+## Where to go next
+
+- [Remote devices & CI](/verikun/guides/remote-devices-and-ci/) — the setup this page assumes:
+  `vk server`, the tunnel, and a workflow to copy
+- [Natural-language tests](/verikun/guides/natural-language-tests/#healing-and-what-is-never-healed)
+  — healing outside of CI, and how to write prose that drifts less
+- [Contracts](/verikun/internals/contracts/#heal-vs-terminal) — the heal-versus-terminal matrix
+- [AI plans & models](/verikun/reference/ai-plans/#the-plan-cache) — cache mechanics in full

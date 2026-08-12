@@ -2,7 +2,7 @@
 title: Troubleshooting
 description: What common verikun failures actually mean, and what to do about each.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 ## Start here: read the exit code
@@ -290,6 +290,11 @@ is not being cached — check whether `--recompile` is set, whether the prose ch
 runs, or whether verikun was updated (which
 [rotates the cache fingerprint](/verikun/internals/contracts/#the-plan-cache-fingerprint)
 on purpose).
+
+On CI, check one more thing first: whether the job restores `./.verikun/plans/` at all. A fresh
+runner has no cache, so every test recompiles every run —
+[persisting it](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache) is what
+gets you to the \$0 steady state.
 
 Cap it: `--max-cost-usd 0.50`.
 

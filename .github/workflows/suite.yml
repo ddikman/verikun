@@ -62,6 +62,30 @@ jobs:
           npm run build
           npm link
 
+      # Without this, every test recompiles on every run: the plan cache lives in
+      # ./.verikun/plans relative to the working directory, and a fresh runner has
+      # none — so the "cached plan replays for ~$0" steady state is never reached.
+      #
+      # The key does not have to be exact. Every entry is gated on a compiler
+      # fingerprint at read time and its filename folds in prose+package+build+
+      # platform, so a stale restore is a MISS (recompile), never a wrong replay.
+      # That is what makes the coarse rolling key below safe: unique per run so
+      # `save` always writes, with restore-keys prefix-matching the most recent
+      # previous entry. Lockfile first, because bumping verikun rotates the
+      # fingerprint and invalidates every entry anyway.
+      #
+      # restore/save split rather than the combined action: the combined action
+      # only writes when the job SUCCEEDS, and a red run is precisely the one
+      # whose fresh compiles are worth keeping.
+      - name: Restore the vk ai plan cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .verikun/plans
+          key: verikun-plans-${{ hashFiles('package-lock.json') }}-${{ github.run_id }}
+          restore-keys: |
+            verikun-plans-${{ hashFiles('package-lock.json') }}-
+            verikun-plans-
+
       # Install the app build under test on the remote device. Produce or fetch
       # the build in an earlier step (build job artifact, release download, …);
       # skipped when no build is present so a plain suite re-run still works.
@@ -87,6 +111,15 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           VERIKUN_SERVER: ${{ secrets.VERIKUN_SERVER }}
           VERIKUN_SERVER_AUTH_KEY: ${{ secrets.VERIKUN_SERVER_AUTH_KEY }}
+
+      # `always()`: a failed suite still compiled (and possibly healed) plans that
+      # cost real tokens — throwing them away would make the retry pay twice.
+      - name: Save the vk ai plan cache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: .verikun/plans
+          key: verikun-plans-${{ hashFiles('package-lock.json') }}-${{ github.run_id }}
 
       # The suite overview (index.json manifest + index.html) plus every test's
       # archived run (report.html, report.xml, screenshots). `always()` so the
