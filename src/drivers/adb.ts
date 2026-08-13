@@ -1,4 +1,4 @@
-import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
+import { Driver, DeviceInfo, Element, HierarchySource, Platform, ToolProbe, Viewport } from '../types';
 import type { RawImage } from '../image';
 import { Companion, companionEnabled, releaseCompanionOn } from '../companion/manager';
 import { CliError, NoWindowError, probeFailure } from '../errors';
@@ -293,6 +293,16 @@ export class AdbDriver implements Driver {
       });
     }
     return this.companion;
+  }
+
+  /** Which read path the next getElements() will take. See `Driver.hierarchySource`. */
+  hierarchySource(): HierarchySource {
+    if (!companionEnabled()) return { path: 'stock', detail: 'companion off (VERIKUN_COMPANION)' };
+    const companion = this.companionOrNull();
+    if (!companion) return { path: 'stock', detail: 'companion unavailable' };
+    const suppressed = companion.suppressedReason();
+    if (suppressed) return { path: 'stock', detail: `companion ${suppressed}` };
+    return { path: 'companion', detail: companion.stateSummary() };
   }
 
   private dumpXml(): string {

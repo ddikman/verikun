@@ -9,7 +9,7 @@ import {
   pingMatches,
   portForSerial,
 } from '../src/companion/protocol';
-import { companionEnabled } from '../src/companion/manager';
+import { companionEnabled, nullRootAction } from '../src/companion/manager';
 
 const buf = (s: string) => Buffer.from(s, 'utf8');
 
@@ -135,4 +135,53 @@ test('companionEnabled: an empty or unrecognised value leaves it on', () => {
     assert.equal(companionEnabled(), true, `VERIKUN_COMPANION=${JSON.stringify(v)}`);
   }
   delete process.env.VERIKUN_COMPANION;
+});
+
+// --- recovering from a wedged connection ------------------------------------
+//
+// A null root is normally the DEVICE having no window (mid-launch, force-stopped), and
+// standing down for it would release a healthy connection after every `launch --clear`.
+// But a long-lived UiAutomation connection can also go stale and return null FOREVER for a
+// window that is plainly there — MEASURED on a Pixel 3a as 30s+ of null roots while a stock
+// dump read the same screen fine. Duration is the only thing that tells the two apart.
+
+test('nullRootAction: a brief run is the device, not the companion', () => {
+  assert.equal(nullRootAction(0, false), 'propagate');
+  assert.equal(nullRootAction(2999, false), 'propagate');
+});
+
+test('nullRootAction: a long run earns one connection recycle', () => {
+  assert.equal(nullRootAction(3000, false), 'recycle');
+  assert.equal(nullRootAction(9999, false), 'recycle');
+});
+
+test('nullRootAction: only ONE recycle per run of null roots', () => {
+  // Re-releasing and re-acquiring on every read would cost ~1s each and thrash the
+  // connection the companion exists to hold.
+  for (const runMs of [3000, 6000, 60000]) {
+    assert.notEqual(nullRootAction(runMs, true), 'recycle', `runMs=${runMs}`);
+  }
+});
+
+test('nullRootAction: a recycle that did not help falls back to the stock path', () => {
+  // The safety net, and the reason this escalation exists at all: the stock dump can read
+  // screens a wedged companion cannot, and being slow always beats failing a selector on a
+  // screen that is there.
+  assert.equal(nullRootAction(6000, true), 'fallback');
+});
+
+test('nullRootAction: the fallback is reachable inside a default auto-wait window', () => {
+  // REGRESSION: the fallback used to need 2x the wedge interval (6s), but a selector command
+  // waits 5s by default. Recycling at ~3s and then waiting for 6s meant the window closed
+  // first, so a wedged connection failed the command with "no window" having never tried the
+  // stock dump — the one case this escalation is for. A post-recycle null root must escalate
+  // on the very next read, whatever the clock says.
+  assert.equal(nullRootAction(3000, true), 'fallback', 'immediately after a ~3s recycle');
+  assert.equal(nullRootAction(3001, true), 'fallback');
+});
+
+test('nullRootAction: never escalates past fallback on a fresh run', () => {
+  // A first-ever null root, however long the previous run was, still gets its recycle —
+  // `alreadyRecycled` is what gates the escalation, not elapsed time alone.
+  assert.equal(nullRootAction(60000, false), 'recycle');
 });

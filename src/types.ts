@@ -107,6 +107,14 @@ export interface ToolProbe {
  * A platform backend. Android is implemented via `adb`; iOS via `simctl`
  * (screenshots today) and `idb` (interaction — planned).
  */
+/** How a driver is reading the UI hierarchy — see `Driver.hierarchySource`. */
+export interface HierarchySource {
+  /** The path itself: `companion` (the fast on-device reader) or `stock` (uiautomator dump). */
+  path: 'companion' | 'stock';
+  /** Short phrase saying why — a live companion state, or the reason the fast path is off. */
+  detail: string;
+}
+
 export interface Driver {
   readonly platform: Platform;
   /**
@@ -127,6 +135,17 @@ export interface Driver {
   resolvedSerial(): string;
   /** Capture + parse the current UI hierarchy into normalized elements. */
   getElements(opts?: { all?: boolean }): Element[];
+  /**
+   * Which read path the NEXT `getElements()` will take, and why. OPTIONAL, in the shape of
+   * `screenshotRaw?()`: a backend with only one way to read the hierarchy omits it, and
+   * callers then say nothing rather than inventing an answer.
+   *
+   * It exists because a `--server` operator had no way to tell a fast read from a slow one
+   * except by timing their own steps, and so could not tell a companion that never engaged
+   * from one that engaged and stopped (issue #77). A speedup nobody can observe is a
+   * speedup nobody can trust.
+   */
+  hierarchySource?(): HierarchySource;
   /** Raw PNG bytes of the current screen. */
   screenshot(): Buffer;
   /**

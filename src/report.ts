@@ -308,8 +308,19 @@ export interface SuiteRun {
   finishedAt: string;
   platform: string;
   device?: string;
-  /** verikun version that produced this suite. */
+  /** verikun version of the process that produced this suite — the CLIENT's, which for a
+   *  `--server` run is NOT the version that drove the device. See `server` below. */
   verikun: string;
+  /**
+   * Set only for a `--server` run: which server drove the device, on which verikun, and
+   * which hierarchy read path it used.
+   *
+   * A remote artifact previously recorded only the client's version, so it could not say
+   * which verikun executed the steps, let alone how it read the screen — the two facts you
+   * need to explain a suite that got slower after a server upgrade (issue #77). Additive;
+   * schemaVersion stays 1.
+   */
+  server?: { url: string; verikun: string; reads?: string };
   totals: SuiteTotals;
   tests: SuiteTestResult[];
   /**

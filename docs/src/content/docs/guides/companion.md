@@ -119,10 +119,25 @@ off the connection first so the fallback actually works. Measured:
 | Companion killed or crashed | Stock read works immediately — process death frees the connection |
 | Companion running but released | Connection retaken (~1.7s), then reads are fast again |
 | Companion cannot start | Stock read, one line on stderr — and the device is marked so it is not retried |
-| Output disagrees with the platform | Companion declined for the session |
+| Output disagrees with the platform | Stock read, retried after a minute |
+| Connection goes stale (null root for a live window) | Connection recycled once, then the stock read |
 
 A fallback read costs about **3.4s** against 2.4s if the companion had never existed — a
 ~1s penalty on the rare failure path, in exchange for ~40ms on every other read.
+
+### Falling back is temporary, except when it cannot be
+
+A fallback suppresses the companion for **a minute**, then it is tried again — or for just a
+couple of seconds when the *screen* was the problem rather than the companion, since an app
+that has not drawn yet starts working the moment it does. Only two things stand it down for
+the whole process, because only they cannot change while it runs: the device note saying the
+companion does not work on this phone, and no jar to push.
+
+That distinction matters most for a long-lived process. Up to 0.21.0 a single stand-down was
+permanent, which was invisible when every command is its own process and permanent for
+`vk server` — a server that hit one moving screen during calibration, or simply idled past the
+companion's own 15-minute shutdown, spent the rest of its life on the 2.4s path next to a
+healthy companion. That was [issue #77](https://github.com/ddikman/verikun/issues/77).
 
 ## Calibration
 
@@ -157,6 +172,28 @@ The gap ranges from 44px to 254px, and guessing wrong would not fail loudly — 
 elements near the bottom of the screen so a tap lands somewhere else while still reporting
 success. So verikun does not guess, and if neither candidate reproduces the platform's dump
 it declines the companion and stays on the stock path.
+
+## Under `vk server`
+
+The companion works exactly as it does locally — the server holds one driver for its lifetime,
+and every route reaches it — but two things are worth knowing.
+
+**`VERIKUN_COMPANION` is read in the server's environment, not the client's.** Reads execute
+server-side, so a client cannot turn the companion on or off across the wire, and `vk companion
+status|stop` has no `--server` form. To hand the connection back on a remote host, run
+`vk companion stop` there, or stop the server — since 0.21.1 shutting the server down releases
+the connection rather than leaving it held for up to 15 more minutes.
+
+**Ask the server which path it is using** rather than inferring it from step durations:
+
+```sh
+curl -s http://<server>:8391/v1/health | jq .reads
+# { "path": "companion", "detail": "ready app held" }
+# { "path": "stock", "detail": "companion off (VERIKUN_COMPANION)" }
+```
+
+The server prints the same line at startup, and a `--server` client echoes it once at run
+start. A `--server` suite index also records it, next to the server's own verikun version.
 
 ## iOS
 
