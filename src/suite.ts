@@ -47,6 +47,9 @@ export interface AiRunResult {
 export interface SuiteDeps {
   platform: string;
   device?: string;
+  /** Set when the run went through a remote `vk server`, so the index records which verikun
+   *  actually drove the device and how it read the screen — not just the client's version. */
+  server?: { url: string; verikun: string; reads?: string };
   /** Run one NL test through the shared backend; returns data, writes no stdout. */
   runTest(file: string): Promise<AiRunResult>;
   /** Reset the app-under-test between tests (wired when --app was given). */
@@ -357,6 +360,7 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
     platform: deps.platform,
     device: deps.device,
     verikun: VERSION,
+    ...(deps.server ? { server: deps.server } : {}),
     totals: suiteTotals(results),
     tests: results,
     ...(aborted ? { aborted } : {}),

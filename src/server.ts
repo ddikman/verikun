@@ -32,12 +32,29 @@ import { pipeline } from 'node:stream/promises';
 import { Flags, flagStr, flagBool, flagNum } from './args';
 import { CliError } from './errors';
 import { getDriver } from './drivers';
+import { releaseCompanionOn } from './companion/manager';
 import { err, setOutputQuiet } from './output';
-import { Driver, Platform } from './types';
+import { Driver, HierarchySource, Platform } from './types';
 import { FlagSpec, InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
 import { describeError, ExecRequest, ExecResponse, HealthResponse, LogsRequest, LogsResponse, RpcErrorBody } from './rpc';
 import { executeForServer, platformFromFlags, deviceFromFlags } from './cli';
 import { VERSION } from './version';
+
+/**
+ * A driver's read path, or null when the backend has no opinion (iOS reads through idb, one
+ * way only) or the probe failed.
+ *
+ * Best-effort on purpose. It is reported on `/v1/health`, which is also how a client checks
+ * the server is reachable at all — a companion probe must never be the reason that answer
+ * cannot be given.
+ */
+function safeHierarchySource(driver: Driver): HierarchySource | null {
+  try {
+    return driver.hierarchySource?.() ?? null;
+  } catch {
+    return null;
+  }
+}
 
 const DEFAULT_PORT = 8391;
 const EXEC_BODY_CAP = 1024 * 1024; // 1 MB of JSON is far beyond any leaf command
@@ -282,12 +299,14 @@ export function buildServer(config: ServerConfig): Server {
       if (config.authKey && req.headers.authorization && !authorized(req)) {
         throw new HttpError(401, 'invalid auth key');
       }
+      const reads = safeHierarchySource(config.driver);
       const health: HealthResponse = {
         ok: true,
         version: VERSION,
         platform: config.platform,
         serial: config.serial,
         installEnabled: config.allowInstall,
+        ...(reads ? { reads } : {}),
       };
       sendJson(res, 200, health);
       return;
@@ -394,6 +413,10 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
     server.listen(port, bind, () => {
       err(`[server] verikun ${VERSION} listening on http://${bind}:${port}`);
       err(`[server] device: ${platform} · ${serial}`);
+      // Say the read path out loud. It is the difference between a suite that takes 8s and
+      // one that takes 43s, and it used to be invisible from both ends (issue #77).
+      const reads = safeHierarchySource(driver);
+      if (reads) err(`[server] reads: ${reads.path} (${reads.detail})`);
       err(`[server] install endpoint: ${allowInstall ? 'ENABLED (--allow-install)' : 'disabled (pass --allow-install to accept builds)'}`);
       if (generated) {
         err('[server] auth key generated for this session — clients pass it via VERIKUN_SERVER_AUTH_KEY or --auth-key:');
@@ -409,6 +432,11 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
     });
     const close = () => {
       err('[server] shutting down');
+      // Hand the device's ONE UiAutomation connection back. The companion outlives the
+      // process that started it and would otherwise keep the connection for up to its full
+      // 15-minute idle window, blocking Appium, Layout Inspector and TalkBack on this host —
+      // with no obvious cause, and no way to stop it from a `--server` client.
+      releaseCompanionOn(serial);
       server.close();
       resolve(0);
     };

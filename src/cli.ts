@@ -5,7 +5,7 @@ import { CliError, NoWindowError, SelectorNotFoundError, isEnvError } from './er
 import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
 import { adbTransport, severanceRisk } from './drivers/adb';
-import { Bounds, Driver, DeviceInfo, Element, Platform, Point, ToolProbe } from './types';
+import { Bounds, Driver, DeviceInfo, Element, HierarchySource, Platform, Point, ToolProbe } from './types';
 import {
   SETTINGS,
   SETTING_KEYS,
@@ -1639,8 +1639,9 @@ interface ResolvedBackend {
   backend: ExecBackend;
   platform: Platform;
   device?: string;
-  /** Set when the backend is a remote `vk server`. */
-  remote?: { url: string; version: string };
+  /** Set when the backend is a remote `vk server`. `reads` is absent against a pre-0.21.1
+   *  server, which did not report its hierarchy read path. */
+  remote?: { url: string; version: string; reads?: HierarchySource };
 }
 
 async function resolveBackend(platform: Platform, device: string | undefined, flags: Flags): Promise<ResolvedBackend> {
@@ -1700,6 +1701,11 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   const health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
   runCtx = { platform: health.platform, device: health.serial };
   err(`[verikun] server ${server}: ${health.platform} · device ${health.serial} · verikun ${health.version}`);
+  // Say the read path once, here. Reads execute server-side, so this is the only end of the
+  // connection that knows it — and without it a companion that had silently stood down was
+  // indistinguishable from one that never engaged, for a whole suite (issue #77). An older
+  // server omits the field; saying nothing is better than guessing.
+  if (health.reads) err(`[verikun] server reads: ${health.reads.path} (${health.reads.detail})`);
   const remote = createRemoteBackend(opts, health);
   return {
     backend: {
@@ -1726,7 +1732,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     },
     platform: health.platform,
     device: health.serial,
-    remote: { url: server, version: health.version },
+    remote: { url: server, version: health.version, reads: health.reads },
   };
 }
 
@@ -2049,13 +2055,16 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
     throw new CliError(`${providerRequirement(opts.model)} — needed to compile/repair tests (model ${opts.model}).`, 3);
   }
   const reqPlatform = platformFromFlags(flags);
-  const { backend, platform, device } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  const { backend, platform, device, remote } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
   const app = flagStr(flags, 'app');
   if (app) assertSafeAppId(app);
   try {
     return await cmdSuite(dirArg, flags, {
       platform,
       device,
+      ...(remote
+        ? { server: { url: remote.url, verikun: remote.version, reads: remote.reads?.path } }
+        : {}),
       runTest: (file) => runAiTest(file, opts, backend, platform, device),
       // Reset app state between tests only when the app id is known; without --app,
       // each test is responsible for its own isolation (e.g. `launch --clear`).

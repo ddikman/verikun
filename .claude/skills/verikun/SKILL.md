@@ -275,7 +275,13 @@ to set it up, then every read after is fast. Nothing to enable.
 It holds the device's single `UiAutomation` connection while it runs, so Appium and Layout
 Inspector cannot attach. If the user needs those, tell them `VERIKUN_COMPANION=0` or
 `vk companion stop` — don't disable it pre-emptively. A failure never breaks a run: verikun
-falls back to the slower stock read on its own.
+falls back to the slower stock read on its own, and retries the fast path a minute later.
+
+Over `--server` the same applies, but the setting lives on the **server**: reads execute
+there, so `VERIKUN_COMPANION` is read in the server's environment and `vk companion` has no
+`--server` form. If a remote run feels slow (~2.4s a step on Android), don't guess — ask:
+`curl -s "$VERIKUN_SERVER/v1/health" | jq .reads` reports the read path and why. Every
+`--server` run also prints it once at start.
 
 **Remember identifiers across runs.** After a flow succeeds, save the selectors
 you found to memory — the mapping from human intent to selector, plus the screen

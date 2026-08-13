@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-08-13
+
 ### Fixed
 - **`npm link` produced a `vk` that died with "permission denied".** `tsc` writes
   `dist/bin/verikun.js` as 0644 and nothing set the executable bit, so the global symlink
@@ -24,7 +26,69 @@ All notable changes to this project are documented here. The format is based on
   executable, not merely present — the mode is exactly the kind of thing that regresses
   without anyone noticing, since `npm install -g` keeps working either way.
 
-  No version bump: no CLI behaviour changed.
+  (Shipping in this release rather than one of its own — it landed on `main` unreleased.)
+
+- **The companion no longer switches itself off for the rest of a long-lived process** — which
+  is why `vk server` got no speedup from 0.21.0 at all ([#77]). It engages there exactly as it
+  does locally; it just stopped at the first hiccup and never started again.
+
+  Measured on a Pixel 3a, one `vk server` process, the same 12-command flow each time:
+
+  | | assert avg | tap avg | flow total |
+  |---|--:|--:|--:|
+  | companion healthy | 0.33s | 0.89s | **7.7s** |
+  | companion dead — **was** | 3.35s | 3.52s | 42.6s |
+  | companion healthy again, same server — **was** | 3.33s | 3.49s | 42.5s |
+  | either case — **now** | 0.33s | 0.89s | **7.9s** |
+
+  The third row is the bug: a separate process had restarted the companion and `vk companion
+  status` read `ready app held` throughout, while the server sat next to it on the 2.4s path.
+  A stand-down was latched for the life of the process and `dims` was cached, so
+  `ensureReady()` — the only path that restarts the companion from its device note — became
+  unreachable after the first successful read. That is invisible when every command is its own
+  process (a fresh one recovers: measured 3.03s then 0.28s) and permanent in a daemon.
+
+  Three routine things reached it, all now retried after a minute rather than never:
+  the companion's **own 15-minute idle shutdown**, which any idle CI server outlives; a
+  **calibration mismatch**, which `calibrate()` already documents as usually just the screen
+  moving between two dumps; and a **released connection**, which the stock fallback causes by
+  design. Only facts that cannot change while the process runs — the device note saying
+  `unsupported`, or no jar to push — still stand it down for good.
+
+- **A stale `UiAutomation` connection no longer reports an empty screen forever.** After
+  `vk launch` force-stops and restarts an app, the companion could return "null root" for a
+  window that was plainly there — measured at 30s+ on a Pixel 3a while a stock `uiautomator
+  dump` read the same screen fine. Since a null root is deliberately *not* a stand-down (it is
+  normally the device mid-launch, and releasing the connection for it would drop every
+  `launch --clear` onto the slow path), nothing recovered it: every selector command burned its
+  full auto-wait and exited 1 on a readable screen. This one failed tests rather than slowing
+  them.
+
+  A run of null roots now escalates by duration — propagate, then recycle the connection once
+  (release + re-acquire, ~1.05s, the thing measured to clear it), then fall back to the stock
+  path if that did not help. Being slow always beats failing a selector on a screen that is
+  there. The escalation is per-process, so it recovers inside any command that auto-waits
+  (`tap`, `assert`, `text`, `find`, `wait`) and inside `vk server`; a bare single-shot `vk ui`
+  has only one read and cannot, so it still reports no window until the next such command.
+
+- **`vk server` hands the `UiAutomation` connection back on shutdown.** The companion outlives
+  the process that started it, so Ctrl-C used to leave Appium, Layout Inspector and TalkBack
+  locked out on that host for up to the full 15-minute idle window — with no obvious cause, and
+  no way to stop it from a `--server` client (`vk companion` has no `--server` form).
+
+### Added
+- **`vk server` says which read path it is using**, on startup (`[server] reads: companion
+  (ready app held)`) and as a `reads` field on `/v1/health`; a `--server` client echoes it once
+  at run start. Reads execute server-side, so this was the one end of the connection that knew
+  — and without it a companion that had silently stood down was indistinguishable from one that
+  never engaged, for a whole suite. Requested in [#77]; the field is optional, so an older
+  server simply omits it.
+- **A `--server` suite index records the server's verikun version and read path** (`server: {
+  url, verikun, reads }` in `index.json`). It previously recorded only the client's version, so
+  a remote artifact could not say which verikun actually drove the device — the first thing you
+  need to explain a suite that got slower after a server upgrade.
+
+[#77]: https://github.com/ddikman/verikun/issues/77
 
 ## [0.21.0] - 2026-08-13
 

@@ -52,6 +52,22 @@ vk ai onboarding.md --server "$VERIKUN_SERVER"
 vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
 ```
 
+### Check which read path the server is using
+
+Reads happen server-side, so how the server reads the hierarchy sets the pace of your whole
+suite — on Android the difference between the [companion](/verikun/guides/companion/) and the
+stock dump is roughly 0.2s and 2.4s per read. The server reports it:
+
+```sh
+curl -s "$VERIKUN_SERVER/v1/health" | jq .reads
+# { "path": "companion", "detail": "ready app held" }
+```
+
+`/v1/health` needs no auth key, so this works as a CI preflight assertion. The server also
+prints it at startup, every `--server` client echoes it once at run start, and a suite's
+`index.json` records it alongside the **server's** verikun version — which, for a `--server`
+run, is the one that actually drove the device.
+
 ## The transport: Tailscale
 
 The device box is usually behind NAT — a desk, an office, someone's home. It has no routable
@@ -289,6 +305,7 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 | `401` | The auth key does not match. Both sides must use the same `VERIKUN_SERVER_AUTH_KEY`. |
 | Exit `3`, "server unreachable" | Network path, not verikun. Check the tailnet is up on the runner. |
 | Installs rejected | The server was started without `--allow-install`. |
+| Steps take ~2.4s each on Android | The server is on the stock read path. `curl "$VERIKUN_SERVER/v1/health" \| jq .reads` says which, and why — most often `VERIKUN_COMPANION` is set in the **server's** environment, or the [companion](/verikun/guides/companion/) declined on that device. |
 
 More in [Troubleshooting](/verikun/guides/troubleshooting/).
 

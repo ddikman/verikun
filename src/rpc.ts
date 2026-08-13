@@ -9,7 +9,7 @@
 // unit tests) can import it without dragging in transport code.
 
 import { CliError, SelectorNotFoundError, AmbiguousSelectorError } from './errors';
-import type { Element, Platform } from './types';
+import type { Element, HierarchySource, Platform } from './types';
 import type { RunStep } from './run';
 
 /** One validated leaf command, exactly the triple `executeOutcome` consumes. */
@@ -66,6 +66,15 @@ export interface HealthResponse {
   serial: string;
   /** Whether POST /v1/install is enabled on this server (`--allow-install`). */
   installEnabled: boolean;
+  /**
+   * Which read path this server's driver will use for the next hierarchy read, and why.
+   *
+   * OPTIONAL because an older server does not send it (and a backend with one read path has
+   * no answer). Added in 0.21.1: reads happen server-side, so a `--server` client could
+   * previously only infer the read path from its own step durations — which is how a
+   * companion that had silently stood down went unnoticed for a whole suite (issue #77).
+   */
+  reads?: HierarchySource;
 }
 
 /** Body of every non-2xx JSON response (auth, lock, validation, handler crash). */

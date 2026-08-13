@@ -173,6 +173,8 @@ upload plugins.
 | Field | Meaning |
 |---|---|
 | `schemaVersion` | Currently `1`. Additive changes do not bump it. |
+| `verikun` | Version of the process that wrote the manifest — the **client's**. For a `--server` run that is not what drove the device; see `server`. |
+| `server` | `--server` runs only: `{url, verikun, reads}` — which server drove the device, on which version, and whether it read the hierarchy via the [companion](/verikun/guides/companion/) or the stock dump |
 | `tests[]` | Per-test: pass/fail, step count, cost, duration, run id |
 | `tests[].modelRepairs` | How many steps the model repaired. `0` on a clean replay — gate on it to [fail a build that needed healing](/verikun/guides/self-healing-in-ci/#if-you-want-the-strict-gate-anyway) |
 | `tests[].flaky` / `.attempts` | Present when `--retries` recovered the test |
