@@ -56,11 +56,16 @@ All notable changes to this project are documented here. The format is based on
   existed.
 
   Before trusting it, verikun takes **one** real `uiautomator dump` and checks the companion
-  reproduces it byte for byte, then remembers the answer on the device. The dumper
-  clips node bounds to a display size, and which size the platform uses varies by build
-  (AOSP reads the physical display; an SM-A415F's stock dump matches the app window — 216px
-  apart). Guessing wrong would not fail loudly, it would shift every element near the bottom
-  of the screen and land taps elsewhere while still reporting success. If neither candidate
+  reproduces it byte for byte, then remembers the answer on the device. The dumper clips node
+  bounds to a display size, and **which size the platform uses changed between Android
+  versions** — measured on three devices: a Samsung SM-A415F and a Google Pixel 3a, both on
+  Android 12, clip to the app window; a Pixel 6 emulator on Android 14 clips to the physical
+  display. The boundary is in AOSP itself — `DumpCommand` reads `getSize()` on the
+  `android12-release` and `android13-release` branches and `getRealSize()` from
+  `android14-release` onward — so it is the platform version, not the vendor, and a
+  hard-coded choice is wrong on one side of it whichever side you pick — and
+  the gap (44–254px) would not fail loudly, it would shift every element near the bottom of
+  the screen and land taps elsewhere while still reporting success. If neither candidate
   matches, the companion is declined and the stock path is used.
 
   New: `vk companion <status|stop>`, `VERIKUN_COMPANION`, `tools/` for on-device programs,

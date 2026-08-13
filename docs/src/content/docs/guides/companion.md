@@ -138,16 +138,25 @@ stock read instead of paying a doomed startup on every command.
 This exists because the dumper clips every node's bounds to a display size, and **which size
 the platform uses genuinely differs between devices**:
 
-| Device | Android | Clips to |
-|---|---|---|
-| Samsung SM-A415F (physical) | 12 | the **app window** (1080x2184) |
-| Pixel 6 (emulator) | 14 | the **physical display** (1080x2400) |
+| Device | Vendor | Android | Clips to |
+|---|---|---|---|
+| Samsung SM-A415F | Samsung | 12 | the **app window** (1080x2184) |
+| Pixel 3a | Google | 12 | the **app window** (1080x2176) |
+| Pixel 6 emulator | AOSP | 14 | the **physical display** (1080x2400) |
 
-AOSP's own dump command reads the physical display, which is what the emulator does; the
-Samsung build does not. The gap is 216–254px, and guessing wrong would not fail loudly — it
-would shift elements near the bottom of the screen so a tap lands somewhere else while still
-reporting success. So verikun does not guess, and if neither candidate reproduces the
-platform's dump it declines the companion and stays on the stock path.
+The boundary is the **platform version, not the vendor**, and it is in AOSP itself:
+`DumpCommand` reads `getSize()` on the `android12-release` and `android13-release` branches
+and `getRealSize()` from `android14-release` onward. A Samsung and a Google device on
+Android 12 therefore agree with each other, and both differ from Android 14.
+
+So any hard-coded choice is wrong on one side of that boundary. verikun could pin a version
+table instead — but the platform has already changed this once, and calibrating against the
+device in front of you handles the next change without an update.
+
+The gap ranges from 44px to 254px, and guessing wrong would not fail loudly — it would shift
+elements near the bottom of the screen so a tap lands somewhere else while still reporting
+success. So verikun does not guess, and if neither candidate reproduces the platform's dump
+it declines the companion and stays on the stock path.
 
 ## iOS
 

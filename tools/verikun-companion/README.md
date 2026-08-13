@@ -119,14 +119,19 @@ Measured, not speculative:
 - **Which display size to clip to genuinely differs per device — do not hard-code it.**
   MEASURED on two devices, and they disagree:
 
-  | Device | Android | Stock dump clips to | Source |
-  |---|---|---|---|
-  | Samsung SM-A415F (physical) | 12 | 1080x2184 | `getSize()` — the app window |
-  | Pixel 6 (emulator) | 14 | 1080x2400 | `getRealSize()` — the physical display |
+  | Device | Vendor | Android | Stock dump clips to | Source |
+  |---|---|---|---|---|
+  | Samsung SM-A415F | Samsung | 12 | 1080x2184 | `getSize()` — app window |
+  | Pixel 3a | Google | 12 | 1080x2176 | `getSize()` — app window |
+  | Pixel 6 emulator | AOSP | 14 | 1080x2400 | `getRealSize()` — physical display |
 
-  AOSP's own `DumpCommand` reads `getRealSize()`, which is what the emulator does; the
-  Samsung build does not. The gap is 216px on one and 254px on the other, and getting it
-  wrong does not fail loudly — it shifts every element near the bottom of the screen so a tap
+  The split is by PLATFORM VERSION, not vendor, and it is in AOSP itself — `DumpCommand`
+  reads `getSize()` on `android12-release` and `android13-release`, and `getRealSize()` from
+  `android14-release` onward. So a Samsung and a Google device on Android 12 agree, and both
+  differ from Android 14. A hard-coded choice is wrong on one side of that boundary whichever
+  side you pick, and a pinned version table would only be right until the platform changes it
+  again — which it has already done once. The gap ranges 44-254px, and getting it wrong does
+  not fail loudly — it shifts every element near the bottom of the screen so a tap
   lands somewhere else while still reporting success. The first build of this hard-coded
   `getSize()` because that is what the only device to hand did; it would have mis-placed
   taps on the emulator. Hence the calibration handshake, which is not defensive
