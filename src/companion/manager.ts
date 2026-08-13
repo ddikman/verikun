@@ -11,16 +11,22 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { runText, sleepSync } from '../exec';
 import { err } from '../output';
+import { VERSION } from '../version';
 import {
+  CompanionState,
   DimensionSource,
   dumpCommand,
   isHierarchy,
-  pingMatches,
+  parseState,
   portForSerial,
   requestSync,
 } from './protocol';
 
 const DEVICE_JAR = '/data/local/tmp/verikun-companion.jar';
+/** What we learned about this device last time, kept ON the device because that is what the
+ *  knowledge is about — it survives every `vk` process, every working directory, and a
+ *  disposable CI runner. See readDeviceNote/writeDeviceNote. */
+const DEVICE_NOTE = '/data/local/tmp/verikun-companion.note';
 const SOCKET = 'verikun-companion';
 const MAIN_CLASS = 'dev.verikun.companion.CompanionApp';
 /** uiautomator.jar supplies UiAutomationShellWrapper + AccessibilityNodeInfoDumper, which the
@@ -54,14 +60,25 @@ export function companionJarPath(): string | null {
 }
 
 /**
- * Opt-in, for now. The companion holds the device's single UiAutomation connection for as
- * long as it runs, which locks out Appium, Layout Inspector and a second verikun — a real
- * enough side effect to be asked for rather than assumed, until it has been seen on more
- * than a handful of devices. Flipping the default is a follow-up, not an oversight.
+ * ON by default; `VERIKUN_COMPANION=0` opts out.
+ *
+ * It started opt-in, and that was wrong: a hierarchy read is the dominant cost of every
+ * Android run, nobody discovers an environment variable they have not been told about, and
+ * the people who most need the speedup are the least likely to go looking for it. Being
+ * fast by default is the whole point.
+ *
+ * What makes that safe is that a failure cannot cost a test: the stock path is always there
+ * and every failure route hands the UiAutomation connection back before using it. What
+ * makes it not *slow* is the on-device note — a device where the companion cannot run says
+ * so once, and is never probed again.
+ *
+ * The real cost is that the companion holds the device's single UiAutomation connection
+ * while it runs, so Appium, Layout Inspector and TalkBack cannot attach. `VERIKUN_COMPANION=0`
+ * or `vk companion stop` hands it back.
  */
 export function companionEnabled(): boolean {
-  const v = process.env.VERIKUN_COMPANION;
-  return v === '1' || v === 'true';
+  const v = (process.env.VERIKUN_COMPANION ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
 }
 
 /**
@@ -102,6 +119,28 @@ export class Companion {
   }
 
   /**
+   * What we concluded about this device last time: `<verikun version>|<app|real|unsupported>`.
+   *
+   * Kept on the DEVICE rather than in `.verikun/`, because it is a fact about the phone, not
+   * about a working directory — it survives a `cd`, and a disposable CI runner inherits it
+   * instead of starting cold. Keyed by verikun version so an upgrade re-tries a device that
+   * an older build could not use.
+   */
+  private readDeviceNote(): 'unsupported' | DimensionSource | undefined {
+    const r = this.adb(['shell', `cat ${DEVICE_NOTE} 2>/dev/null`], 5000);
+    const [version, verdict] = r.stdout.trim().split('|');
+    if (version !== VERSION) return undefined;
+    if (verdict === 'unsupported' || verdict === 'app' || verdict === 'real') return verdict;
+    return undefined;
+  }
+
+  private writeDeviceNote(verdict: 'unsupported' | DimensionSource): void {
+    // Single-quoted, and every value here comes from a closed set — nothing caller-supplied
+    // reaches the device shell.
+    this.adb(['shell', `echo '${VERSION}|${verdict}' > ${DEVICE_NOTE}`], 5000);
+  }
+
+  /**
    * The hierarchy XML, or null when the companion cannot serve it — in which case the
    * UiAutomation connection has already been handed back, so the caller's stock dump will
    * work rather than being SIGKILLed.
@@ -130,27 +169,60 @@ export class Companion {
 
   /** Get a calibrated companion running, or give up for this process. */
   private ensureReady(): DimensionSource | undefined {
-    if (!this.isReachable() && !this.start()) return undefined;
-    return this.readCalibration() ?? this.calibrate();
+    // A companion already running is the common case once anything has warmed it, and this
+    // single round trip answers "ours? current? calibrated?" at once.
+    const live = this.probeState();
+    if (live.usable) {
+      // Alive but NOT holding the connection: something asked it to let go — the stock dump
+      // path does exactly that when it fails, and `vk companion stop` is not the only route.
+      // Take the connection back before using it, or every read here answers "released" and
+      // silently falls through to the 2.4s path for the rest of the run.
+      if (!live.held && !this.acquire()) return undefined;
+      return live.dims ?? this.calibrate();
+    }
+
+    // Nothing listening. Before paying a start + calibration, ask the device what happened
+    // last time — this is what stops a phone the companion cannot run on from costing every
+    // single command a doomed start attempt now that this is on by default.
+    const note = this.readDeviceNote();
+    if (note === 'unsupported') {
+      this.unusable = true;
+      return undefined;
+    }
+    if (!this.start()) {
+      this.writeDeviceNote('unsupported');
+      this.unusable = true;
+      return undefined;
+    }
+    // A remembered verdict skips calibration entirely — worth ~4.7s of the cold start, and
+    // the companion idle-shuts-down every 15 minutes, so restarts are routine.
+    if (note === 'app' || note === 'real') {
+      try {
+        requestSync(this.port, `calibrated ${note}`, 4000);
+        return note;
+      } catch {
+        /* fall through and calibrate properly */
+      }
+    }
+    return this.probeState().dims ?? this.calibrate();
   }
 
-  private isReachable(): boolean {
+  /** Retake the UiAutomation connection. ~1.05s: the cold-bridge idle wait, paid once. */
+  private acquire(): boolean {
     try {
-      return pingMatches(requestSync(this.port, 'ping', 4000));
-    } catch {
+      requestSync(this.port, 'acquire', 20000);
+      return true;
+    } catch (e) {
+      this.standDown(`companion could not reacquire the connection (${(e as Error).message})`);
       return false;
     }
   }
 
-  /** What the companion itself remembers. Held on the device rather than in a host-side
-   *  file because the companion outlives any single `vk` process — a host cache could
-   *  disagree with the process actually serving dumps. */
-  private readCalibration(): DimensionSource | undefined {
+  private probeState(): CompanionState {
     try {
-      const text = requestSync(this.port, 'state', 4000).toString('utf8').trim();
-      return text.startsWith('ready ') ? (text.split(/\s+/)[1] as DimensionSource) : undefined;
+      return parseState(requestSync(this.port, 'state', 4000));
     } catch {
-      return undefined;
+      return { usable: false, held: false };
     }
   }
 
@@ -173,7 +245,7 @@ export class Companion {
 
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (this.isReachable()) return true;
+      if (this.probeState().usable) return true;
       sleepSync(START_POLL_MS);
     }
     err('[verikun] companion did not start; using the stock hierarchy dump');
@@ -214,6 +286,7 @@ export class Companion {
         const reply = requestSync(this.port, dumpCommand(0, dims));
         if (isHierarchy(reply) && reply.toString('utf8').trim() === stock) {
           requestSync(this.port, `calibrated ${dims}`, 4000);
+          this.writeDeviceNote(dims);
           return dims;
         }
       }

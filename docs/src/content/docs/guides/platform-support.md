@@ -120,7 +120,8 @@ Notes on the rows that carry a caveat:
   [Suites](/verikun/guides/suites/).
 - **`doctor --fix` is Android-only.** It zeroes the three animation scales; iOS has no
   equivalent knob. `vk doctor --ios` still checks the toolchain.
-- **`companion` is Android-only**, and exits `3` on iOS. It speeds up the UI-hierarchy read,
+- **`companion` is Android-only**, and exits `3` on iOS. It is **on by default**
+  (`VERIKUN_COMPANION=0` opts out). It speeds up the UI-hierarchy read,
   which on Android costs ~2.4s per call because `uiautomator dump` starts a fresh VM every
   time. iOS has no equivalent problem: `idb` already keeps a companion process alive and
   reads in ~0.2s, so there is nothing to win. See the companion guide.

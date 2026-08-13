@@ -268,11 +268,14 @@ that does not depend on how complex the screen is. iOS is ~10x cheaper. So prefe
 re-checking between every step, and don't add a redundant `vk ui` just to confirm what an
 `assert` already proved.
 
-On Android, `VERIKUN_COMPANION=1` cuts that read to ~40ms by keeping an accessibility
-connection alive on the device — the same output, ~14x faster end to end. It is opt-in
-because it holds the device's single `UiAutomation` connection while it runs (blocking
-Appium and Layout Inspector), so **suggest it, don't silently enable it** for someone
-else's device. `vk companion stop` hands the connection back.
+On Android this is handled for you: verikun keeps an accessibility connection alive on the
+device (the *companion*), which cuts a read to ~0.2s. The first read on a device costs ~5.8s
+to set it up, then every read after is fast. Nothing to enable.
+
+It holds the device's single `UiAutomation` connection while it runs, so Appium and Layout
+Inspector cannot attach. If the user needs those, tell them `VERIKUN_COMPANION=0` or
+`vk companion stop` — don't disable it pre-emptively. A failure never breaks a run: verikun
+falls back to the slower stock read on its own.
 
 **Remember identifiers across runs.** After a flow succeeds, save the selectors
 you found to memory — the mapping from human intent to selector, plus the screen

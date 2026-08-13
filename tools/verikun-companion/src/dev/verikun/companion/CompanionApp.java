@@ -84,6 +84,15 @@ public final class CompanionApp {
                 // One bad request must never take the daemon down: the host would silently
                 // fall back to `uiautomator dump` and lose the speedup for the whole run.
                 System.err.println("request failed: " + t);
+                // ANSWER, even in failure. Writing nothing leaves the host with an empty
+                // reply, which is exactly what a dead process looks like through `adb
+                // forward` — so a live companion with a fixable complaint ("released — call
+                // acquire first") was being misdiagnosed as gone, and every later read fell
+                // back to the slow path without anyone being able to see why.
+                try {
+                    client.getOutputStream().write(("ERROR " + t + "\n").getBytes("UTF-8"));
+                    client.getOutputStream().flush();
+                } catch (Throwable ignored) { }
             } finally {
                 try { client.close(); } catch (Throwable ignored) { }
             }
@@ -175,8 +184,12 @@ public final class CompanionApp {
             out.write(("real=" + real.x + "x" + real.y + " app=" + app.x + "x" + app.y
                     + " rotation=" + d.getRotation() + "\n").getBytes("UTF-8"));
         } else if (command.equals("state")) {
-            out.write(((calibratedDims == null ? "uncalibrated" : "ready " + calibratedDims)
-                    + (uiAutomation == null ? " released" : " held") + "\n").getBytes("UTF-8"));
+            // Everything the host needs to decide in ONE round trip: is this ours and current
+            // (name + protocol), has it been calibrated, and is it holding the connection.
+            // Two calls used to be needed, and each costs a spawned client process on the host.
+            out.write(("verikun-companion " + PROTOCOL_VERSION + " "
+                    + (calibratedDims == null ? "uncalibrated" : "ready " + calibratedDims) + " "
+                    + (uiAutomation == null ? "released" : "held") + "\n").getBytes("UTF-8"));
         } else if (command.equals("calibrated")) {
             calibratedDims = parts.length > 1 && parts[1].equals("real") ? "real" : "app";
             out.write(("calibrated " + calibratedDims + "\n").getBytes("UTF-8"));
