@@ -28,6 +28,10 @@ const DEVICE_JAR = '/data/local/tmp/verikun-companion.jar';
  *  knowledge is about — it survives every `vk` process, every working directory, and a
  *  disposable CI runner. See readDeviceNote/writeDeviceNote. */
 const DEVICE_NOTE = '/data/local/tmp/verikun-companion.note';
+/** How long to let the process that claimed calibration finish before giving up on it.
+ *  Generous: calibration is ~5s, and being patient costs one slow read while being impatient
+ *  costs the mutual-SIGKILL contention the claim exists to prevent. */
+const CALIBRATION_WAIT_MS = 30000;
 const SOCKET = 'verikun-companion';
 const MAIN_CLASS = 'dev.verikun.companion.CompanionApp';
 /** uiautomator.jar supplies UiAutomationShellWrapper + AccessibilityNodeInfoDumper, which the
@@ -184,16 +188,18 @@ export class Companion {
 
   /** Get a calibrated companion running, or give up for this process. */
   private ensureReady(): DimensionSource | undefined {
-    // A companion already running is the common case once anything has warmed it, and this
-    // single round trip answers "ours? current? calibrated?" at once.
+    // FAST PATH, and the only one that needs no coordination: a companion that is already
+    // running AND calibrated. Note the `dims` check — an uncalibrated companion is NOT ready,
+    // because calibrating it needs the UiAutomation connection exclusively, and that has to
+    // happen under the lock below like every other exclusive use.
     const live = this.probeState();
-    if (live.usable) {
+    if (live.usable && live.dims) {
       // Alive but NOT holding the connection: something asked it to let go — the stock dump
       // path does exactly that when it fails, and `vk companion stop` is not the only route.
       // Take the connection back before using it, or every read here answers "released" and
       // silently falls through to the 2.4s path for the rest of the run.
       if (!live.held && !this.acquire()) return undefined;
-      return live.dims ?? this.calibrate();
+      return live.dims;
     }
 
     // Nothing listening. Before paying a start + calibration, ask the device what happened
@@ -204,8 +210,33 @@ export class Companion {
       this.unusable = true;
       return undefined;
     }
-    if (!this.start()) {
-      this.writeDeviceNote('unsupported');
+
+    return this.startAndCalibrate(note, live);
+  }
+
+  /** Wait for the process that claimed calibration to publish its verdict. */
+  private waitForCalibration(): DimensionSource | undefined {
+    const deadline = Date.now() + CALIBRATION_WAIT_MS;
+    while (Date.now() < deadline) {
+      sleepSync(START_POLL_MS);
+      const state = this.probeState();
+      if (!state.usable) return undefined; // it died; our caller falls back
+      if (!state.dims) continue;           // still working — do NOT touch the connection
+      if (!state.held && !this.acquire()) return undefined;
+      return state.dims;
+    }
+    return undefined;
+  }
+
+  private startAndCalibrate(note: 'app' | 'real' | undefined, state: CompanionState): DimensionSource | undefined {
+    if (!state.usable && !this.start()) {
+      // Only record "this phone cannot run it" when the phone is genuinely the problem, and
+      // only after looking once more. Two ways this verdict could otherwise be wrong, and it
+      // is STICKY — every later command on this device would skip straight to the 2.4s path:
+      //   - the jar is missing, which is a fault of THIS checkout, not of the device;
+      //   - several `vk` processes cold-started at once and collided, which is transient and
+      //     usually leaves a perfectly good companion running (started by whoever won).
+      if (companionJarPath() && !this.probeState().usable) this.writeDeviceNote('unsupported');
       this.unusable = true;
       return undefined;
     }
@@ -219,7 +250,25 @@ export class Companion {
         /* fall through and calibrate properly */
       }
     }
-    return this.probeState().dims ?? this.calibrate();
+
+    // ONLY ONE PROCESS MAY CALIBRATE. It works by releasing the UiAutomation connection to
+    // take a real `uiautomator dump`, so a second process doing it concurrently SIGKILLs the
+    // first one's dump — MEASURED as five concurrent first reads exiting [3,3,0,3,3]. The
+    // claim is granted by the companion itself, whose single-threaded accept loop makes it
+    // genuinely atomic; the obvious host-side lock does not work, because Android's toybox
+    // `mkdir` SUCCEEDS on an existing directory and so grants itself to every caller.
+    const already = this.probeState();
+    if (already.dims) return already.dims;
+    if (!this.claimCalibration()) return this.waitForCalibration();
+    return this.calibrate();
+  }
+
+  private claimCalibration(): boolean {
+    try {
+      return requestSync(this.port, 'claim-calibration', 8000).toString('utf8').trim() === 'granted';
+    } catch {
+      return false;
+    }
   }
 
   /** Retake the UiAutomation connection. ~1.05s: the cold-bridge idle wait, paid once. */
@@ -244,10 +293,19 @@ export class Companion {
   /** Push the jar, forward the socket, spawn detached, wait for it to answer. */
   private start(): boolean {
     const jar = companionJarPath();
-    if (!jar) return false;
+    if (!jar) {
+      // Nothing to push. A source checkout that has not run tools/verikun-companion/build.sh
+      // lands here, and so would a broken install — neither is a fact about the device.
+      return false;
+    }
 
-    // A companion left by an older verikun answers `ping` with a different protocol number.
-    // It is not merely useless — it is still holding the connection, so it must be stopped.
+    // Look once more before tearing anything down. Between our probe and now, another `vk`
+    // process may have started a perfectly good companion — and stopStale() below would kill
+    // it, so two processes racing could ping-pong indefinitely, each killing the other's.
+    if (this.probeState().usable) return true;
+
+    // A companion left by an older verikun answers with a different protocol number. It is
+    // not merely useless — it is still holding the connection, so it must be stopped.
     this.stopStale();
 
     if (this.adb(['push', jar, DEVICE_JAR], 30000).code !== 0) return false;

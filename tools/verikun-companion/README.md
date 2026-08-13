@@ -104,9 +104,34 @@ Measured, not speculative:
   the host port open regardless of whether anything is listening behind it, so a killed
   companion yields an **empty reply**, not `ECONNREFUSED`. A client that only handles
   connect-errors will hang or misread it — treat a short/empty response as "unavailable".
+- **Only one process may calibrate at a time, and the lock cannot live on the host.**
+  Calibration releases the UiAutomation connection to take a stock dump, so two processes
+  doing it at once SIGKILL each other — five concurrent first reads measured as
+  `[3,3,0,3,3]`. The claim is therefore granted by the companion's own single-threaded
+  accept loop. The obvious alternative does not work: Android's toybox `mkdir` **succeeds on
+  an existing directory**, so a `mkdir` mutex grants itself to every caller (verified: five
+  concurrent attempts, five successes). A waiting process must also not acquire the
+  connection while the holder has released it, or it kills the dump it is waiting for.
+
 - **One instance per device.** The constraint above is per-device, so driving several phones
   at once is fine; the host just needs a serial → forwarded-port map, and the abstract
   socket name can stay fixed.
+- **Which display size to clip to genuinely differs per device — do not hard-code it.**
+  MEASURED on two devices, and they disagree:
+
+  | Device | Android | Stock dump clips to | Source |
+  |---|---|---|---|
+  | Samsung SM-A415F (physical) | 12 | 1080x2184 | `getSize()` — the app window |
+  | Pixel 6 (emulator) | 14 | 1080x2400 | `getRealSize()` — the physical display |
+
+  AOSP's own `DumpCommand` reads `getRealSize()`, which is what the emulator does; the
+  Samsung build does not. The gap is 216px on one and 254px on the other, and getting it
+  wrong does not fail loudly — it shifts every element near the bottom of the screen so a tap
+  lands somewhere else while still reporting success. The first build of this hard-coded
+  `getSize()` because that is what the only device to hand did; it would have mis-placed
+  taps on the emulator. Hence the calibration handshake, which is not defensive
+  over-engineering — it is the only thing that makes this safe on a device nobody has tried.
+
 - **`getSize()`, not `getRealSize()`.** The dumper clips every node's bounds to the
   width/height it is handed, so these numbers decide the geometry verikun taps and scrolls
   against. On this device stock clips to **1080x2184** (the app window, `getSize()`) while

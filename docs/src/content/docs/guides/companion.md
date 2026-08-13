@@ -135,13 +135,19 @@ a restart after the idle shutdown reuses it and costs ~2.1s. The same note recor
 where the companion could not start at all, so that phone falls straight through to the
 stock read instead of paying a doomed startup on every command.
 
-This exists because the dumper clips every node's bounds to a display size, and which size
-the platform uses varies by build — AOSP reads the physical display, a physical SM-A415F's
-stock dump matches the app window (a 216px difference on that device). Guessing wrong would
-not fail loudly; it would shift elements near the bottom of the screen so a tap lands
-somewhere else while still reporting success. So verikun does not guess, and if neither
-candidate reproduces the platform's dump it declines the companion and stays on the stock
-path.
+This exists because the dumper clips every node's bounds to a display size, and **which size
+the platform uses genuinely differs between devices**:
+
+| Device | Android | Clips to |
+|---|---|---|
+| Samsung SM-A415F (physical) | 12 | the **app window** (1080x2184) |
+| Pixel 6 (emulator) | 14 | the **physical display** (1080x2400) |
+
+AOSP's own dump command reads the physical display, which is what the emulator does; the
+Samsung build does not. The gap is 216–254px, and guessing wrong would not fail loudly — it
+would shift elements near the bottom of the screen so a tap lands somewhere else while still
+reporting success. So verikun does not guess, and if neither candidate reproduces the
+platform's dump it declines the companion and stays on the stock path.
 
 ## iOS
 
