@@ -7,10 +7,27 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
-- **An opt-in on-device companion that makes an Android UI-hierarchy read ~60x faster** —
-  `VERIKUN_COMPANION=1`, and `vk ui` goes from **2.40s to 0.21s** end to end on a physical
-  SM-A415F, with **identical** output. Reading the hierarchy is the dominant cost of any
-  suite, so this moves the whole runtime, not a rounding error.
+- **An on-device companion that makes an Android UI-hierarchy read ~12x faster** — `vk ui`
+  goes from **2.44s to 0.18s** end to end on a physical SM-A415F, with **identical** output.
+  Reading the hierarchy is the dominant cost of any suite, so this moves the whole runtime,
+  not a rounding error. Every selector command benefits, not just `vk ui`: `find` 12.3x,
+  `assert` 12.0x, `wait` 11.5x, `tap` 8.1x, `text` 3.6x (the remainder is `adb shell input`,
+  which does not go through the companion yet).
+
+  **On by default; `VERIKUN_COMPANION=0` opts out.** It shipped opt-in first and that was
+  wrong — nobody discovers an environment variable they were never told about, and the
+  people who most need the speedup are the least likely to go looking for it.
+
+  It also makes auto-wait honour its window: a 5s wait for an element that never appears takes
+  ~6.4s rather than ~10.8s, because the stock path's final 2.4s read starts just before the
+  deadline and overshoots.
+
+  The first read on a device costs ~6s to push, start and calibrate. The verdict is then
+  remembered **on the device** (`/data/local/tmp/verikun-companion.note`, keyed by verikun
+  version), so a restart after the 15-minute idle shutdown reuses it and costs ~2.1s. The
+  same note records a device the companion could not start on at all, so that phone falls
+  straight through to the stock read instead of paying a doomed startup on every command —
+  which is what makes being on by default safe rather than merely fast.
 
   Profiling `adb shell uiautomator dump` showed only ~0.10s of its ~2.4s is work. The rest is
   paid fresh every call: ~1.22s starting ART and loading `uiautomator.jar`, and ~1.00s in
@@ -27,9 +44,10 @@ All notable changes to this project are documented here. The format is based on
   "re-capture fresh every command" rule is intact. It borrows the platform's own serialiser,
   so its XML is byte-identical to `uiautomator dump`'s.
 
-  **Opt-in, because a device has exactly one `UiAutomation` connection and the companion
-  holds it** — while it runs, `uiautomator dump` is SIGKILLed, and Appium, Layout Inspector
-  and TalkBack cannot attach. `vk companion status` / `vk companion stop` hand it back.
+  **A device has exactly one `UiAutomation` connection and the companion holds it** — while
+  it runs, `uiautomator dump` is SIGKILLed, and Appium, Layout Inspector and TalkBack cannot
+  attach. That is the one real cost, and the reason for the opt-out: `VERIKUN_COMPANION=0`,
+  or `vk companion stop` to hand it back once. `vk companion status` reports it.
 
   It cannot fail a test. Every failure route releases the connection *before* falling back,
   because the stock path is not merely slower while the companion holds it — it is
@@ -38,7 +56,7 @@ All notable changes to this project are documented here. The format is based on
   existed.
 
   Before trusting it, verikun takes **one** real `uiautomator dump` and checks the companion
-  reproduces it byte for byte, then remembers the answer in the companion itself. The dumper
+  reproduces it byte for byte, then remembers the answer on the device. The dumper
   clips node bounds to a display size, and which size the platform uses varies by build
   (AOSP reads the physical display; an SM-A415F's stock dump matches the app window — 216px
   apart). Guessing wrong would not fail loudly, it would shift every element near the bottom

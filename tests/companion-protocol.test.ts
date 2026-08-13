@@ -5,9 +5,11 @@ import {
   dumpCommand,
   isHierarchy,
   isLiveReply,
+  parseState,
   pingMatches,
   portForSerial,
 } from '../src/companion/protocol';
+import { companionEnabled } from '../src/companion/manager';
 
 const buf = (s: string) => Buffer.from(s, 'utf8');
 
@@ -79,4 +81,58 @@ test('portForSerial: stays inside the configured span', () => {
     assert.ok(port >= 8299 && port < 8499, `${serial} -> ${port}`);
     assert.equal(Number.isInteger(port), true);
   }
+});
+
+// --- state parsing -----------------------------------------------------------
+
+test('parseState: a calibrated, connected companion', () => {
+  const s = parseState(Buffer.from(`verikun-companion ${COMPANION_PROTOCOL} ready app held\n`));
+  assert.deepEqual(s, { usable: true, dims: 'app', held: true });
+});
+
+test('parseState: released and uncalibrated are both first-class', () => {
+  const s = parseState(Buffer.from(`verikun-companion ${COMPANION_PROTOCOL} uncalibrated released\n`));
+  assert.equal(s.usable, true);
+  assert.equal(s.dims, undefined, 'uncalibrated must not look like a dimension source');
+  assert.equal(s.held, false);
+});
+
+test('parseState: a companion from another protocol version is not usable', () => {
+  // It is still holding the device's one UiAutomation connection, so the caller must restart
+  // it — but it must never be talked to, since its dump format may differ.
+  assert.equal(parseState(Buffer.from('verikun-companion 999 ready app held\n')).usable, false);
+});
+
+test('parseState: an empty reply is not a companion', () => {
+  // `adb forward` keeps the host port open with nothing behind it — see isLiveReply.
+  assert.deepEqual(parseState(Buffer.alloc(0)), { usable: false, held: false });
+});
+
+test('parseState: something else answering on the port is not usable', () => {
+  assert.equal(parseState(Buffer.from('SSH-2.0-OpenSSH_9.0\n')).usable, false);
+});
+
+// --- the default ------------------------------------------------------------
+
+test('companionEnabled: on by default, with nothing set', () => {
+  delete process.env.VERIKUN_COMPANION;
+  assert.equal(companionEnabled(), true);
+});
+
+test('companionEnabled: the documented opt-out values all turn it off', () => {
+  for (const v of ['0', 'false', 'off', 'no', 'FALSE', ' 0 ']) {
+    process.env.VERIKUN_COMPANION = v;
+    assert.equal(companionEnabled(), false, `VERIKUN_COMPANION=${JSON.stringify(v)}`);
+  }
+  delete process.env.VERIKUN_COMPANION;
+});
+
+test('companionEnabled: an empty or unrecognised value leaves it on', () => {
+  // Failing OPEN is the safe direction: the worst case is the fast path, which falls back
+  // on its own. Failing closed would silently cost every read ~2.4s over a stray value.
+  for (const v of ['', '1', 'true', 'yes', 'please']) {
+    process.env.VERIKUN_COMPANION = v;
+    assert.equal(companionEnabled(), true, `VERIKUN_COMPANION=${JSON.stringify(v)}`);
+  }
+  delete process.env.VERIKUN_COMPANION;
 });

@@ -1,6 +1,6 @@
 ---
 title: The Android companion
-description: An opt-in on-device helper that makes reading the UI hierarchy about 10x faster, and what it costs you.
+description: The on-device helper that makes reading the UI hierarchy about 10x faster — on by default, and how to turn it off.
 sidebar:
   order: 7
 ---
@@ -13,11 +13,21 @@ The companion is a small program pushed to the device that answers the same ques
 about **40ms end to end**, returning byte-identical results.
 
 ```sh
-export VERIKUN_COMPANION=1
-vk ui          # ~0.2s instead of ~2.4s
+vk ui          # ~0.2s instead of ~2.4s — nothing to enable
 ```
 
-It is **opt-in** — see [What it costs you](#what-it-costs-you) for why.
+**It is on by default.** verikun starts it the first time it reads the hierarchy, and
+`VERIKUN_COMPANION=0` turns it off — see [What it costs you](#what-it-costs-you) for when
+you would want to.
+
+The first read on a device pays for setting it up: about **6s** to push, start and
+[calibrate](#calibration). After that every read is ~0.2s, and the verdict is remembered on
+the device, so when the companion idle-shuts-down a later run restarts it in about **2.1s**
+without recalibrating.
+
+It also makes auto-wait behave. A 5s wait for an element that never appears takes ~6.4s with
+the companion but ~10.8s without: the stock path's final 2.4s read starts just before the
+deadline, so every timeout overshoots by most of a read.
 
 **Every command that resolves a selector benefits**, not just `vk ui` — they all read the
 hierarchy through the same path. Measured on a settled screen, same device:
@@ -80,12 +90,23 @@ it runs, anything else that wants that connection loses:
 - Appium and Android Studio's Layout Inspector cannot attach
 - accessibility services such as TalkBack are suppressed
 
-That is why this is opt-in rather than the default. Hand the connection back at any time:
+If you need any of those on the same device, turn the companion off — the connection goes
+back and verikun uses the stock read:
 
 ```sh
-vk companion stop
-vk companion status     # "running on port 8486 (ready app held)" / "not running"
+export VERIKUN_COMPANION=0    # for a whole session
+vk companion stop             # or just hand it back once
+vk companion status           # "running on port 8486 (ready app held)" / "not running"
 ```
+
+`0`, `false`, `off` and `no` all opt out. Anything else — including an empty value — leaves
+it on: failing *open* is the safe direction here, because the worst case is the fast path,
+which already falls back on its own.
+
+It is on by default because the alternative did not work. A hierarchy read is the dominant
+cost of every Android run, and nobody discovers an environment variable they were never
+told about — the people who most need the speedup are the least likely to go looking for
+it.
 
 ## It will not fail your test
 
@@ -96,7 +117,8 @@ off the connection first so the fallback actually works. Measured:
 |---|---|
 | Companion dump fails | Connection released, stock read used, run continues |
 | Companion killed or crashed | Stock read works immediately — process death frees the connection |
-| Companion cannot start | Stock read, one line on stderr |
+| Companion running but released | Connection retaken (~1.7s), then reads are fast again |
+| Companion cannot start | Stock read, one line on stderr — and the device is marked so it is not retried |
 | Output disagrees with the platform | Companion declined for the session |
 
 A fallback read costs about **3.4s** against 2.4s if the companion had never existed — a
@@ -105,7 +127,13 @@ A fallback read costs about **3.4s** against 2.4s if the companion had never exi
 ## Calibration
 
 On first use verikun takes **one** real `uiautomator dump` and checks the companion
-reproduces it exactly, then remembers the answer. That costs ~3.5s once per companion.
+reproduces it exactly. That is most of the ~5.8s first read.
+
+The answer is then remembered **on the device** (`/data/local/tmp/verikun-companion.note`,
+keyed by verikun version), so it is paid once per device rather than once per companion —
+a restart after the idle shutdown reuses it and costs ~2.1s. The same note records a device
+where the companion could not start at all, so that phone falls straight through to the
+stock read instead of paying a doomed startup on every command.
 
 This exists because the dumper clips every node's bounds to a display size, and which size
 the platform uses varies by build — AOSP reads the physical display, a physical SM-A415F's

@@ -38,6 +38,31 @@ export function pingMatches(reply: Buffer): boolean {
   return name === 'verikun-companion' && version === COMPANION_PROTOCOL;
 }
 
+/** What a live companion reports about itself. */
+export interface CompanionState {
+  /** Ours, and speaking our protocol version. A false here means restart it, not talk to it. */
+  usable: boolean;
+  /** The calibrated dimension source, or undefined if it has not been calibrated yet. */
+  dims?: DimensionSource;
+  /** Is it currently holding the device's UiAutomation connection? */
+  held: boolean;
+}
+
+/**
+ * Parse a `state` reply: `verikun-companion <proto> (ready <dims>|uncalibrated) (held|released)`.
+ *
+ * One round trip answers all three questions, because each one costs a spawned client
+ * process on the host — and this runs before every read that has not already resolved.
+ */
+export function parseState(reply: Buffer): CompanionState {
+  const unusable: CompanionState = { usable: false, held: false };
+  if (!isLiveReply(reply)) return unusable;
+  const parts = reply.toString('utf8').trim().split(/\s+/);
+  if (parts[0] !== 'verikun-companion' || parts[1] !== COMPANION_PROTOCOL) return unusable;
+  const dims = parts[2] === 'ready' ? (parts[3] as DimensionSource) : undefined;
+  return { usable: true, dims, held: parts.includes('held') };
+}
+
 /** A dump reply is only usable if it is actually a hierarchy — the companion reports its
  *  own failures as plain text (`ERROR …`, `released — call acquire first`), and those must
  *  never reach the XML parser as if they were a screen. */

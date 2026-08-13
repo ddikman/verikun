@@ -2082,7 +2082,7 @@ function cmdCompanion(ctx: Ctx): number {
   if (flagBool(ctx.flags, 'json')) json({ companion: state, enabled: companionEnabled() });
   else {
     out(state);
-    if (!companionEnabled()) err('note: set VERIKUN_COMPANION=1 to use it for hierarchy reads');
+    if (!companionEnabled()) err('note: disabled by VERIKUN_COMPANION — hierarchy reads use the slower stock dump');
   }
   return 0;
 }
@@ -2449,7 +2449,8 @@ ENVIRONMENT
                                       Claude Code plugin is out of date (a warning only —
                                       it never changes the exit code). --fix disables
                                       animations. VERIKUN_NO_UPDATE_CHECK skips the check
-  companion <status|stop> [--json]    On-device hierarchy reader (Android; VERIKUN_COMPANION=1)
+  companion <status|stop> [--json]    On-device hierarchy reader (Android, on by default;
+                                      VERIKUN_COMPANION=0 opts out)
 
 TEST RUNS (actions are recorded; a run auto-starts on first action)
   run start [name] [--force]          Begin a named run (else one starts implicitly)
