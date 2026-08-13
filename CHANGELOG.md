@@ -119,6 +119,28 @@ All notable changes to this project are documented here. The format is based on
   differently gets the old speed, never a wrong image.
 
 ### Fixed
+- **A command with a 120-second wait budget could abort after 20, because the app had not
+  drawn yet.** `launch` force-stops the app before starting it (and `--clear` wipes its data
+  too), leaving a gap of a second or two with no window at all. The platform correctly
+  reports a null root for that gap, and the capture layer escalated it to a fatal environment
+  error (exit `3`) after three attempts — throwing away a budget the caller had explicitly
+  asked for. Measured before the fix: `wait --timeout 120000` aborted at ~20s on roughly half
+  of the runs, with ~100 seconds unspent.
+
+  A null root is now `NoWindowError`: an observation about the screen, not a broken machine.
+  Every polling caller — `wait`, `find`, `assert`, `tap`, `text`, and the `vk ai` engine's
+  guards — treats it as "nothing on screen yet" and keeps polling to its own deadline. Every
+  *other* capture failure still surfaces immediately, because a missing adb or a wedged
+  dumper is a machine to fix and polling it for two minutes helps nobody. A caller with no
+  wait budget (a bare `vk ui`) still gets exit `3`, unchanged.
+
+  The companion made this visible rather than causing it: with the stock dump's 2.4s latency
+  the three attempts spanned 7-14s and usually outlasted the gap by accident, so the bug was
+  being masked by being slow. It also no longer stands the companion *down* for a null root —
+  that is the device's state, not a companion fault, and releasing the connection dropped the
+  whole process onto the slow path for the rest of its life. After the fix: 0/5 aborts, and
+  the companion stays connected across `launch --clear`.
+
 - **A failed `uiautomator dump` could silently return the PREVIOUS screen.** `dumpXml` ran
   `uiautomator dump <path>` and then `cat <path>`, accepting anything containing
   `<hierarchy>` — but it never checked that *this* dump had written the file. The dump writes

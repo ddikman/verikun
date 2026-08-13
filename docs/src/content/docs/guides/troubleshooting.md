@@ -121,13 +121,13 @@ the `uiautomator` wrapper script saves nothing. Every read starts a fresh VM and
 accessibility connection, and that is the bill. **iOS is ~10× cheaper** (`idb` at 0.2–0.4s)
 precisely because `idb` keeps a companion process alive between reads.
 
-On Android you can make the read itself cheap instead: the opt-in
+**On Android verikun already does this for you.** The
 [companion](/verikun/guides/companion/) keeps one accessibility connection alive on the
-device and answers in **~40ms**, which removes both fixed costs above. It holds the
-device's single `UiAutomation` connection while it runs, so it is opt-in — read that page
-before turning it on in a shared environment.
+device and answers in **~0.2s**, removing both fixed costs above — so the numbers in the
+table are what you get with it turned *off* (`VERIKUN_COMPANION=0`). It holds the device's
+single `UiAutomation` connection while it runs, which is the one reason you might.
 
-Failing that, the lever is **how many reads a test makes**, not how fast each one is:
+Beyond that, the lever is **how many reads a test makes**, not how fast each one is:
 
 - **Every selector command is one read** — `tap`, `text`, `find`, `assert`, `swipe --on`. A
   step that has to wait costs one read per poll.
@@ -141,6 +141,22 @@ Failing that, the lever is **how many reads a test makes**, not how fast each on
   never read back. See [Screenshots](/verikun/reference/screenshots/).
 - Prefer one `assert` over a `screenshot` you intend to read back: it is cheaper in both
   wall clock and tokens.
+
+### "No window to read" right after `launch`
+
+`launch` force-stops the app before starting it (and `--clear` also wipes its data), so for
+a second or two there is no window at all and the platform reports a null root.
+
+**Any command that waits absorbs this** — `wait`, `find`, `assert`, `tap`, `text` — and keeps
+polling until its window elapses, so you normally never see it. It only surfaces from a
+command with no wait budget, such as a bare `vk ui` issued immediately after `launch`. Give
+it something to wait for instead:
+
+```sh
+vk launch com.example.app --clear
+vk wait @home_tab --timeout 30s      # spends its budget rather than giving up
+vk ui
+```
 
 ### A tap right after `launch` did nothing
 

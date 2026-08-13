@@ -53,6 +53,28 @@ export class SelectorNotFoundError extends CliError {
   }
 }
 
+/**
+ * There is no window to read right now — the app was just force-stopped, or is mid-launch
+ * and has not drawn yet. `getRootInActiveWindow()` returns null and the platform says so.
+ *
+ * This is an OBSERVATION about the screen, not a broken machine, and the difference matters:
+ * it clears on its own within a second or two. Every caller that has a wait budget absorbs it
+ * and polls again; only a caller with no budget lets it surface (exit 3, unchanged).
+ *
+ * MEASURED, and this class exists because of it: `launch --clear` leaves a gap with no
+ * window, and the old code escalated that to a fatal environment error after three capture
+ * attempts. With the slow stock dump those three attempts spanned 7-14s and usually outlasted
+ * the gap by accident; once the companion made a read ~0.2s they were spent in under a second,
+ * and a `wait --timeout 120000` would abort at ~20s with 100 seconds of its budget unspent.
+ * The retry belongs to the caller that knows how long it is willing to wait.
+ */
+export class NoWindowError extends CliError {
+  constructor(message: string) {
+    super(message, 3);
+    this.name = 'NoWindowError';
+  }
+}
+
 /** Selector matched >1 element. Exit 2. Carries the candidates so the agent runner
  *  can ask the model to disambiguate (a heal trigger) instead of aborting. */
 export class AmbiguousSelectorError extends CliError {

@@ -1,7 +1,7 @@
 import { Driver, DeviceInfo, Element, Platform, ToolProbe, Viewport } from '../types';
 import type { RawImage } from '../image';
 import { Companion, companionEnabled, releaseCompanionOn } from '../companion/manager';
-import { CliError, probeFailure } from '../errors';
+import { CliError, NoWindowError, probeFailure } from '../errors';
 import { runText, runBinary, sleepSync, TextResult } from '../exec';
 import { parseHierarchy, parseRotation } from '../ui/android-parse';
 import { viewportFor } from '../ui/viewport';
@@ -81,6 +81,12 @@ const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'
  *  costs the same ~10ms as `dump 0`). The stock path pays a full second for it only
  *  because a freshly connected bridge has no history of quiet to draw on. */
 const COMPANION_IDLE_MS = 1000;
+
+/** What both capture paths say when there is no window to read: AOSP's DumpCommand prints
+ *  "ERROR: null root node returned by UiTestAutomationBridge." and writes no file, and the
+ *  companion reports the same condition from getRootInActiveWindow(). Transient — see
+ *  NoWindowError. */
+const NULL_ROOT = /null root node/i;
 
 /** Header sizes `screencap` writes before the pixels: width/height/format, plus a
  *  colorspace word since Android 9. Newest first — see `screenshotRaw`. */
@@ -292,7 +298,9 @@ export class AdbDriver implements Driver {
   private dumpXml(): string {
     // The companion answers in ~40ms against ~2400ms for the stock path. A null here means
     // it could not serve the read AND has already handed the UiAutomation connection back —
-    // which matters, because the stock dump below is SIGKILLed while it is held.
+    // which matters, because the stock dump below is SIGKILLed while it is held. A
+    // NoWindowError propagates instead: there is nothing for the stock path to read either,
+    // and re-asking it would only burn the caller's wait budget more slowly.
     const fast = this.companionOrNull()?.dump(COMPANION_IDLE_MS);
     if (fast) return fast;
     return this.stockDumpXml();
@@ -319,6 +327,15 @@ export class AdbDriver implements Driver {
       const xml = cat.stdout.toString('utf8');
       if (xml.includes('<hierarchy')) return xml;
       lastErr = `${dump.stdout} ${dump.stderr} ${cat.stderr}`.replace(/\s+/g, ' ').trim();
+      // No window is not a failed capture — it is a successful reading of a screen that has
+      // nothing on it yet. Retrying it here just spends someone else's wait budget three
+      // times as fast; hand it up to whoever knows how long they are willing to wait.
+      if (NULL_ROOT.test(lastErr)) {
+        throw new NoWindowError(
+          'No window to read: the app has not drawn yet (force-stopped, or mid-launch). ' +
+            'Retry, or use a command that waits (`vk wait`, or any selector lookup).',
+        );
+      }
       // A companion holds the device's ONE UiAutomation connection and SIGKILLs anything
       // else that wants it — including this dump. It outlives the process that started it,
       // so a later command that never opted in would fail for as long as it lives. Ask it

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep, join } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
-import { CliError, SelectorNotFoundError, isEnvError } from './errors';
+import { CliError, NoWindowError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
 import { adbTransport, severanceRisk } from './drivers/adb';
@@ -180,13 +180,35 @@ function pollStep(flags: Flags, deadline: number): number {
 }
 
 /**
+ * Read the hierarchy for a caller that is polling, treating "no window yet" as "nothing on
+ * screen yet" rather than a fatal environment error.
+ *
+ * A `NoWindowError` means the device genuinely had nothing to show — `launch --clear` and
+ * `launch` both leave a gap where the app has been stopped and has not drawn. That clears in
+ * a second or two, so a caller that has a wait budget should keep polling; escalating to
+ * exit 3 throws away the budget it was explicitly given. MEASURED: a `wait --timeout 120000`
+ * used to abort at ~20s with 100 seconds unspent.
+ *
+ * Every OTHER capture failure still propagates untouched — a missing adb, an unauthorised
+ * device or a wedged dumper is a machine to fix, and polling it for two minutes helps nobody.
+ */
+function readForPoll(ctx: Ctx, opts: { all?: boolean } = {}): Element[] {
+  try {
+    return ctx.driver.getElements(opts);
+  } catch (e) {
+    if (e instanceof NoWindowError) return [];
+    throw e;
+  }
+}
+
+/**
  * matchElements with auto-wait: re-capture + re-match until at least one element
  * matches or the window elapses. Returns the final result either way (empty on miss).
  */
 async function matchWaiting(ctx: Ctx, sel: Selector, opts: { all?: boolean } = {}): Promise<MatchResult> {
   const deadline = Date.now() + waitWindowMs(ctx.flags);
   for (;;) {
-    const res = matchElements(ctx.driver.getElements(opts), sel);
+    const res = matchElements(readForPoll(ctx, opts), sel);
     if (res.matches.length > 0 || Date.now() >= deadline) return res;
     await sleep(pollStep(ctx.flags, deadline));
   }
@@ -206,7 +228,7 @@ async function resolveOneWaiting(
   const start = Date.now();
   const deadline = start + windowMs;
   for (;;) {
-    const els = ctx.driver.getElements(opts);
+    const els = readForPoll(ctx, opts);
     if (matchElements(els, sel).matches.length >= 1) {
       const { element, tier } = resolveOne(els, sel); // 1 → resolved; >1 → throws ambiguity
       // The snapshot rides along: scroll-into-view needs the scrollable containers
@@ -874,7 +896,7 @@ async function cmdWait(ctx: Ctx): Promise<number> {
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
-    const { matches, tier } = matchElements(ctx.driver.getElements(), sel);
+    const { matches, tier } = matchElements(readForPoll(ctx), sel);
     if (gone ? matches.length === 0 : matches.length > 0) {
       ctx.record?.note({ selector: sel, tier, element: matches[0], message: gone ? 'gone' : `${matches.length} match(es)` });
       if (gone) out(`gone: '${sel.raw}'`);
@@ -935,10 +957,10 @@ async function cmdAssert(ctx: Ctx): Promise<number> {
   // Auto-wait subsumes the common "wait then assert": poll until the assertion
   // passes or the window elapses. `--gone` therefore waits for disappearance.
   const deadline = Date.now() + waitWindowMs(ctx.flags);
-  let result = evalAssert(ctx.driver.getElements(), sel, ctx.flags);
+  let result = evalAssert(readForPoll(ctx), sel, ctx.flags);
   while (!result.pass && Date.now() < deadline) {
     await sleep(pollStep(ctx.flags, deadline));
-    result = evalAssert(ctx.driver.getElements(), sel, ctx.flags);
+    result = evalAssert(readForPoll(ctx), sel, ctx.flags);
   }
   const { pass, reason, matches } = result;
 
