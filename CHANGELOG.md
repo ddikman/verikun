@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-13
+
 ### Added
 - **An on-device companion that makes an Android UI-hierarchy read ~12x faster** — `vk ui`
   goes from **2.44s to 0.18s** end to end on a physical SM-A415F, with **identical** output.
@@ -63,9 +65,9 @@ All notable changes to this project are documented here. The format is based on
   display. The boundary is in AOSP itself — `DumpCommand` reads `getSize()` on the
   `android12-release` and `android13-release` branches and `getRealSize()` from
   `android14-release` onward — so it is the platform version, not the vendor, and a
-  hard-coded choice is wrong on one side of it whichever side you pick — and
-  the gap (44–254px) would not fail loudly, it would shift every element near the bottom of
-  the screen and land taps elsewhere while still reporting success. If neither candidate
+  hard-coded choice is wrong on one side of it whichever side you pick. The gap (44–254px)
+  would not fail loudly: it would shift every element near the bottom of the screen and land
+  taps elsewhere while still reporting success. If neither candidate
   matches, the companion is declined and the stock path is used.
 
   New: `vk companion <status|stop>`, `VERIKUN_COMPANION`, `tools/` for on-device programs,
