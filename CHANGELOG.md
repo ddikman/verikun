@@ -119,6 +119,32 @@ All notable changes to this project are documented here. The format is based on
   differently gets the old speed, never a wrong image.
 
 ### Fixed
+- **Several `vk` processes starting on one device at once could fail outright.** Calibration
+  works by *releasing* the device's single `UiAutomation` connection to take a real
+  `uiautomator dump` — so two processes calibrating at once SIGKILL each other's dump.
+  MEASURED: five concurrent first-ever reads on one device gave exit codes `[3,3,0,3,3]`,
+  each reporting `Killed`.
+
+  Calibration is now claimed, and the claim is granted by the **companion itself**, whose
+  single-threaded accept loop makes it genuinely atomic. A process that does not get the
+  claim waits for the verdict and never touches the connection meanwhile — waiting processes
+  used to "helpfully" acquire it during the window the holder had deliberately released it,
+  killing the very dump they were waiting for. A claim from a process that then dies goes
+  stale after 45s, so nothing can wedge a device permanently.
+
+  The obvious host-side lock does **not** work and is worth recording: Android's toybox
+  `mkdir` **succeeds on an existing directory** (exit `0`, unlike POSIX), so a `mkdir` mutex
+  silently grants itself to every caller. Five concurrent attempts all reported success.
+  After the fix, five concurrent first-ever reads are `[0,0,0,0,0]`.
+
+- **A transient or local problem could permanently mark a device as unable to run the
+  companion.** That verdict is sticky — every later command on that phone would skip to the
+  2.4s path — and two things could write it wrongly: a checkout that had not built the jar
+  (a fault of *this* working copy, not of the device), and a startup collision (transient,
+  and usually leaving a perfectly good companion running). It is now only recorded when the
+  jar exists *and* a second look still finds nothing. `start()` also re-probes before
+  stopping anything, so two racing processes can no longer kill each other's companion.
+
 - **A command with a 120-second wait budget could abort after 20, because the app had not
   drawn yet.** `launch` force-stops the app before starting it (and `--clear` wipes its data
   too), leaving a gap of a second or two with no window at all. The platform correctly

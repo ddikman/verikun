@@ -62,6 +62,19 @@ public final class CompanionApp {
      *  process, so a later process can just ask instead of re-deriving (or worse, keeping a
      *  host-side cache that can disagree with the process actually serving dumps). */
     private static volatile String calibratedDims;
+    /** When some process claimed the right to calibrate, or 0 if nobody holds it.
+     *
+     *  Calibration needs the device's ONE UiAutomation connection exclusively — it works by
+     *  RELEASING the connection to take a real `uiautomator dump` — so two processes doing it
+     *  at once SIGKILL each other's dump. The lock lives here, in the single-threaded accept
+     *  loop, because the obvious host-side primitive does not work: Android's toybox `mkdir`
+     *  SUCCEEDS on an existing directory, so a `mkdir` lock silently grants itself to
+     *  everyone. */
+    private static volatile long calibrationClaimedAt;
+
+    /** A claimer that dies mid-calibration must not wedge every later process. Comfortably
+     *  longer than a calibration (~5s) and far shorter than a person waiting. */
+    private static final long CLAIM_STALE_MS = 45_000;
 
     public static void main(String[] args) throws Exception {
         // app_process gives us no main Looper; UiAutomation needs one to deliver callbacks on.
@@ -190,8 +203,23 @@ public final class CompanionApp {
             out.write(("verikun-companion " + PROTOCOL_VERSION + " "
                     + (calibratedDims == null ? "uncalibrated" : "ready " + calibratedDims) + " "
                     + (uiAutomation == null ? "released" : "held") + "\n").getBytes("UTF-8"));
+        } else if (command.equals("claim-calibration")) {
+            // Single-threaded accept loop: exactly one caller can be inside this branch at a
+            // time, which is the whole point — this is the atomicity the shell could not give.
+            boolean granted;
+            long now = System.currentTimeMillis();
+            if (calibratedDims != null) {
+                granted = false; // already done; the caller should just read `state`
+            } else if (calibrationClaimedAt == 0 || now - calibrationClaimedAt > CLAIM_STALE_MS) {
+                calibrationClaimedAt = now;
+                granted = true;
+            } else {
+                granted = false;
+            }
+            out.write((granted ? "granted\n" : "denied\n").getBytes("UTF-8"));
         } else if (command.equals("calibrated")) {
             calibratedDims = parts.length > 1 && parts[1].equals("real") ? "real" : "app";
+            calibrationClaimedAt = 0;
             out.write(("calibrated " + calibratedDims + "\n").getBytes("UTF-8"));
         } else if (command.equals("release")) {
             release();
