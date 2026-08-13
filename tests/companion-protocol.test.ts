@@ -158,7 +158,9 @@ test('nullRootAction: a long run earns one connection recycle', () => {
 test('nullRootAction: only ONE recycle per run of null roots', () => {
   // Re-releasing and re-acquiring on every read would cost ~1s each and thrash the
   // connection the companion exists to hold.
-  assert.equal(nullRootAction(3000, true), 'propagate');
+  for (const runMs of [3000, 6000, 60000]) {
+    assert.notEqual(nullRootAction(runMs, true), 'recycle', `runMs=${runMs}`);
+  }
 });
 
 test('nullRootAction: a recycle that did not help falls back to the stock path', () => {
@@ -166,6 +168,16 @@ test('nullRootAction: a recycle that did not help falls back to the stock path',
   // screens a wedged companion cannot, and being slow always beats failing a selector on a
   // screen that is there.
   assert.equal(nullRootAction(6000, true), 'fallback');
+});
+
+test('nullRootAction: the fallback is reachable inside a default auto-wait window', () => {
+  // REGRESSION: the fallback used to need 2x the wedge interval (6s), but a selector command
+  // waits 5s by default. Recycling at ~3s and then waiting for 6s meant the window closed
+  // first, so a wedged connection failed the command with "no window" having never tried the
+  // stock dump — the one case this escalation is for. A post-recycle null root must escalate
+  // on the very next read, whatever the clock says.
+  assert.equal(nullRootAction(3000, true), 'fallback', 'immediately after a ~3s recycle');
+  assert.equal(nullRootAction(3001, true), 'fallback');
 });
 
 test('nullRootAction: never escalates past fallback on a fresh run', () => {

@@ -71,6 +71,18 @@ const TRANSIENT_RETRY_MS = 60000;
  */
 const WEDGE_AFTER_MS = 3000;
 
+/**
+ * How long a null-root fallback suppresses the companion — much shorter than a companion
+ * failure, because the cause is different in kind.
+ *
+ * A fallback here means a freshly re-acquired connection still saw no window, which is most
+ * often an app that genuinely has not drawn yet. That clears the moment it does, so the 60s
+ * used for a real companion fault would spend the rest of a launch on the 2.4s path for no
+ * reason. Long enough to let the stock dump answer without immediately re-taking the
+ * connection from under it; short enough that the companion is back within one auto-wait.
+ */
+const NULL_ROOT_RETRY_MS = 2000;
+
 const NOT_RUNNING = 'not running';
 
 export type NullRootAction = 'propagate' | 'recycle' | 'fallback';
@@ -87,11 +99,18 @@ export type NullRootAction = 'propagate' | 'recycle' | 'fallback';
  *   - `fallback` — recycling did not help. Hand the connection back and let the stock dump
  *     answer. It can read screens the wedged companion cannot, and a slow read beats a
  *     selector command failing on a screen that is plainly there.
+ *
+ * Once a recycle has happened, the NEXT null root falls back immediately rather than waiting
+ * out another interval. The recycle IS the test — a connection that was just released and
+ * re-acquired has no staleness left to explain the answer — so more elapsed time tells us
+ * nothing new, and waiting for it is not free: selector commands default to a 5s auto-wait,
+ * so any second threshold beyond the ~1.05s recycle risks the window closing first. That
+ * would fail the command with "no window" on a readable screen without ever trying the stock
+ * dump, which is the exact failure this escalation exists to prevent.
  */
 export function nullRootAction(runMs: number, alreadyRecycled: boolean): NullRootAction {
-  if (runMs < WEDGE_AFTER_MS) return 'propagate';
-  if (!alreadyRecycled) return 'recycle';
-  return runMs >= WEDGE_AFTER_MS * 2 ? 'fallback' : 'propagate';
+  if (alreadyRecycled) return 'fallback';
+  return runMs < WEDGE_AFTER_MS ? 'propagate' : 'recycle';
 }
 
 export interface CompanionDeps {
@@ -283,7 +302,7 @@ export class Companion {
       case 'fallback':
         // Recycling did not help and the stock dump may well read this screen. Being slow is
         // always better than failing a selector on a screen that is there.
-        this.standDown('companion still reports no window after a recycle; using the stock path', 'transient');
+        this.standDown('companion still reports no window after a recycle; using the stock path', 'screen');
         return null;
       case 'propagate':
         break;
@@ -506,15 +525,18 @@ export class Companion {
   }
 
   /**
-   * Hand the UiAutomation connection back, and stop using the companion — for a minute if the
-   * cause could pass, for the rest of the process if it cannot.
+   * Hand the UiAutomation connection back, and stop using the companion — for as long as the
+   * cause plausibly lasts:
+   *   - `terminal`  — for the rest of the process; the cause cannot change while it runs.
+   *   - `transient` — a minute; the companion itself failed.
+   *   - `screen`    — a couple of seconds; the *screen* had no window, which clears on its own.
    *
    * Releasing FIRST is the load-bearing half: while the companion holds the connection the
    * stock dump is not slower, it is SIGKILLed, and the caller is about to depend on it.
    */
-  private standDown(reason: string, kind: 'terminal' | 'transient'): void {
+  private standDown(reason: string, kind: 'terminal' | 'transient' | 'screen'): void {
     if (kind === 'terminal') this.declined = true;
-    else this.retryAfter = Date.now() + TRANSIENT_RETRY_MS;
+    else this.retryAfter = Date.now() + (kind === 'screen' ? NULL_ROOT_RETRY_MS : TRANSIENT_RETRY_MS);
     // Force a fresh ensureReady() on the retry: whatever `dims` said is exactly what stopped
     // working, and the note-based restart is what recovers it.
     this.dims = undefined;

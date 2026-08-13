@@ -127,9 +127,11 @@ A fallback read costs about **3.4s** against 2.4s if the companion had never exi
 
 ### Falling back is temporary, except when it cannot be
 
-A fallback suppresses the companion for **a minute**, then it is tried again. Only two things
-stand it down for the whole process, because only they cannot change while it runs: the device
-note saying the companion does not work on this phone, and no jar to push.
+A fallback suppresses the companion for **a minute**, then it is tried again — or for just a
+couple of seconds when the *screen* was the problem rather than the companion, since an app
+that has not drawn yet starts working the moment it does. Only two things stand it down for
+the whole process, because only they cannot change while it runs: the device note saying the
+companion does not work on this phone, and no jar to push.
 
 That distinction matters most for a long-lived process. Up to 0.21.0 a single stand-down was
 permanent, which was invisible when every command is its own process and permanent for
