@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { runText, sleepSync } from '../exec';
 import { err } from '../output';
+import { NoWindowError } from '../errors';
 import { VERSION } from '../version';
 import {
   CompanionState,
@@ -39,6 +40,9 @@ const DEVICE_CLASSPATH = [
 
 /** Cold start measured at ~1.5s on a physical SM-A415F; the margin is for slower devices. */
 const START_TIMEOUT_MS = 12000;
+
+/** The companion's way of saying getRootInActiveWindow() returned null. */
+const NULL_ROOT_REPLY = /null root node/i;
 const START_POLL_MS = 150;
 
 export interface CompanionDeps {
@@ -158,10 +162,21 @@ export class Companion {
         // call acquire first`). Those must never reach the XML parser as though they were
         // a screen: an unparseable "hierarchy" reads as zero elements, which is the
         // "absent" lie that silently skips a guard.
-        throw new Error(reply.toString('utf8').trim().slice(0, 200) || 'empty reply');
+        const detail = reply.toString('utf8').trim().slice(0, 200) || 'empty reply';
+        // A null root is the DEVICE having no window, not the companion malfunctioning.
+        // Standing down for it would release a perfectly healthy connection and drop the
+        // whole process onto the 2.4s path — measured after every `launch --clear`, which
+        // leaves exactly this gap.
+        if (NULL_ROOT_REPLY.test(detail)) {
+          throw new NoWindowError(
+            'No window to read: the app has not drawn yet (force-stopped, or mid-launch).',
+          );
+        }
+        throw new Error(detail);
       }
       return reply.toString('utf8');
     } catch (e) {
+      if (e instanceof NoWindowError) throw e; // transient screen state — the companion is fine
       this.standDown(`companion dump failed (${(e as Error).message})`);
       return null;
     }
