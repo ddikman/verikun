@@ -59,12 +59,33 @@ a third copy of something `docs/` now owns.
 
 ## Keep, cut
 
-**Keep** — headline numbers (`2.44s → 0.18s`, `12x`, `exit 3`), the opt-out flag or env var, the
-platform if the change is one-platform-only, the issue link.
+**Keep** — headline numbers (`2.44s → 0.18s`, `12x`, `exit 3`), the platform if the change is
+one-platform-only, the issue link, and every item of **negative space** below.
 
 **Cut** — measurement tables; *"Measured on a Pixel 3a…"*; *"worth recording:"*; profiling
 breakdowns; what the code used to do internally; internal module and file paths; the story of how
 the bug was found; any sentence whose subject is a private function.
+
+### Negative space survives the cut
+
+Trimming attacks one category first, and it is the most expensive one to lose: the **boundary** of
+a change — what it does *not* fix, and what it obliges the reader to do. A one-line entry naturally
+keeps the good news, because that is the sentence you set out to write. These four survive anyway,
+even if they cost the bullet a second clause:
+
+- **An unchanged failure case — name the command that still fails, and its exit code.** *"A bare
+  `vk ui` still exits `3`."* Without it the reader upgrades expecting a fix, hits the same error,
+  and concludes the release was a lie. Bounding the fix from the positive side is the near-miss to
+  avoid: *"polling commands now wait through it"* leaves the reader to work out that `vk ui` is not
+  a polling command **and** that it therefore still fails — two inferences, at the moment they are
+  least able to make them. Say which command still breaks.
+- **A new default**, and what it was before.
+- **A new outbound call, file write or permission** — the thing a firewalled or airgapped user must
+  know before upgrading.
+- **The opt-out** — the flag or env var that switches the new behaviour off, named exactly.
+
+Everything else — root cause, benchmarks, rejected alternatives — really can go. If a change has no
+boundary of this kind, the entry is genuinely one clause and you are done.
 
 ## Worked examples
 
@@ -144,7 +165,10 @@ Read each bullet back and ask, in order:
 1. **Does the first four words name the thing the reader uses?** If not, rewrite the opening.
 2. **Count the words.** Over 25, find the clause a reader must *act* on and keep only that; the
    rest goes to the PR body.
-3. **Would this still make sense to someone who has never seen the code?** Internal names,
+3. **What does this change still not do?** If there is an unchanged failure case, a new default, a
+   new outbound call or an opt-out, it belongs in the entry — this is the one thing trimming
+   reliably eats, because the sentence you set out to write was the good news.
+4. **Would this still make sense to someone who has never seen the code?** Internal names,
    function names and file paths usually mean the sentence is aimed at the wrong reader.
-4. **Is there a link carrying the detail?** If the entry feels thin without one, add the link
+5. **Is there a link carrying the detail?** If the entry feels thin without one, add the link
    rather than the paragraph.
