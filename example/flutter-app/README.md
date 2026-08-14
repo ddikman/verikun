@@ -34,6 +34,7 @@ Each screen earns its place by pinning a specific part of vk's contract:
 | `@vk_scroll` | `vk_scroll_row_*`, `vk_scroll_target`, `vk_scroll_decoy`, `vk_scroll_mode`, `vk_scroll_result` | Off-screen elements and automatic scroll-into-view |
 | `@vk_state` | `vk_mode_photo`, `vk_mode_video`, `vk_mode_status`, `vk_focus_field` | `selected` / `focused` and their `--not-` forms, and the shared-handler toggle that makes them necessary |
 | `@vk_device` | `vk_dev_brightness`, `vk_dev_orientation`, `vk_dev_textscale`, `vk_dev_sample` | `vk device set` — every line is read from `MediaQuery`, i.e. from the platform, so it changes only when the DEVICE changes |
+| `@vk_permission` | `vk_perm_mic`, `vk_perm_camera`, `vk_perm_status`, `vk_perm_dialog` | A window this app does **not** own — the runtime-permission dialog, drawn by `com.google.android.permissioncontroller`. Android only |
 
 `@vk_device` is the surface that makes device settings *assertable* rather than merely
 screenshot-able. Without it a `device set dark=on` test could only prove the setting
@@ -150,9 +151,9 @@ Everything here was observed by running `vk` against this app. Verified on a
 **Pixel 6 emulator (Android 14)** and an **iPhone 17 Pro simulator (iOS 26.5)**,
 with Flutter 3.44.8.
 
-Facts 6, 9, 10 and 11 are `vk` gaps rather than fixture quirks, and each links to
-the issue tracking it. Fact 12 is a platform limit rather than a `vk` gap — there
-is nothing for `vk` to read.
+Facts 6, 9, 10, 11 and 17 are `vk` gaps rather than fixture quirks, and each links
+to the issue tracking it. Fact 12 is a platform limit rather than a `vk` gap —
+there is nothing for `vk` to read.
 
 ### 1. Flutter emits no semantics tree at all unless you ask for it
 
@@ -463,3 +464,66 @@ Two different causes:
 So assert that the scale **grew and was restored**, not that it equals a literal —
 `tests/e2e/flutter-app.test.ts` does exactly that. The value is still worth showing on
 `@vk_device`: it is what the layout actually gets, which is the thing that overflows.
+
+### 17. The companion serves a stale window when another package draws over the app
+
+> Tracked in [#79](https://github.com/ddikman/verikun/issues/79).
+
+`@vk_permission` exists to measure this. On the Pixel 3a, with the microphone
+dialog up and `com.google.android.permissioncontroller` owning the focused window:
+
+```
+$ vk ui                          # companion on
+[3] View   @vk_perm_status  desc="Status: mic: requesting" (540,306)
+[5] Button @vk_perm_mic     desc="Request microphone"      (540,556) tap
+                                 <- the app's own window. Exit 0.
+
+$ VERIKUN_COMPANION=0 vk ui      # stock dump, same moment
+[5] TextView "Allow testapp to record audio?" @permission_message                     (540,940)
+[6] Button   "While using the app" @permission_allow_foreground_only_button (540,1126) tap
+[8] Button   "Don't allow"         @permission_deny_button                  (540,1440) tap
+```
+
+**Exit 0, no error, no warning.** That is what makes this the worst shape it could
+have taken: every fallback the companion has is triggered by a *failure*, and there
+is none here. A plan that branches on a button inside that dialog can never match,
+so the loop re-taps the app's own gate until its budget runs out.
+
+Measured on a **Pixel 3a (Android 12)**, 11/11 blind reads across two conditions:
+
+| Cell | What was on screen | Companion | Stock |
+|---|---|---|---|
+| E1 ×5 | mic dialog, straight after `launch --clear` | 0 nodes | 5 nodes |
+| E2 ×5 | camera dialog, no force-stop for minutes | 0 nodes | 5 nodes |
+| E3 ×20 | no dialog, read immediately after `launch` | `NoWindowError` — **correct** | — |
+
+E2 and E3 are what make this diagnosable. The issue proposed two explanations — blind
+to the permission window, or briefly wedged after a force-stop — and they had never
+been separated. **E2 fails with no force-stop anywhere near it**, so the window is the
+cause. **E3 never reproduced a wedge at all**: at the instant the companion reports no
+window, `dumpsys` says `mCurrentFocus=null`, so the report is true. The stock path
+appears to "succeed" there only because it takes ~2.4s, by which time the app has drawn.
+
+**The cause is the held connection, and a recycle is the cure.** Asking the companion
+to `release` and then `acquire` — the connection alone, with no stock dump involved —
+takes the same read from 0 nodes to 5:
+
+```
+companion state: verikun-companion 1 ready app held
+BEFORE recycle — dialog nodes seen: 0
+release: released      acquire: acquired
+AFTER  recycle — dialog nodes seen: 5
+```
+
+So a `UiAutomation` connection held across the window change keeps serving the window
+it was holding. `Companion.recycleConnection()` already exists for the null-root case
+and costs ~1.05s, against ~2.4s to fall back to the stock path.
+
+**It did not reproduce on the Pixel 6 emulator (Android 14)** — 7/7 reads saw the
+dialog with the companion on. With only one device per version attached, *version* and
+*physical-vs-virtual* cannot be separated here; the companion's own calibration
+boundary is at this same Android 12→14 split, which is suggestive but not evidence.
+
+The practical consequence is the one the issue names, and it is worse than it looks: a
+suite of such flows can be green on CI purely because the runner is an emulator that
+does not have the bug, and hang on the physical device it was written for.

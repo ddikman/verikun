@@ -4,6 +4,7 @@ import '../widgets.dart';
 import 'async_screen.dart';
 import 'device_screen.dart';
 import 'login_screen.dart';
+import 'permission_screen.dart';
 import 'scroll_screen.dart';
 import 'state_screen.dart';
 
@@ -55,6 +56,12 @@ class HomeScreen extends StatelessWidget {
             title: 'Device state',
             subtitle: 'dark mode, text scale, orientation',
             route: DeviceScreen.route,
+          ),
+          VkNavTile(
+            id: 'vk_nav_permission',
+            title: 'Permissions',
+            subtitle: 'a system dialog owned by another package',
+            route: PermissionScreen.route,
           ),
         ],
       ),

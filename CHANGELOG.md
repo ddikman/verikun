@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **The Flutter fixture raises a real system permission dialog** (`@vk_permission`, Android
+  only), so [#79] reproduces on demand; its e2e case stays red on an affected device until
+  the fix lands.
+
+[#79]: https://github.com/ddikman/verikun/issues/79
+
 ## [0.22.0] - 2026-08-15
 
 ### Added

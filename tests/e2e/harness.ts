@@ -69,12 +69,19 @@ function platformArgs(): string[] {
  * `dist/bin/verikun.js` rather than the TypeScript so what is exercised is
  * exactly what a user runs.
  */
-export function vk(args: string[], opts: { timeoutMs?: number; record?: boolean } = {}): VkResult {
+export function vk(
+  args: string[],
+  opts: { timeoutMs?: number; record?: boolean; noCompanion?: boolean } = {},
+): VkResult {
   const env = { ...process.env };
   // Recording is its own case; by default keep the suite from filling
   // ./.verikun/run with hundreds of steps.
   if (opts.record) delete env.VERIKUN_NO_RUN;
   else env.VERIKUN_NO_RUN = '1';
+  // Forces the stock `uiautomator dump` for this one call. Only the permission-dialog
+  // cases use it, and there it is the CONTROL: it establishes that a window really is
+  // on screen, independently of whichever read path the companion happens to take.
+  if (opts.noCompanion) env.VERIKUN_COMPANION = '0';
 
   const r = spawnSync(process.execPath, [BIN, ...args, ...platformArgs()], {
     encoding: 'utf8',
@@ -153,8 +160,15 @@ export function unavailable(): string | null {
  * on cold start, and a dump issued before first paint returns the PREVIOUS app's
  * hierarchy rather than an error. That cost an hour of confusion once already.
  */
-export function openScreen(screen: 'login' | 'async' | 'scroll' | 'state' | 'device'): void {
-  const launched = vk(['launch', APP_ID]);
+export function openScreen(
+  screen: 'login' | 'async' | 'scroll' | 'state' | 'device' | 'permission',
+  opts: { clear?: boolean } = {},
+): void {
+  // `--clear` resets RUNTIME PERMISSION GRANTS along with the app data, which is the
+  // only reason it is here: the permission cases need a guaranteed-revoked start, or
+  // the dialog never appears and they pass without testing anything. It also resets
+  // Android's "denied twice" counter, so those cases stay repeatable.
+  const launched = vk(opts.clear ? ['launch', APP_ID, '--clear'] : ['launch', APP_ID]);
   if (launched.code !== 0) throw new Error(`launch failed: ${launched.stderr}`);
 
   const home = vk(['assert', '@vk_home', '--wait', '20s']);
