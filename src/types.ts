@@ -2,6 +2,7 @@
 // the selector / formatting / command layers are fully platform-agnostic — each
 // Driver is responsible only for producing Element[] from its native source.
 
+import type { ClaimSummary } from './device/claims';
 import type { SettingKey } from './device/settings';
 import type { RawImage } from './image';
 
@@ -75,6 +76,12 @@ export interface DeviceInfo {
   platform: Platform;
   /** Optional caveat shown in `vk devices` output, e.g. for partially-supported devices. */
   note?: string;
+  /**
+   * Which job is currently driving this device, when one is. Filled in by `cmdDevices`
+   * from the host-global claim store — never by a driver, which knows what is attached
+   * but nothing about who else is using it.
+   */
+  claim?: ClaimSummary;
 }
 
 /**

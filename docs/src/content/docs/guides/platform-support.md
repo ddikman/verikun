@@ -83,6 +83,7 @@ column. The three that bite in practice:
 <tr><td><code>device get</code></td><td>✅</td><td>✅</td><td>⚠️ two of five</td><td>⊘ <code>n/a</code> for every key</td></tr>
 <tr><td><code>device reset</code></td><td>✅</td><td>✅</td><td>⚠️ restores what it could read</td><td>⊘ nothing was captured</td></tr>
 <tr><td><code>device caps</code></td><td>✅</td><td>✅</td><td>✅</td><td>⚠️ reports the simulator table</td></tr>
+<tr><td><code>device release</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><th colspan="5">Run a test</th></tr>
 <tr><td><code>batch</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>ai</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
@@ -211,9 +212,15 @@ first tap rather than half-way through a half-modified device.
 <tr><td>Password redaction</td><td>✅</td><td>✅</td><td>❌ flag never set</td><td>❌ flag never set</td></tr>
 <tr><td>Failure screenshot + hierarchy</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td>Failure screenshot over <code>--server</code></td><td>❌ hierarchy only</td><td>❌ hierarchy only</td><td>❌ hierarchy only</td><td>❌ hierarchy only</td></tr>
+<tr><td>Device claims (auto-pick a free device)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 </tbody>
 </table>
 
+- **Device claims are host-side, so they behave identically everywhere.** They coordinate
+  which *job* drives which device, and never touch the device itself — the four ✅ above are
+  literal, not approximate. The one asymmetry is remote: over `--server` the claim is held by
+  the server process on the host where the devices are. See
+  [Device claims](/verikun/reference/device-claims/).
 - **`offscreen` is mostly an iOS signal.** Android's dumper drops nodes it considers invisible
   and clips the rest to the display, so a fully off-screen element is usually not in the tree
   at all. Do not write an Android test that expects `offscreen` to fire — its real failure

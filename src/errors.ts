@@ -2,8 +2,8 @@
 // stable, agent-readable exit statuses:
 //   0  success / found / assertion passed
 //   1  not found / assertion failed / wait timeout
-//   2  usage error or ambiguous selector (caller must refine)
-//   3  environment error (adb/simctl missing, no/multiple devices, dump failed)
+//   2  usage error, ambiguous selector, or a device another job is driving (caller must refine)
+//   3  environment error (adb/simctl missing, no usable device, dump failed)
 
 import type { Element, ToolProbe } from './types';
 

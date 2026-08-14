@@ -59,6 +59,7 @@ export default defineConfig({
             { label: 'Environment variables', slug: 'reference/environment-variables' },
             { label: 'Reports & test runs', slug: 'reference/reports-and-test-runs' },
             { label: 'Device state', slug: 'reference/device-state' },
+            { label: 'Device claims', slug: 'reference/device-claims' },
             { label: 'Screenshots', slug: 'reference/screenshots' },
             { label: 'AI plans & models', slug: 'reference/ai-plans' },
           ],

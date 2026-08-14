@@ -33,6 +33,7 @@ import { Flags, flagStr, flagBool, flagNum } from './args';
 import { CliError } from './errors';
 import { getDriver } from './drivers';
 import { releaseCompanionOn } from './companion/manager';
+import { setProcessScoped } from './device/claims';
 import { err, setOutputQuiet } from './output';
 import { Driver, HierarchySource, Platform } from './types';
 import { FlagSpec, InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
@@ -398,6 +399,9 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
   // toolchain can't drive it — before binding a port. preflight() covers resolving the
   // device AND the tools; without it the server happily listens on a box with no idb
   // and then 500s every /v1/exec.
+  // The server owns its device for as long as it listens, so its pid is exact liveness
+  // evidence — set before resolving, since that is where the claim is taken.
+  setProcessScoped(true);
   const driver = getDriver(platform, device);
   driver.preflight();
   const serial = driver.resolvedSerial();

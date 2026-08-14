@@ -104,6 +104,53 @@ from a shell deliberately stays applied.
 **Known gap:** under `--server` the snapshot is written by the *server* process, so a crashed
 client leaves overrides applied.
 
+## Device claims: acquire exclusively, prove liveness
+
+The claim store (`src/device/claims.ts`) answers "which attached device is another job
+already driving". Four properties are load-bearing; user-facing behaviour is
+[Device claims](/verikun/reference/device-claims/).
+
+**Host-global, one file per device.** `~/.verikun/devices/<serial>.json`, not `./.verikun/`:
+run state describes a working directory, but a device is a fact about the machine, and the
+jobs that collide are in different directories by definition. One file *per device* rather
+than one index, because the premise is concurrent writers — separate files make every write
+atomic with no read-modify-write race.
+
+**Acquisition is an exclusive create, and `ok` means a create actually succeeded.** Publish
+first, judge second: write-then-`link()` (not `writeFileSync(…, {flag:'wx'})`, which creates
+the file empty and fills it a moment later, so a racer reading the gap sees a corrupt claim
+and takes the device too). Success is never returned on the strength of a decision that
+could have gone stale before the write — that is exactly how two jobs end up on one device.
+
+**Replacing a *dead* claim is serialized by a token**, because POSIX has no "remove this file
+only if it is still the one I read". Unlink-then-create is unsound: between reading "dead"
+and unlinking, another taker can publish, and the unlink then deletes a *live* claim.
+Measured — 16 racers over one dead claim produced two winners. So a taker first wins
+`<claim>.takeover` by exclusive create; only the holder writes the claim path, and it
+re-reads *inside* the token before replacing. The token is held across three syscalls and no
+I/O, so its liveness is the owning PID alone — a dead claim is the routine steady state,
+whereas a stranded token needs a crash inside a microsecond window.
+
+**Liveness combines a live pid with an idle TTL**, because a heartbeat can only fire
+*between* commands. A live pid always means live — a ten-minute `install` or a `wait
+--timeout 600000` has no chance to report that it is working, so the pid **extends**
+liveness and never shortens it. The one exception is `processScoped` owners
+(`ai`/`suite`/`batch`/`server`), which are a single process for the entire job: there a dead
+pid also means *done*, which is what returns a device the instant a `kill -9` lands instead
+of parking it until a timer expires. A one-off `vk tap` exits after every command while the
+job carries on, so it can only fall back to the TTL. `setProcessScoped()` is the latch that
+distinguishes them, shaped like `setOutputQuiet()` and for the same reason — the claim is
+acquired lazily inside `Driver.resolvedSerial()`, long after dispatch.
+
+**Reads are tolerant; the store may never be a new way to fail.** A corrupt claim reads as
+unclaimed, an unwritable store logs and continues unclaimed. Ownership matches on session
+**or** cwd — forgiving in the only safe direction, since the one unsafe error is falsely
+accusing your own job.
+
+`VERIKUN_NO_CLAIM=1` disables reads and writes and restores the pre-claims behaviour exactly,
+including the old exit-2-on-multiple-devices. Preserve that equivalence: it is what makes the
+mechanism debuggable by bisection.
+
 ## The plan cache fingerprint
 
 Each cache entry records a **compiler fingerprint** = verikun's version + `GRAMMAR` +

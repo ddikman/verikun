@@ -13,9 +13,12 @@ sidebar:
 | `ANDROID_SERIAL` | — | Fallback device serial, **Android only**, checked after `VERIKUN_DEVICE` |
 | `ADB` | `adb` | Path to the `adb` binary |
 | `IDB` | `idb` | Path to the `idb` binary — useful when it lives in a Python virtualenv |
+| `VERIKUN_NO_CLAIM` | unset | Set to `1` to disable [device claims](/verikun/reference/device-claims/) entirely — no reads, no writes. Restores the older behaviour: more than one attached device exits `2` rather than picking a free one. |
+| `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. |
 
-Resolution order for the device is `--device` → `VERIKUN_DEVICE` → `ANDROID_SERIAL`. One
-attached device auto-resolves; more than one exits `3` rather than guessing.
+Resolution order for the device is `--device` → `VERIKUN_DEVICE` → `ANDROID_SERIAL`. With
+none of those set, verikun picks a device no other job is driving; exit `2` is reserved for
+when every attached device is already claimed.
 
 ## Model providers
 

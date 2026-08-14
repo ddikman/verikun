@@ -13,7 +13,7 @@ parsing prose, so they are stable and deliberate.
 | `0` | success / found / assertion passed |
 | `1` | not found / assertion failed / wait timeout |
 | `2` | usage error, or **ambiguous selector** (the caller must refine) |
-| `3` | environment error — `adb`/`idb`/`simctl` missing, no or multiple devices, dump failed |
+| `3` | environment error — `adb`/`idb`/`simctl` missing, no usable device, dump failed |
 
 **stdout is data; stderr is diagnostics.** Healed-match notes, "tapped …" confirmations and
 warnings all go to stderr so stdout stays parseable.
@@ -45,12 +45,15 @@ prints an out-of-date CLI or plugin, and the command that fixes it, then still e
 | Ambiguous selector with no `--index` | `2` |
 | Bad flag value, malformed `key=value`, unknown device-setting key | `2` |
 | `airplane=on` refused over wireless adb | `2` |
+| Every attached device is claimed by another job | `2` |
+| A `--device` another job is driving | `2` |
+| Several devices attached, none free, with `VERIKUN_NO_CLAIM=1` | `2` |
 | Selector not found after the wait window | `1` |
 | `assert` predicate false | `1` |
 | `wait` timed out | `1` |
 | Element has no reachable on-screen pixel | `1` |
 | `run archive` where the run contained failures | `1` |
-| Tool missing, no or multiple devices, dump/screencap failed | `3` |
+| Tool missing, no usable device, dump/screencap failed | `3` |
 | Unsupported device setting for the platform | `3` |
 | State modifier the platform cannot report (`--selected`/`--focused` on iOS) | `3` |
 | iOS `clear` (no per-app data reset exists) | `3` |

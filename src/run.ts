@@ -608,6 +608,15 @@ export class Recorder {
   // The device may be unreachable (that may be why we failed) — swallow errors.
   private capture(driver?: Driver, quiet = false): void {
     if (!driver) return;
+    // No device, no evidence. When resolution itself is what failed — nothing attached,
+    // or another job holds every device — there is no screen to photograph, and both
+    // attempts below would re-raise that same error and print it again. Staying silent
+    // here is what keeps ONE failure reading as one message instead of three.
+    try {
+      driver.resolvedSerial();
+    } catch {
+      return;
+    }
     try {
       // Full resolution on purpose — a human reads this in the report — but via the
       // raw path, which reaches the same PNG without the device-side encode.

@@ -57,6 +57,61 @@ test('beginEphemeralStep: artifacts (screenshots) land in the sink, not on disk'
   assert.ok(!existsSync(join(dir, '.verikun')));
 });
 
+// --- failure evidence needs a device ----------------------------------------
+
+/** A driver that cannot resolve a device, counting what evidence capture asked it for. */
+function unresolvableDriver() {
+  const calls = { screenshot: 0, elements: 0 };
+  const driver = {
+    platform: 'android' as const,
+    resolvedSerial(): string {
+      throw new Error('Every attached device is in use:\n  emulator-5554  workspace \'other\' · 2s ago');
+    },
+    screenshot(): Buffer {
+      calls.screenshot++;
+      throw new Error('same refusal again');
+    },
+    getElements() {
+      calls.elements++;
+      throw new Error('same refusal again');
+    },
+  };
+  return { driver, calls };
+}
+
+test('failure evidence is skipped when no device could be resolved — one failure, one message', () => {
+  // Without this guard, a step that failed BECAUSE it never got a device made the
+  // screenshot and hierarchy attempts re-raise the identical error, so a single
+  // refusal printed three times and buried the actual message.
+  const { driver, calls } = unresolvableDriver();
+  const rec = Recorder.beginEphemeralStep('tap', ['@login'], {}, 'android');
+  rec.finishError(Object.assign(new Error('device is in use'), { exitCode: 2 }) as Error, driver as never);
+
+  const { step } = rec.takeEphemeral();
+  assert.equal(step.status, 'error');
+  assert.equal(step.failImage, undefined);
+  assert.equal(step.failHierarchy, undefined);
+  assert.equal(calls.screenshot, 0, 'must not photograph a screen it has no device for');
+  assert.equal(calls.elements, 0, 'must not dump a hierarchy it has no device for');
+});
+
+test('failure evidence is still captured when the device resolves fine', () => {
+  const rec = Recorder.beginEphemeralStep('assert', ['@gone'], {}, 'android');
+  let asked = 0;
+  const driver = {
+    platform: 'android' as const,
+    resolvedSerial: () => 'SERIAL1',
+    getElements: () => ((asked++), [makeEl({ id: 'gone', text: 'still here' })]),
+    screenshot(): Buffer {
+      throw new Error('no screenshot in this fake');
+    },
+  };
+  rec.finishError(Object.assign(new Error('nope'), { exitCode: 1 }) as Error, driver as never);
+  const { step } = rec.takeEphemeral();
+  assert.equal(asked, 1);
+  assert.ok(step.failHierarchy, 'a resolvable device still yields evidence');
+});
+
 test('beginEphemeralStep: a thrown failure is captured as a failed step', () => {
   const rec = Recorder.beginEphemeralStep('assert', ['@gone'], {}, 'android');
   rec.finishError(Object.assign(new Error('nope'), { exitCode: 1 }) as Error);
