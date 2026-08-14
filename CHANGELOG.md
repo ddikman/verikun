@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Changelog entries are now one line each**, per the new `changelog-entry` skill — root cause,
+  benchmarks and rationale move to the PR body and `docs/`.
+
 ## [0.21.1] - 2026-08-13
 
 ### Fixed

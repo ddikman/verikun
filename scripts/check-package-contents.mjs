@@ -81,7 +81,13 @@ const forbidden = [
     label: 'environment / secret files',
     match: (p) => /(^|\/)\.env/.test(p) || /\.(pem|key|p12|keystore|jks)$/.test(p),
   },
-  { label: 'the contributor-only create-pr skill', match: (p) => p.includes('create-pr') },
+  // Contributor-only skills (`metadata.internal: true`) — repo process, useless to an end user.
+  // Named individually rather than derived, because this script reads the packed tarball and not
+  // the working tree; add a line here when you add such a skill.
+  {
+    label: 'a contributor-only skill (create-pr / changelog-entry)',
+    match: (p) => p.includes('create-pr') || p.includes('changelog-entry'),
+  },
   // Only the built jar ships. The Java, the build script and the READMEs are repo
   // infrastructure like example/flutter-app/ — a bare `tools` entry in "files" would sweep
   // them in, which is the same mistake `example/*.md` exists to prevent.
