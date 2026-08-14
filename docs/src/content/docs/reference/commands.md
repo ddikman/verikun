@@ -83,6 +83,7 @@ Change the *device* the app runs on, then put it back. Full detail:
 | `device get [key] [--json]` <br/>*alias:* `device status` | Current values; `n/a` where the platform cannot answer. |
 | `device reset [key …]` | Restore what this run changed. `batch`, `ai` and `suite` also do this automatically when the flow ends **or fails**. |
 | `device caps [--json]` | What the active platform supports, and the manual equivalent where it does not. |
+| `device release [serial] [--json]` | Hand a claimed device back to the pool. Claims expire on their own; this is for when you do not want to wait. Releases another job's claim too. See [Device claims](/verikun/reference/device-claims/). |
 
 ## Batch
 
@@ -126,7 +127,7 @@ apply** — client flags cannot repoint them.
 
 | Command | Description |
 |---|---|
-| `devices [--json]` | List attached devices and simulators. Probes both backends. |
+| `devices [--json]` | List attached devices and simulators. Probes both backends. A `USED BY` column appears when another job holds one — see [Device claims](/verikun/reference/device-claims/). |
 | `doctor [--fix]` | Diagnose adb + device, and report the CLI/plugin versions. `--fix` sets the three animation scales to `0` for deterministic UI. `--ios` checks the idb toolchain. Version staleness is reported as a **warning** and does not affect the exit code — only a genuinely unusable setup gives `3`. |
 | `companion <status\|stop> [--json]` | Inspect or stop the on-device hierarchy reader (Android only). `stop` hands back the device's single `UiAutomation` connection so Appium or Layout Inspector can use it. See [Companion](/verikun/guides/companion/). |
 

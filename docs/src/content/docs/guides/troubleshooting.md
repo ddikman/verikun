@@ -15,7 +15,7 @@ you have before you read a single line of output.
 | `0` | Success | — |
 | `1` | Not found · assertion failed · wait timeout | **The app** — a regression, or the test is wrong |
 | `2` | Usage error, or **ambiguous selector** | **The test** — refine the selector or fix the arguments |
-| `3` | Environment — tool missing, no or multiple devices, dump failed | **The machine** — nothing to do with your app |
+| `3` | Environment — tool missing, no usable device, dump failed | **The machine** — nothing to do with your app |
 
 The `1`-vs-`3` split is the one that matters at 3am. `1` is a regression to investigate; `3`
 is a box to fix. Full detail: [Exit codes](/verikun/reference/exit-codes/).
@@ -207,14 +207,28 @@ re-inspecting.
 
 ## Device and environment
 
-### "no device" or "multiple devices" — exit 3
+### "no device" — exit 3
 
-One device auto-resolves. More than one and verikun refuses to guess:
+Nothing usable is attached, or what is attached is `offline`/`unauthorized`:
 
 ```sh
-vk devices                          # see what is attached
-vk tap @x --device emulator-5554    # or export VERIKUN_DEVICE=emulator-5554
+vk devices     # see what is attached, and its state
+vk doctor      # and whether the toolchain can drive it
 ```
+
+### "is in use by …" or "every attached device is in use" — exit 2
+
+Another job holds the device. verikun picks a free one by itself when you do not name one, so
+this means everything is genuinely busy — or you asked for a specific busy device:
+
+```sh
+vk devices                                 # who holds what, and for how long
+vk device release emulator-5554            # if that job is gone
+VERIKUN_NO_CLAIM=1 vk tap @x               # or opt out of coordination entirely
+```
+
+A claim from a crashed job clears on its own. Full detail:
+[Device claims](/verikun/reference/device-claims/).
 
 ### The emulator's display went to sleep
 

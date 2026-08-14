@@ -16,12 +16,20 @@ sidebar:
 
 ## Device resolution
 
-One attached device auto-resolves. More than one and verikun **refuses to guess** — it exits
-`3` rather than picking. Resolution order:
+Resolution order:
 
 1. `--device` / `-d`
 2. `VERIKUN_DEVICE`
 3. `ANDROID_SERIAL` (Android only)
+
+With none of those set, verikun picks a device **no other job is currently driving** and says
+which on stderr. Exit `2` is reserved for the case where every attached device is already
+claimed, and the message names each holder. See
+[Device claims](/verikun/reference/device-claims/).
+
+Naming a device another job holds is **refused** (exit `2`) rather than silently shared.
+`VERIKUN_NO_CLAIM=1` opts out of the whole mechanism, which restores the older behaviour:
+one attached device auto-resolves and more than one exits `2` rather than guessing.
 
 ## `--json` covers errors too
 

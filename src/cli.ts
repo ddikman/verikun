@@ -16,6 +16,15 @@ import {
   parseDeviceAssignments,
 } from './device/settings';
 import {
+  claimsEnabled,
+  describeClaim,
+  releaseClaim,
+  releaseOwnClaims,
+  setProcessScoped,
+  summarize,
+  touchClaim,
+} from './device/claims';
+import {
   parseSelector,
   matchElements,
   resolveOne,
@@ -440,6 +449,15 @@ function cmdDevices(ctx: Ctx): number {
     err(`devices: iOS backend unavailable (${(e as Error).message})`);
   }
 
+  // Who is driving what. Read-only: listing the pool must never claim a device, which is
+  // what makes `vk devices` (and `vk doctor`) safe to run while surveying a busy host.
+  if (claimsEnabled()) {
+    for (const d of allDevices) {
+      const claim = summarize(d.serial);
+      if (claim) d.claim = claim;
+    }
+  }
+
   if (flagBool(ctx.flags, 'json')) {
     json(allDevices);
     return 0;
@@ -467,6 +485,10 @@ export function formatDeviceTable(devices: DeviceInfo[]): string[] {
     { header: 'STATE', get: (d) => d.state },
     { header: 'MODEL', get: (d) => d.model ?? '', optional: true },
     { header: 'PRODUCT', get: (d) => d.product ?? '', optional: true },
+    // Optional like the rest, which is load-bearing twice over: nothing changes for a
+    // single-user host where no device is ever claimed, and `VERIKUN_NO_CLAIM=1` renders
+    // exactly the table it always did.
+    { header: 'USED BY', get: (d) => d.claim?.by ?? '', optional: true },
     { header: 'NOTE', get: (d) => d.note ?? '', optional: true },
   ];
   // Drop optional columns that no device populates (e.g. NOTE for an Android-only list).
@@ -529,18 +551,39 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
 
   const devices = ctx.driver.listDevices();
   const usable = devices.filter((d) => d.state === 'device');
+  const claims = claimsEnabled();
+  // Read-only, like `vk devices`: doctor surveys the host, it never takes a device.
+  const heldByOther = (serial: string) => {
+    const c = claims ? summarize(serial) : undefined;
+    return c && !c.mine ? c : undefined;
+  };
   out(`devices: ${devices.length} attached, ${usable.length} usable`);
-  for (const d of devices) out(`  ${d.serial} ${d.state}${d.model ? ` (${d.model})` : ''}`);
+  for (const d of devices) {
+    const claim = claims ? summarize(d.serial) : undefined;
+    out(`  ${d.serial} ${d.state}${d.model ? ` (${d.model})` : ''}${claim ? `  [${claim.by}]` : ''}`);
+  }
 
   let ok = true;
-  if (usable.length !== 1 && !ctx.device) {
-    err(usable.length ? '  -> multiple devices: pass --device for interaction commands' : '  -> no usable device');
+  const free = usable.filter((d) => !heldByOther(d.serial));
+  if (!usable.length) {
+    err('  -> no usable device');
+    ok = false;
+  } else if (!ctx.device && !free.length) {
+    // Every device is busy. Advisory-shaped but genuinely blocking, so it still fails:
+    // an interaction command run right now would exit 2, and doctor exists to say so first.
+    err('  -> every attached device is claimed by another job — `verikun devices` shows who');
+    ok = false;
+  } else if (!ctx.device && !claims && usable.length > 1) {
+    err('  -> multiple devices: pass --device for interaction commands');
     ok = false;
   }
 
-  if (usable.length === 1 || ctx.device) {
+  // Check the device an interaction command would actually land on: the one named, else
+  // the first FREE one (which is what auto-selection picks), not merely the first attached.
+  const target = ctx.device || free[0]?.serial;
+  if (target) {
     try {
-      const serial = ctx.device || usable[0].serial;
+      const serial = target;
       const keys = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'];
       const get = (k: string) => runText(adb, ['-s', serial, 'shell', 'settings', 'get', 'global', k]).stdout.trim();
       const vals = keys.map(get);
@@ -1032,7 +1075,7 @@ function cmdClear(ctx: Ctx): number {
 //    `device reset` can undo it even from a later process.
 
 const DEVICE_USAGE =
-  'Usage: verikun device set <key>=<value> [<key>=<value> ...] | device get [key] | device reset [key ...] | device caps\n' +
+  'Usage: verikun device set <key>=<value> [<key>=<value> ...] | device get [key] | device reset [key ...] | device caps | device release [serial]\n' +
   `Keys: ${SETTING_KEYS.join(', ')}`;
 
 function cmdDevice(ctx: Ctx): number {
@@ -1048,12 +1091,44 @@ function cmdDevice(ctx: Ctx): number {
       return deviceReset(ctx, rest);
     case 'caps':
       return deviceCaps(ctx);
+    case 'release':
+      return deviceRelease(ctx, rest);
     default:
       throw new CliError(
         (sub ? `Unknown 'device' subcommand '${sub}'.\n` : '') + DEVICE_USAGE,
         2,
       );
   }
+}
+
+/**
+ * Hand a device back to the pool. The break-glass named in every "in use by" refusal:
+ * a crashed job's claim expires on its own, but waiting out the TTL is the one thing an
+ * operator should never be forced to do just to get on with their run.
+ *
+ * Deliberately releases someone ELSE's claim too, naming them — you had to type the
+ * serial, and refusing here would leave no way to recover a stuck device at all. Resolves
+ * the device WITHOUT going through the driver, so it works even when the claim being
+ * cleared is the very thing that would refuse the resolve.
+ */
+function deviceRelease(ctx: Ctx, args: string[]): number {
+  const serial = args[0] || ctx.device;
+  if (!serial) {
+    throw new CliError('Usage: verikun device release <serial>  (or pass --device / set VERIKUN_DEVICE)', 2);
+  }
+  if (!claimsEnabled()) {
+    err('device claims are disabled (VERIKUN_NO_CLAIM) — nothing to release');
+    return 0;
+  }
+  const released = releaseClaim(serial);
+  if (flagBool(ctx.flags, 'json')) {
+    json({ serial, released: !!released, ...(released ? { was: released } : {}) });
+  } else if (released) {
+    out(`released ${serial} (was held by ${describeClaim(released)})`);
+  } else {
+    out(`${serial} was not claimed`);
+  }
+  return 0;
 }
 
 /** Render a setting value for humans/JSON; a platform that cannot answer says so. */
@@ -1255,6 +1330,9 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
     case 'stop':
     case 'discard': {
       const cleared = Recorder.clear();
+      // The run is over, so the device goes back to the pool now rather than in TTL
+      // minutes. `mineOnly` because a run can only ever hand back its own device.
+      if (cleared?.device) releaseClaim(cleared.device, { mineOnly: true });
       if (asJson) json({ cleared: cleared?.id ?? null });
       else out(cleared ? `discarded test run '${cleared.name}' (${cleared.steps.length} step(s))` : 'no active test run');
       return 0;
@@ -1282,6 +1360,8 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
         }
       }
       const { dir, xmlPath, htmlPath, state } = Recorder.archive(positionals[1], { noLogs, fetchLogs });
+      // Archived means finished: release after log capture, which still needs the device.
+      if (state.device) releaseClaim(state.device, { mineOnly: true });
       const { passed, failed } = tally(state.steps);
       if (asJson) {
         json({
@@ -1433,6 +1513,10 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
     return 0;
   }
 
+  // One process drives the whole batch, so its pid is exact evidence that the device is
+  // still in use — a `kill -9` hands it straight back instead of parking it for the TTL.
+  setProcessScoped(true);
+
   // The finally is what makes `device set` safe to use in a batch: a line that fails
   // (or a ^C) still puts the device back, instead of leaving it offline or rotated.
   try {
@@ -1466,6 +1550,7 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
         /* the device may be exactly why we are unwinding — never mask the real error */
       }
     }
+    releaseOwnClaims();
   }
 }
 
@@ -1971,6 +2056,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     throw new CliError('Usage: verikun ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--server url] [--show-plan] [--recompile]', 2);
   }
   const opts = parseAiOptions(flags);
+  setProcessScoped(true); // one process for the whole run — see claims.ts's isLive
 
   // --show-plan: compile (or cache-hit) and print the IR — no device, no backend.
   if (flagBool(flags, 'show-plan')) {
@@ -1992,6 +2078,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     // otherwise an unattended run leaves the phone offline or in dark mode.
     await restoreDeviceOverrides(backend);
     await backend.close?.(); // frees a remote server's device lock for the next command
+    releaseOwnClaims(); // and the host-level claim, so the next job can have the device
   }
 
   if (flagBool(flags, 'json')) {
@@ -2049,6 +2136,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
   const dirArg = positionals[0];
   if (!dirArg) throw new CliError('Usage: verikun suite <dir> [--app <id>] [--server url] [--name n] [--retries n] [--json]', 2);
   const opts = parseAiOptions(flags);
+  setProcessScoped(true); // one process for the whole suite — see claims.ts's isLive
   // Pre-flight the provider BEFORE touching any device/server: every test needs it
   // to compile (on a cache miss) or to repair at runtime.
   if (!providerAvailable(opts.model)) {
@@ -2074,6 +2162,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
   } finally {
     await restoreDeviceOverrides(backend);
     await backend.close?.();
+    releaseOwnClaims();
   }
 }
 
@@ -2228,6 +2317,11 @@ async function executeOutcome(
       } catch {
         /* surfaced by the command handler below */
       }
+      // Keep this job's device claim alive. Deliberately NOT gated on the recorder:
+      // `Recorder.beginStep` returns null under VERIKUN_NO_RUN=1 (which the e2e suite
+      // sets), and hanging the heartbeat off it would silently stop claims from being
+      // refreshed for exactly the runs that exercise them.
+      if (serial) touchClaim(serial, platform);
       recorder = Recorder.beginStep(command, positionals, flags, platform, device, serial, driver);
     }
   } catch (e) {
@@ -2278,6 +2372,9 @@ export async function executeForServer(
   } catch {
     /* surfaced by the command handler below */
   }
+  // A server holds one device for its whole life, but its claim still has to look alive
+  // to everyone else on the host — refresh it per request, the same as a local step.
+  if (serial) touchClaim(serial, platform);
   // Sample the device clock up front so the caller's run can set logStart (the
   // ephemeral recorder never persists RunState). Best-effort — empty/unavailable
   // just means archive / vk log fall back to last-N.
@@ -2414,6 +2511,9 @@ DEVICE STATE (change the device the app runs on, then put it back)
                                       equivalent where it doesn't
                                       Refuses \`airplane=on\` over wireless adb (it would cut
                                       this very connection); --allow-wireless overrides.
+  device release [serial] [--json]    Hand a claimed device back to the pool. Claims
+                                      expire on their own; this is for when you don't
+                                      want to wait. See \`devices\` for who holds what.
 
 BATCH (script many commands in one process)
   batch [--file path] [--quiet]       Run newline-separated commands — from --file,
@@ -2475,7 +2575,8 @@ SERVER (expose a locally-connected device to remote verikun clients)
   VERIKUN_SERVER_AUTH_KEY) to ai/suite/install. The server's device+platform apply.
 
 ENVIRONMENT
-  devices [--json]                    List attached devices/simulators
+  devices [--json]                    List attached devices/simulators, and which job is
+                                      already driving each (USED BY)
   doctor [--fix]                      Diagnose adb/device, and warn if this CLI or the
                                       Claude Code plugin is out of date (a warning only —
                                       it never changes the exit code). --fix disables

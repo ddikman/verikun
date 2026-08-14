@@ -12,6 +12,7 @@ import {
   contentSizeToFontScale,
   fontScaleToContentSize,
 } from '../device/settings';
+import { assertClaimable, claimsEnabled, selectAndClaim } from '../device/claims';
 import { err } from '../output';
 
 // iOS driver. `xcrun simctl` / `devicectl` cover device discovery and — on a
@@ -226,6 +227,7 @@ export class IdbDriver implements Driver {
     const simUdids = new Set(sims.map((d) => d.serial));
 
     if (this.requested) {
+      if (claimsEnabled()) assertClaimable(this.requested, 'ios', () => this.claimCandidates(sims));
       this.cachedSerial = this.requested;
       this.cachedIsSim = simUdids.has(this.requested);
       return this.cachedSerial;
@@ -235,19 +237,38 @@ export class IdbDriver implements Driver {
     // drivable target, so prefer it. Only weigh physical devices when no simulator
     // is booted — and only genuinely "connected" ones (devicectl also lists paired-
     // but-idle devices as "available (paired)", which must not count as active).
-    const bootedSims = sims.filter((d) => d.state === 'booted');
-    const candidates =
-      bootedSims.length > 0 ? bootedSims : listPhysicalDevices().filter((d) => /connected/i.test(d.state));
+    const candidates = this.claimCandidates(sims);
     if (candidates.length === 0) {
       throw new CliError('No booted iOS simulator or connected device. Boot one (Simulator.app / `xcrun simctl boot`), then `verikun devices`.', 3);
     }
-    if (candidates.length > 1) {
-      const list = candidates.map((d) => '  ' + d.serial + (d.model ? ` (${d.model})` : '')).join('\n');
-      throw new CliError(`Multiple iOS targets; pass --device <udid> (or set VERIKUN_DEVICE):\n${list}`, 2);
+    let serial: string;
+    if (!claimsEnabled()) {
+      if (candidates.length > 1) {
+        const list = candidates.map((d) => '  ' + d.serial + (d.model ? ` (${d.model})` : '')).join('\n');
+        throw new CliError(`Multiple iOS targets; pass --device <udid> (or set VERIKUN_DEVICE):\n${list}`, 2);
+      }
+      serial = candidates[0].serial;
+    } else {
+      const picked = selectAndClaim(candidates, 'ios');
+      if (picked.total > 1) {
+        err(`[verikun] auto-selected ${picked.serial} — ${picked.total} available, ${picked.skipped.length} held by another job`);
+      }
+      serial = picked.serial;
     }
-    this.cachedSerial = candidates[0].serial;
-    this.cachedIsSim = simUdids.has(candidates[0].serial);
+    this.cachedSerial = serial;
+    this.cachedIsSim = simUdids.has(serial);
     return this.cachedSerial;
+  }
+
+  /**
+   * The targets auto-resolution will consider, in preference order. A booted simulator is
+   * the first-class, unambiguously drivable target, so prefer it; only weigh physical
+   * devices when no simulator is booted — and only genuinely "connected" ones (devicectl
+   * also lists paired-but-idle devices as "available (paired)", which must not count).
+   */
+  private claimCandidates(sims: DeviceInfo[]): DeviceInfo[] {
+    const bootedSims = sims.filter((d) => d.state === 'booted');
+    return bootedSims.length > 0 ? bootedSims : listPhysicalDevices().filter((d) => /connected/i.test(d.state));
   }
 
   private udid(): string {

@@ -482,7 +482,7 @@ draft-first flow.
 - `0` success / found / assertion passed
 - `1` not found / assertion failed / wait timeout
 - `2` usage error **or ambiguous selector** (refine it or add `--index N`)
-- `3` environment error (no device, adb/idb missing, hierarchy dump failed) — for
+- `3` environment error (no usable device, adb/idb missing, hierarchy dump failed) — for
   `ai`/`suite`/`install`/`server` the toolchain is verified up front, so this arrives
   immediately with an install hint rather than mid-flow
 
@@ -498,7 +498,12 @@ draft-first flow.
 - **`vk device set` from a plain shell stays applied.** Inside `batch`/`ai`/`suite` it is
   restored automatically even if the flow dies, but a one-off `vk device set airplane=on`
   is yours to `vk device reset` — don't strand someone's phone offline.
-- **One device auto-resolves.** Multiple → pass `-d <serial>` or set `VERIKUN_DEVICE`.
+- **The device picks itself, and won't collide with another agent.** With several attached,
+  `vk` takes one no other job is driving and notes it on stderr. Exit `2` means every device
+  is genuinely busy (the message names each holder) — pass `-d <serial>`, wait, or
+  `vk device release <serial>` if that job is gone. `vk devices` shows who holds what.
+  Naming a busy device with `-d` is refused, on purpose: two jobs on one phone corrupt both
+  runs, and it surfaces as a bogus assertion failure. `VERIKUN_NO_CLAIM=1` opts out entirely.
 - **`vk text` opens the keyboard.** Use `--enter` to submit, or `vk back` to
   dismiss it before re-inspecting (it can cover elements).
 - **Unicode/emoji** may not type via `adb input text` (an Android limitation);

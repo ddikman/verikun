@@ -6,9 +6,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-15
+
+### Added
+- **Device claims**: `vk` now picks a device no other job is driving; a busy one is refused
+  with exit `2`. Writes `~/.verikun/devices/`; `VERIKUN_NO_CLAIM=1` opts out. ([#49])
+- **`vk devices`**: a `USED BY` column names the job holding each device; `--json` gains
+  `claim`. ([#49])
+- **`vk device release [serial]`**: hands a device back without waiting for its claim to go
+  stale. ([#49])
+
 ### Changed
+- **Several attached devices no longer exits `2`** — a free one is auto-selected. Pass
+  `--device` to pin it, as before. ([#49])
 - **Changelog entries are now one line each**, per the new `changelog-entry` skill — root cause,
   benchmarks and rationale move to the PR body and `docs/`.
+
+### Fixed
+- **Failure evidence**: a step that could not resolve a device printed its error three times;
+  capture is now skipped when there is no screen to photograph.
+
+[#49]: https://github.com/ddikman/verikun/issues/49
 
 ## [0.21.1] - 2026-08-13
 

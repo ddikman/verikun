@@ -55,8 +55,9 @@ export function labelField(): 'desc' | 'text' {
 function platformArgs(): string[] {
   const args: string[] = [];
   if (PLATFORM === 'ios') args.push('--ios');
-  // A device flag is not optional in practice: vk exits 3 when several devices
-  // are attached and none is named.
+  // Naming the device is what makes a parallel run reproducible: without it vk
+  // auto-selects whichever device no other job has claimed, which is the right
+  // default for a person but not for a suite you want pinned to one phone.
   if (DEVICE) args.push('--device', DEVICE);
   return args;
 }

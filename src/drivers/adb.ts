@@ -12,6 +12,7 @@ import {
   rotationToUserRotation,
   userRotationToRotation,
 } from '../device/settings';
+import { assertClaimable, claimsEnabled, selectAndClaim } from '../device/claims';
 import { err } from '../output';
 
 const ADB = process.env.ADB || 'adb';
@@ -225,9 +226,35 @@ export class AdbDriver implements Driver {
   resolvedSerial(): string {
     if (this.cachedSerial) return this.cachedSerial;
     if (this.requested) {
+      // An explicit --device is trusted verbatim and costs no `adb devices` round trip —
+      // so the claim check here is one small file read, and the list of free alternatives
+      // for the refusal message is only paid for if we are actually going to refuse.
+      if (claimsEnabled()) assertClaimable(this.requested, 'android', () => this.usableDevices());
       this.cachedSerial = this.requested;
       return this.cachedSerial;
     }
+    const usable = this.usableDevices();
+    if (!claimsEnabled()) {
+      if (usable.length > 1) {
+        const list = usable.map((d) => '  ' + d.serial + (d.model ? ` (${d.model})` : '')).join('\n');
+        throw new CliError(`Multiple devices connected; pass --device <serial> (or set VERIKUN_DEVICE):\n${list}`, 2);
+      }
+      this.cachedSerial = usable[0].serial;
+      return this.cachedSerial;
+    }
+    // Claims turn "ambiguous, you decide" into "one is free, take it" — and a single
+    // attached device still goes through here, because "someone else is on the only
+    // phone" is exactly where being told beats finding out twenty minutes later.
+    const picked = selectAndClaim(usable, 'android');
+    if (picked.total > 1) {
+      err(`[verikun] auto-selected ${picked.serial} — ${picked.total} attached, ${picked.skipped.length} held by another job`);
+    }
+    this.cachedSerial = picked.serial;
+    return this.cachedSerial;
+  }
+
+  /** Attached devices in a drivable state, or the honest exit-3 explanation of why none is. */
+  private usableDevices(): DeviceInfo[] {
     const all = this.listDevices();
     const usable = all.filter((d) => d.state === 'device');
     if (usable.length === 0) {
@@ -237,12 +264,7 @@ export class AdbDriver implements Driver {
       }
       throw new CliError('No Android devices/emulators connected. Start one, then `verikun devices`.', 3);
     }
-    if (usable.length > 1) {
-      const list = usable.map((d) => '  ' + d.serial + (d.model ? ` (${d.model})` : '')).join('\n');
-      throw new CliError(`Multiple devices connected; pass --device <serial> (or set VERIKUN_DEVICE):\n${list}`, 2);
-    }
-    this.cachedSerial = usable[0].serial;
-    return this.cachedSerial;
+    return usable;
   }
 
   private withSerial(args: string[]): string[] {
