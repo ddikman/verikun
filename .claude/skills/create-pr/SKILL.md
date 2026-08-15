@@ -75,7 +75,7 @@ git log origin/main..HEAD --oneline       # commits in scope
 git diff origin/main...HEAD --stat        # files touched + churn (merge-base form)
 ```
 
-If a ticket/issue id is on the branch name or in the conversation, capture it for the "Why" section — and if the conversation describes the problem without naming a number, look it up rather than dropping the link:
+If a ticket/issue id is on the branch name or in the conversation, capture it for the TL;DR's `Resolves` line — and if the conversation describes the problem without naming a number, look it up rather than dropping the link:
 
 ```sh
 gh issue list --state all --search "<a few words from the problem>"
@@ -87,13 +87,14 @@ Draw the *why* (and the rationale for any new default) from the ticket/commits/c
 
 Fill the sections of [`.github/pull_request_template.md`](../../../.github/pull_request_template.md), **deleting any that don't apply**. Keep it short — **length scales with the change**; a one-line fix gets a few lines, not a wall. Rules per section:
 
-- **TL;DR** — one plain, user/system-facing sentence: *what happens* and the resulting behaviour, not internals. No URLs/endpoints, no raw code identifiers, minimal jargon.
-- **What changed?** — the parts a reviewer can't get from the diff: the approach and any tradeoff/decision behind it, **not a file-by-file list**. If the change adds new flags/config/defaults, say they're new and why those defaults were chosen.
-- **Why make this change?** — ≤2 non-technical sentences plus the issue link. The real motivation, not a side-effect; no irrelevant facts. When the PR **resolves** a GitHub issue in this repo, link it here with a [closing keyword](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue) — `Closes #12` (`Fixes` / `Resolves` work too) — so merging closes the issue and the two show as linked instead of someone closing it by hand:
-  - **Repeat the keyword per issue:** `Closes #12, closes #13`. `Closes #12 and #13` closes only #12.
+- **TL;DR** — one plain, user/system-facing sentence: *what happens* and the resulting behaviour, not internals. No URLs/endpoints, no raw code identifiers, minimal jargon. When the PR **resolves** a GitHub issue in this repo, add a [closing keyword](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue) — `Resolves #12` (`Closes` / `Fixes` work too) — so merging closes the issue and the two show as linked instead of someone closing it by hand:
+  - **On its own line under the sentence**, not folded into it — the TL;DR stays one plain sentence, and the link sits where a reviewer sees it first.
+  - **Repeat the keyword per issue:** `Resolves #12, resolves #13`. `Resolves #12 and #13` closes only #12.
   - **Only if this PR actually resolves it.** For partial or adjacent work, reference it *without* a keyword — "Part of #43", "Related to #43" — so merging doesn't close work that isn't done.
-  - The keyword has to be in the **PR description** (this section) to link; the same words in a commit message or a review comment don't.
-  - No issue behind the work? Say so in a clause ("Requested directly — no ticket.") rather than padding it or inventing a number.
+  - The keyword has to be in the **PR description** to link; the same words in a commit message or a review comment don't.
+  - No issue behind the work? Leave the line off and say so in *Why make this change?* ("Requested directly — no ticket.") rather than padding it or inventing a number.
+- **What changed?** — the parts a reviewer can't get from the diff: the approach and any tradeoff/decision behind it, **not a file-by-file list**. If the change adds new flags/config/defaults, say they're new and why those defaults were chosen.
+- **Why make this change?** — ≤2 non-technical sentences: the real motivation, not a side-effect; no irrelevant facts. The issue link itself lives in the TL;DR, so don't repeat it here.
 - **How to test?** — concrete reviewer steps. Skip anything CI already proves (don't write "builds clean" / "units pass"). **Show the result, not just what you ran:** where you can, include a before/after, trimmed command/test output, a screenshot, or a reference — not a bare "tested it".
   - **New tests** — the flows/edge cases now covered in `tests/*.test.ts` (the unit suite covers the platform-agnostic core), **not** a list of files. If none, say why (e.g. "driver/platform method — device-verified only", or "covered by existing `selector.test.ts`").
   - **Manual testing performed** — there is no device CI, so this is the only record of on-device behaviour: who · device or emulator + OS · which `vk` commands · what you confirmed. The connected device may be a personal phone — avoid destructive actions (submitting forms, creating accounts) while exercising it.
@@ -114,13 +115,18 @@ Good — plain intent, behaviour over files, new flags called out:
 > **TL;DR** New `vk log` command pulls the device's logs into the test-run report, scoped to the current run by default.
 > **What changed?** On-demand device-log capture that attaches to the run report. New window flags — `--since` / `-n` / `--full` — default to the current session so logs from before the run are excluded.
 
-Bad — a bare URL links nothing, so the issue stays open after merge:
+Bad — the reference is buried in the "Why", and a bare URL links nothing, so the issue stays open after merge:
 
+> **TL;DR** Taps no longer land on a covered control.
 > **Why make this change?** Fixes the issue. See https://github.com/ddikman/verikun/issues/42
 
-Good — plain motivation, closing keyword:
+Good — keyword on its own line under the TL;DR, motivation left plain:
 
-> **Why make this change?** A tap could land on a different control and still report success, so a green run didn't mean the flow had worked. Closes #42.
+> **TL;DR** A tap aimed at a control something else is painted over now fails instead of reporting success.
+>
+> Resolves #42.
+>
+> **Why make this change?** A tap could land on a different control and still report success, so a green run didn't mean the flow had worked.
 
 ## Step 5 — Create the PR
 
@@ -154,7 +160,7 @@ If it should be a draft but isn't, `gh pr ready <n> --undo`. Leave it as a draft
 ## What to avoid
 
 - Pasting the full diff or narrating it file-by-file — the diff shows the files.
-- URLs or code identifiers in the TL;DR; filler openers ("This PR introduces…", "This pull request…").
+- URLs or code identifiers in the TL;DR *sentence* (the `Resolves #12` line below it is the exception); filler openers ("This PR introduces…", "This pull request…").
 - A side-effect framed as the reason; irrelevant facts.
 - Restating what CI proves ("builds clean", "units pass") — CI runs `npm run build` + `npm run test:ci` on Node 20.x and 22.x.
 - Bumping the version or dating a `CHANGELOG.md` entry for a purely internal change (refactor / CI / tests / docs) — those ship without either.
@@ -164,5 +170,5 @@ If it should be a draft but isn't, `gh pr ready <n> --undo`. Leave it as a draft
 - A "Generated with Claude Code" footer; Slack/internal thread URLs in the body.
 - Publishing (marking ready) unless the user explicitly asked.
 - Inventing ticket ids, or rationale for a default you didn't actually find.
-- Referencing an issue this PR *resolves* with a bare `#42` or a plain URL — neither links it, so it's still open after merge. Use `Closes #42`.
+- Referencing an issue this PR *resolves* with a bare `#42` or a plain URL — neither links it, so it's still open after merge. Use `Resolves #42` on its own line under the TL;DR, not buried in the "Why".
 - The inverse: a closing keyword on an issue this PR only partly addresses — that closes work that isn't done. Say "Part of #43" instead.
