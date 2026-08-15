@@ -14,8 +14,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 - **Hierarchy reads now see a window another app opens on top** — a runtime-permission dialog is
-  no longer invisible ([#79]). Known regression: on Android 14 the companion stops calibrating,
-  so reads fall back to the slow path.
+  no longer invisible to the companion. ([#79])
 
 [#79]: https://github.com/ddikman/verikun/issues/79
 

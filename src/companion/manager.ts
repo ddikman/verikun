@@ -13,6 +13,7 @@ import { runText, sleepSync } from '../exec';
 import { err } from '../output';
 import { NoWindowError } from '../errors';
 import { VERSION } from '../version';
+import { dumpsAgree } from './dump-match';
 import {
   CompanionState,
   DimensionSource,
@@ -490,7 +491,11 @@ export class Companion {
    * shifts every element near the bottom of the screen, and the resulting tap lands
    * somewhere else while still reporting success, which is the worst failure a testing
    * tool has. So do not guess: take one real `uiautomator dump` and adopt whichever
-   * source reproduces it byte for byte.
+   * source reproduces it.
+   *
+   * "Reproduces it" is `dumpsAgree()`, not string equality — see the reasoning there for
+   * why equality rejected a companion that was right, and exactly what the relaxed rule
+   * still guarantees about anything verikun can tap.
    *
    * Costs one stock dump (~2.4s) plus a reconnect (~1.05s), once per companion — not once
    * per process, because the verdict is stored in the companion itself.
@@ -504,7 +509,7 @@ export class Companion {
 
       for (const dims of ['app', 'real'] as DimensionSource[]) {
         const reply = requestSync(this.port, dumpCommand(0, dims));
-        if (isHierarchy(reply) && reply.toString('utf8').trim() === stock) {
+        if (isHierarchy(reply) && dumpsAgree(stock, reply.toString('utf8')).agree) {
           requestSync(this.port, `calibrated ${dims}`, 4000);
           this.writeDeviceNote(dims);
           return dims;
