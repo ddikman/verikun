@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   COMPANION_PROTOCOL,
   dumpCommand,
@@ -184,4 +186,32 @@ test('nullRootAction: never escalates past fallback on a fresh run', () => {
   // A first-ever null root, however long the previous run was, still gets its recycle —
   // `alreadyRecycled` is what gates the escalation, not elapsed time alone.
   assert.equal(nullRootAction(60000, false), 'recycle');
+});
+
+// The two halves of the protocol number live in different languages and are compiled by
+// different toolchains, so nothing else can notice when they drift. This reads the Java as
+// TEXT, the way tests/docs-coverage.test.ts reads cli.ts.
+//
+// It exists because the drift is SILENT and costs the whole point of a release: an upgraded
+// verikun probes the daemon a previous install left running, sees the number it expects,
+// reuses it, and never pushes the new jar. MEASURED on a Pixel 3a before the 1 -> 2 bump —
+// `vk ui` reported 0 nodes of a permission dialog while the stock path read all 5, exit 0
+// and no warning, on a build whose changelog said that was fixed.
+test('COMPANION_PROTOCOL matches PROTOCOL_VERSION in the companion source', () => {
+  // resolve from cwd, not __dirname: the suite runs from .test-build/tests/, as
+  // tests/docs-coverage.test.ts does for the same reason.
+  const javaPath = resolve(
+    process.cwd(),
+    'tools/verikun-companion/src/dev/verikun/companion/CompanionApp.java',
+  );
+  const java = readFileSync(javaPath, 'utf8');
+  const m = /PROTOCOL_VERSION\s*=\s*"([^"]+)"/.exec(java);
+
+  assert.ok(m, 'could not find PROTOCOL_VERSION in CompanionApp.java — did it get renamed?');
+  assert.equal(
+    m![1],
+    COMPANION_PROTOCOL,
+    'the host and the companion disagree on the protocol number: an upgraded verikun would ' +
+      'reuse a stale daemon and never push the new jar',
+  );
 });

@@ -515,6 +515,112 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
     });
   });
 
+  // --- A window this app does not own -------------------------------------
+  //
+  // Issue #79. Everything else in this file reads the fixture's own window; these
+  // two cases are the only ones where the thing on screen belongs to another
+  // package — `com.google.android.permissioncontroller` draws the runtime-permission
+  // dialog, and the app under test owns nothing but the pixels behind it.
+  //
+  // Android-only because the companion is. On iOS `idb` keeps its own process alive
+  // and there is no UiAutomation connection to go stale.
+  describe('a window owned by another package', { skip: !isAndroid }, () => {
+    const CONTROLLER = /permissioncontroller/;
+
+    /**
+     * Which package owns the foreground activity, read from `dumpsys` ONLY.
+     *
+     * Load-bearing that this touches no hierarchy. A stock read calls
+     * `releaseCompanionOn()`, and that release is *itself* the cure for what these
+     * cases measure — waiting for the dialog with `vk ui` would destroy the effect
+     * before the assertion could see it. `vk current` asks the window manager
+     * instead, so it is inert.
+     */
+    const foreground = () => vk(['current']).stdout.trim();
+
+    /** Tap a request button and wait for the system dialog to actually take the
+     *  foreground. Each `vk current` costs a device round-trip, so the loop paces
+     *  itself — no sleep needed. */
+    function raiseDialog(which: 'mic' | 'camera'): void {
+      assert.equal(vk(['tap', `@vk_perm_${which}`, '--wait', '10s']).code, 0);
+      for (let i = 0; i < 30; i++) {
+        if (CONTROLLER.test(foreground())) return;
+      }
+      throw new Error(`the ${which} dialog never took the foreground (current: ${foreground()})`);
+    }
+
+    /** How many of the dialog's own nodes a read can see. Zero means blind.
+     *  `vk ui` captures once and does not auto-wait, so this is a single honest
+     *  snapshot rather than a poll that could paper over the gap. */
+    function dialogNodes(opts: { noCompanion?: boolean } = {}): number {
+      const r = vk(['ui', '--json'], opts);
+      if (r.code !== 0) return 0;
+      return (JSON.parse(r.stdout) as { id?: string }[]).filter((e) => e.id?.includes('permission_')).length;
+    }
+
+    /** A permission dialog is MODAL: a case that dies mid-flow leaves the device
+     *  stuck behind it, and the Android target here may be someone's own phone.
+     *  Denies via the stock path so it works even while the companion is blind. */
+    function dismiss(): void {
+      if (!CONTROLLER.test(foreground())) return;
+      vk(['tap', '@permission_deny_button', '--wait', '5s'], { noCompanion: true });
+    }
+
+    after(dismiss);
+
+    test('the fixture raises a real system dialog, and says that it did', () => {
+      openScreen('permission', { clear: true });
+      // --clear reset the grants, so nothing is held yet.
+      assert.equal(vk(['assert', '@vk_perm_dialog', '--text', 'Dialog shown: no']).code, 0);
+
+      raiseDialog('mic');
+      assert.match(foreground(), CONTROLLER, 'the permission controller should own the foreground');
+
+      // The CONTROL, and the reason the next test can mean anything: prove the
+      // dialog's nodes really are on screen, using the read path that is not under
+      // test. AOSP's own ids, the ones issue #79 quotes.
+      const stock = vk(['ui', '--json'], { noCompanion: true });
+      assert.equal(stock.code, 0, stock.stderr);
+      assert.match(stock.stdout, /permission_allow_foreground_only_button/);
+      assert.match(stock.stdout, /permission_deny_button/);
+
+      dismiss();
+
+      // THE PRECONDITION GUARD. Once the permission is granted, requestPermissions
+      // returns without drawing anything — so a run that never saw a dialog would
+      // otherwise be indistinguishable from one that drove it. That is exactly the
+      // device-state false green issue #79 warns about: a suite green on CI because
+      // that emulator already holds the permission, hanging on a device that does not.
+      assert.equal(vk(['assert', '@vk_perm_dialog', '--text', 'Dialog shown: yes', '--wait', '10s']).code, 0);
+      assert.equal(vk(['assert', '@vk_perm_status', '--text', 'Status: mic: denied']).code, 0);
+    });
+
+    test('the hierarchy read sees a foreign window (issue #79)', () => {
+      openScreen('permission', { clear: true });
+      raiseDialog('mic');
+
+      // FIRST hierarchy read after the dialog appeared — raiseDialog deliberately
+      // used only `vk current` to get here, so nothing has released the companion's
+      // UiAutomation connection in between.
+      const seen = dialogNodes();
+
+      // MEASURED, and it splits by target. On a Pixel 3a (Android 12) this is 0
+      // while the stock path reads all five nodes: a connection held across the
+      // window change keeps serving the app's own window, silently and with exit 0,
+      // so no error exists for any fallback ladder to fire on. On a Pixel 6 emulator
+      // (Android 14) it reads the dialog fine. See "Measured Flutter facts" 17.
+      //
+      // This case is therefore RED on an affected device until the fix lands, and
+      // that is deliberate — it is the regression test for #79, not a record of the
+      // bug as correct behaviour.
+      assert.ok(
+        seen > 0,
+        `the read saw none of the dialog's nodes while ${foreground()} owned the foreground ` +
+          `(the stock path sees ${dialogNodes({ noCompanion: true })}). This is issue #79.`,
+      );
+    });
+  });
+
   // --- vk ai: the archived verdict ----------------------------------------
   //
   // Opt-in, because unlike every other case here this one calls a MODEL. A test

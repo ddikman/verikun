@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-08-15
+
+### Added
+- **The Flutter fixture raises a real system permission dialog** (`@vk_permission`, Android
+  only), so [#79] reproduces on demand.
+
+### Fixed
+- **Hierarchy reads now see a window another app opens on top** — a runtime-permission dialog is
+  no longer invisible to the companion. ([#79])
+
+[#79]: https://github.com/ddikman/verikun/issues/79
+
 ## [0.22.0] - 2026-08-15
 
 ### Added

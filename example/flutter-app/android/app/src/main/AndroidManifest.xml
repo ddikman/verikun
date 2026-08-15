@@ -1,4 +1,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Declared so the Permissions screen can raise a REAL runtime-permission
+         dialog — a window owned by com.google.android.permissioncontroller rather
+         than by this app. That foreign window is the whole subject of
+         lib/screens/permission_screen.dart (issue #79); nothing in the app uses a
+         microphone or a camera, and nothing should start.
+
+         Two of them on purpose: one dialog can be raised straight after a
+         force-stop and the other later in the same session, which is what
+         separates "blind to the permission window" from "wedged after a launch". -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.CAMERA"/>
     <application
         android:label="testapp"
         android:name="${applicationName}"

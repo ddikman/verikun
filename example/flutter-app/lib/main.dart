@@ -5,6 +5,7 @@ import 'screens/async_screen.dart';
 import 'screens/device_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/permission_screen.dart';
 import 'screens/scroll_screen.dart';
 import 'screens/state_screen.dart';
 
@@ -62,6 +63,7 @@ class TestApp extends StatelessWidget {
         ScrollScreen.route: (_) => const ScrollScreen(),
         StateScreen.route: (_) => const StateScreen(),
         DeviceScreen.route: (_) => const DeviceScreen(),
+        PermissionScreen.route: (_) => const PermissionScreen(),
       },
     );
   }

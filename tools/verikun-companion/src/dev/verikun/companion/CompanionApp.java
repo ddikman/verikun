@@ -1,5 +1,6 @@
 package dev.verikun.companion;
 
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.UiAutomation;
 import android.graphics.Point;
 import android.net.LocalServerSocket;
@@ -39,8 +40,16 @@ public final class CompanionApp {
 
     /** Bumped whenever the wire protocol or dump format changes. The host compares it via
      *  `ping` and restarts a daemon left behind by an older verikun, rather than talking to
-     *  something that will answer in a shape it no longer understands. */
-    private static final String PROTOCOL_VERSION = "1";
+     *  something that will answer in a shape it no longer understands.
+     *
+     *  DUMP FORMAT COUNTS, and it is the easier half to forget: nothing about the wire
+     *  changed for 2, only what retrieveWindows() makes the dump contain. Skipping the bump
+     *  left an upgraded verikun happily reusing the old daemon — same protocol number, so
+     *  the new jar was never pushed and the issue #79 fix silently did not apply.
+     *
+     *  Keep in lockstep with COMPANION_PROTOCOL in src/companion/protocol.ts; the unit suite
+     *  reads this file and fails if they drift. */
+    private static final String PROTOCOL_VERSION = "2";
 
     /** Abstract socket name; the host reaches it with `adb forward tcp:PORT localabstract:NAME`.
      *  One daemon per device, so the name is fixed — the port on the host side is what varies. */
@@ -131,10 +140,42 @@ public final class CompanionApp {
             // Older platforms without the toggle already default to verbose.
         }
         uiAutomation = (UiAutomation) wrapperClass.getMethod("getUiAutomation").invoke(wrapper);
+        retrieveWindows();
         // The one unavoidable idle wait: right after connecting, the bridge genuinely is not
         // ready and calls into it throw. Paid ONCE per daemon, not once per read.
         uiAutomation.waitForIdle(1000, 10000);
         heldWrapper = wrapper;
+    }
+
+    /**
+     * Ask the accessibility layer for window information — which is what makes a RESIDENT
+     * connection keep up with the screen (issue #79).
+     *
+     * Without FLAG_RETRIEVE_INTERACTIVE_WINDOWS no window list is handed out at all
+     * (MEASURED: `getWindows()` returned 0 entries), and with nothing to track,
+     * getRootInActiveWindow() goes on resolving to whichever window was active when the
+     * connection was made. It never notices another one opening on top.
+     *
+     * The platform gets away with that default because `uiautomator dump` connects, reads
+     * once and exits — "active at connect time" is always right for a process that short.
+     * A daemon is precisely the case it does not serve, and the failure is SILENT: a stale
+     * root is a perfectly well-formed hierarchy of the wrong window, so the read returns
+     * exit 0 and not one of the fallbacks below can fire. MEASURED on a Pixel 3a with a
+     * runtime-permission dialog on top: 10/10 reads returned the app's own window, while a
+     * stock dump read the dialog in the same moment. With the flag, 10/10 read the dialog.
+     *
+     * Best-effort: a platform that refuses the flag leaves the companion exactly as it was,
+     * which is worth more than declining to run at all.
+     */
+    private static void retrieveWindows() {
+        try {
+            AccessibilityServiceInfo info = uiAutomation.getServiceInfo();
+            if (info == null) return;
+            info.flags |= AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
+            uiAutomation.setServiceInfo(info);
+        } catch (Throwable t) {
+            System.err.println("could not request window info: " + t);
+        }
     }
 
     /**

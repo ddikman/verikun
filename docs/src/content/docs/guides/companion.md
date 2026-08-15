@@ -10,7 +10,9 @@ Reading the UI hierarchy is the single most expensive thing verikun does on Andr
 that is the overwhelming majority of the runtime.
 
 The companion is a small program pushed to the device that answers the same question in
-about **40ms end to end**, returning byte-identical results.
+about **40ms end to end**, reporting every element the stock read does, with identical
+bounds. (It can omit system decor lying outside the app's own window, which nothing can tap
+— see [Calibration](#calibration).)
 
 ```sh
 vk ui          # ~0.2s instead of ~2.4s — nothing to enable
@@ -139,10 +141,24 @@ permanent, which was invisible when every command is its own process and permane
 companion's own 15-minute shutdown, spent the rest of its life on the 2.4s path next to a
 healthy companion. That was [issue #77](https://github.com/ddikman/verikun/issues/77).
 
+### Another app's window
+
+A permission dialog — or anything else another package puts on top of the app under test —
+is part of the hierarchy the companion serves. That takes an explicit request for window
+information at connect time. Without one the platform hands a long-lived connection no
+window list at all, so it goes on serving whichever window was active when it connected, and
+never notices another opening on top.
+
+That failure was silent, which is what made it worth fixing: a stale root is a well-formed
+hierarchy of the wrong window, so the read returns exit `0` and none of the fallbacks above
+can fire on it. `uiautomator dump` never meets it, because it connects, reads once and exits
+— "active at connect time" is always right for a process that short. That was
+[issue #79](https://github.com/ddikman/verikun/issues/79).
+
 ## Calibration
 
 On first use verikun takes **one** real `uiautomator dump` and checks the companion
-reproduces it exactly. That is most of the ~5.8s first read.
+reproduces it. That is most of the ~5.8s first read.
 
 The answer is then remembered **on the device** (`/data/local/tmp/verikun-companion.note`,
 keyed by verikun version), so it is paid once per device rather than once per companion —
@@ -172,6 +188,22 @@ The gap ranges from 44px to 254px, and guessing wrong would not fail loudly — 
 elements near the bottom of the screen so a tap lands somewhere else while still reporting
 success. So verikun does not guess, and if neither candidate reproduces the platform's dump
 it declines the companion and stays on the stock path.
+
+### What "reproduces it" means
+
+Every node the companion reports must be byte-identical to one the platform reported, in the
+same order. That is the property taps depend on, and it is checked in full.
+
+The two dumps do not have to be the *same string*. Asking for window information (above)
+makes Android clip node bounds to the app's own window, so decor outside it drops out of the
+companion's dump — on a Pixel 6 emulator, `android:id/navigationBarBackground` at
+`[0,2274][1080,2400]`. Demanding an exact string match benched a companion whose every
+tappable node was exactly right, and cost ~33s per read instead of ~0.2s.
+
+So a node the platform reports and the companion misses is tolerated only if it is a leaf
+and is neither clickable nor focusable. Anything else — a tappable node missing, a container
+missing, a node whose bounds differ, a node the companion invents — declines the companion,
+exactly as before.
 
 ## Under `vk server`
 

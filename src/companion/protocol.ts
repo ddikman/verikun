@@ -7,10 +7,16 @@
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
-/** Bumped in lockstep with PROTOCOL_VERSION in CompanionApp.java. A companion left running
- *  by an older verikun answers `ping` with a different number and is restarted rather than
- *  talked to, so a changed dump format can never be replayed by a stale process. */
-export const COMPANION_PROTOCOL = '1';
+/** Bumped in lockstep with PROTOCOL_VERSION in CompanionApp.java — `tests/companion-protocol
+ *  .test.ts` reads the Java source and fails if they drift. A companion left running by an
+ *  older verikun answers `ping` with a different number and is restarted rather than talked
+ *  to, so a changed dump format can never be replayed by a stale process.
+ *
+ *  2 — the companion asks for window information, so it tracks a window another app opens on
+ *  top ([#79]) and its dump omits decor outside the app's own window. MEASURED: without this
+ *  bump an upgraded verikun reused the running daemon, never pushed the new jar, and went on
+ *  reading 0 nodes of a permission dialog the stock path saw all 5 of — silently, exit 0. */
+export const COMPANION_PROTOCOL = '2';
 
 /** How the companion decides which display size to clip node bounds to. Calibrated per
  *  device against a real `uiautomator dump` — never assumed. See calibrate(). */
