@@ -40,8 +40,16 @@ public final class CompanionApp {
 
     /** Bumped whenever the wire protocol or dump format changes. The host compares it via
      *  `ping` and restarts a daemon left behind by an older verikun, rather than talking to
-     *  something that will answer in a shape it no longer understands. */
-    private static final String PROTOCOL_VERSION = "1";
+     *  something that will answer in a shape it no longer understands.
+     *
+     *  DUMP FORMAT COUNTS, and it is the easier half to forget: nothing about the wire
+     *  changed for 2, only what retrieveWindows() makes the dump contain. Skipping the bump
+     *  left an upgraded verikun happily reusing the old daemon — same protocol number, so
+     *  the new jar was never pushed and the issue #79 fix silently did not apply.
+     *
+     *  Keep in lockstep with COMPANION_PROTOCOL in src/companion/protocol.ts; the unit suite
+     *  reads this file and fails if they drift. */
+    private static final String PROTOCOL_VERSION = "2";
 
     /** Abstract socket name; the host reaches it with `adb forward tcp:PORT localabstract:NAME`.
      *  One daemon per device, so the name is fixed — the port on the host side is what varies. */
