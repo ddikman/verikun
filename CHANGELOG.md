@@ -6,10 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-08-15
+
 ### Added
 - **The Flutter fixture raises a real system permission dialog** (`@vk_permission`, Android
-  only), so [#79] reproduces on demand; its e2e case stays red on an affected device until
-  the fix lands.
+  only), so [#79] reproduces on demand.
+
+### Fixed
+- **Hierarchy reads now see a window another app opens on top** — a runtime-permission dialog is
+  no longer invisible ([#79]). Known regression: on Android 14 the companion stops calibrating,
+  so reads fall back to the slow path.
 
 [#79]: https://github.com/ddikman/verikun/issues/79
 
