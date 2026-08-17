@@ -84,6 +84,16 @@ npm link         # optional: put `verikun` and `vk` on your PATH
 
 Zero runtime dependencies; the only dev dependencies are `typescript` and `@types/node`. The full contributor guide — the test loop, the Flutter device fixture, versioning and releasing — is in [Contributing](https://ddikman.github.io/verikun/internals/contributing/).
 
+To work on the [documentation site](https://ddikman.github.io/verikun/), which is an Astro Starlight project in `docs/` with its own dependencies (so `npm install` above does not cover it):
+
+```sh
+npm run docs:install   # once — installs the site's dependencies (needs Node >= 22.12)
+npm run docs           # dev server with live reload at http://localhost:4321/verikun/
+npm run docs:build     # production build; fails on a dead internal link
+```
+
+Open **http://localhost:4321/verikun/** — the site is served under a base path, so bare `localhost:4321` is a 404. Astro needs **Node ≥ 22.12** while the CLI supports Node ≥ 18, so `nvm use 22` first if your shell's Node is older.
+
 ## License
 
 [MIT](LICENSE)

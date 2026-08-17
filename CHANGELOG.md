@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`npm run docs` / `docs:install` / `docs:build`**: run the documentation site from the repo
+  root; README covers the local setup.
+
 ## [0.22.2] - 2026-08-17
 
 ### Changed

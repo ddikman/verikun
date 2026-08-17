@@ -30,7 +30,7 @@ Any change that affects behaviour — a command, flag, selector rule, exit code,
 2. **Add a `CHANGELOG.md` entry** under `## [Unreleased]`. On release, that heading becomes the new version + date. **One line per change, ≤ 25 words, leading with the command or flag it affects** — `.claude/skills/changelog-entry/SKILL.md` owns that style and, more usefully, says where the root cause / benchmarks / design rationale go instead. They have homes in this very rule (the commit body, the PR, `docs/`), which is why a changelog paragraph is nearly always a third copy of something already written.
 3. **Update every doc that owns the contract, in the same commit** — `SKILL.md` (the agent-facing contract), `README.md` where it is mentioned, and the `docs/` page(s) named in the *Which page owns which contract* table under *Documentation site*. Two of those pages are load-bearing for almost every change and are the ones most often missed: **`reference/commands.md`** for any command or flag, and **`guides/platform-support.md`** for anything a platform does differently.
 
-The docs are not a follow-up task. They are how an agent and a user learn what the tool does, and a stale page is worse than a missing one — it is a confident wrong answer. Verify with `npm run build --prefix docs` (needs Node ≥ 22.12; `nvm use 22` first — the repo's own CI runs 20.x, so your default shell Node is probably too old). That build **fails on a dead internal link**, which is the only automated check the docs have.
+The docs are not a follow-up task. They are how an agent and a user learn what the tool does, and a stale page is worse than a missing one — it is a confident wrong answer. Verify with `npm run docs:build` (needs Node ≥ 22.12; `nvm use 22` first — the repo's own CI runs 20.x, so your default shell Node is probably too old). That build **fails on a dead internal link**, which is the only automated check the docs have.
 
 **A docs-only change** — fixing prose, adding a page, restructuring the site — bumps nothing and needs no version change, but still takes a `## [Unreleased]` entry. Say `No version bump: no CLI behaviour changed.` in the commit body, as commit `76c2f85` does.
 
@@ -236,9 +236,9 @@ Is this `vk` behind npm's `latest`, and is the installed Claude Code plugin's `S
 An **Astro Starlight** site published to GitHub Pages at <https://ddikman.github.io/verikun/> by `.github/workflows/pages.yml` (push to `main` touching `docs/`; a PR builds it as a check without deploying). `package.json`'s `homepage` points at it.
 
 ```sh
-npm ci --prefix docs         # needs Node >= 22.12 (Astro 7); the repo's own CI still runs 20.x + 22.x
-npm run dev --prefix docs    # http://localhost:4321/verikun/
-npm run build --prefix docs  # production build — FAILS on a dead internal link
+npm run docs:install         # = npm ci --prefix docs; needs Node >= 22.12 (Astro 7), the repo's own CI still runs 20.x + 22.x
+npm run docs                 # = npm run dev --prefix docs; http://localhost:4321/verikun/ (bare localhost:4321 is a 404)
+npm run docs:build           # = npm run build --prefix docs; production build — FAILS on a dead internal link
 ```
 
 - **It is a separate npm project, deliberately.** `docs/package.json` + `docs/package-lock.json`, and the root has **no `workspaces` key**, so root `npm ci` never descends into it. Astro must never move into root `devDependencies`: that would balloon the root lockfile (3 packages today), slow every CI job, and `publish.yml`'s `npm install --package-lock-only` + `git diff --exit-code` gate would then police that larger lock. The zero-runtime-dependency rule governs the **published CLI package**; the site's own dep tree is unconstrained.
