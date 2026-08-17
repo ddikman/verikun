@@ -471,11 +471,11 @@ identifier memory described above. Set `VERIKUN_NO_RUN=1` to disable recording.
 When **verikun itself** — not the app, not your selector — is the friction (a model heal on
 a *cached* replay: `[ai] plan cache hit` + a repair, or `"cached": true` with
 `modelRepairs > 0` in `--json`; a `drifted, not repaired` give-up; or a recurring gotcha in
-vk's own operation), use the **`suggest-verikun-improvement`** skill. It drafts a light,
+vk's own operation), use the **`suggest-verikun-improvement`** skill. It writes a light,
 TL;DR-first suggestion — **redacted** of every app-under-test specific (package, on-screen
-text, selector values, test prose, logs) — for you to **review before it's submitted** to
-`ddikman/verikun`. Don't hand-roll the issue: that skill owns the redaction and the
-draft-first flow.
+text, selector values, test prose, logs) — to a **local file for you to read and edit**, and
+files nothing to `ddikman/verikun` until you say so. Don't hand-roll the issue: that skill
+owns the redaction and the review-first flow.
 
 ## Exit codes — rely on these for control flow
 

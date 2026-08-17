@@ -148,7 +148,7 @@ gotcha in its own operation — that is worth an issue at
 [github.com/ddikman/verikun/issues](https://github.com/ddikman/verikun/issues).
 
 If you are driving verikun with an AI agent plus the skill, it hands off to the
-**`suggest-verikun-improvement`** skill, which drafts a short, TL;DR-first suggestion,
-**reviews it with you before anything is submitted**, and **redacts every app-under-test
-specific** (package, on-screen text, selector values, test prose, logs) so no client code or
-logic can leak.
+**`suggest-verikun-improvement`** skill, which writes a short, TL;DR-first suggestion **to a
+local file for you to read and edit**, **files nothing until you say so**, and **redacts every
+app-under-test specific** (package, on-screen text, selector values, test prose, logs) so no
+client code or logic can leak.
