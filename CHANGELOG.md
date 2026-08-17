@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format is based on
 - **`npm run docs` / `docs:install` / `docs:build`**: run the documentation site from the repo
   root; README covers the local setup.
 
+### Changed
+- **Docs site**: content column widened to 60rem, giving the reference tables more room on
+  large screens.
+
 ## [0.22.2] - 2026-08-17
 
 ### Changed
