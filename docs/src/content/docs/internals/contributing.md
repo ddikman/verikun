@@ -136,11 +136,21 @@ The Flutter SDK is pinned by the committed `example/flutter-app/.fvmrc`. **Alway
 This site is an Astro Starlight project in `docs/`, with its **own** `package.json` and
 lockfile. The repo root has no `workspaces` key, so root `npm ci` never descends into it.
 
+Run it from the repo root — these wrap the `--prefix docs` commands so you never have to
+`cd`:
+
 ```sh
-npm ci --prefix docs        # install (needs Node >= 22.12)
-npm run dev --prefix docs   # local preview at http://localhost:4321/verikun/
-npm run build --prefix docs # production build; fails on a dead internal link
+npm run docs:install   # once — installs the site's dependencies (needs Node >= 22.12)
+npm run docs           # local preview at http://localhost:4321/verikun/
+npm run docs:build     # production build; fails on a dead internal link
 ```
+
+Open `http://localhost:4321/verikun/`, not bare `localhost:4321` — `base: '/verikun'` in
+`astro.config.mjs` mirrors the project Pages URL, so the root path is a 404.
+
+Astro 7 needs **Node >= 22.12** (`docs/package.json`'s `engines`) while the CLI supports Node
+>= 18 and CI runs 20.x, so your shell's Node is probably too old — `nvm use 22` first, or the
+build dies with `Node.js v20.x is not supported by Astro!`.
 
 It deploys to GitHub Pages from `.github/workflows/pages.yml` on every push to `main` that
 touches `docs/`. Pull requests build the site as a check without deploying.
