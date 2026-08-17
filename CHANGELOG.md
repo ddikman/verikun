@@ -30,6 +30,10 @@ All notable changes to this project are documented here. The format is based on
 - **`vk devices start --server`**: releases the device lock when it finishes, instead of `409`ing
   the run it just booted the device for.
 
+### Changed
+- **Docs site**: content column widened to 60rem, giving the reference tables more room on
+  large screens.
+
 ## [0.22.2] - 2026-08-17
 
 ### Changed

@@ -2,6 +2,14 @@
   --sl-color-accent-low: #10261f;
   --sl-color-accent: #1f7a5c;
   --sl-color-accent-high: #a8e6cd;
+
+  /* Wider middle column than Starlight's 45rem default. The reference pages are
+     table-heavy and the widest of them pair a nowrap flag signature with a prose
+     description, so 4 of the 10 tables on reference/commands scrolled horizontally
+     while a 1440px window still had room to spare. Stays under the 67.5rem Starlight
+     itself uses on sidebar-less pages, and the column only reaches this width when
+     the viewport can afford it — both sidebars keep their space first. */
+  --sl-content-width: 60rem;
 }
 
 :root[data-theme='light'] {
