@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-08-17
+
+### Changed
+- **`suggest-verikun-improvement`**: the draft is written to `.context/` for review; nothing is
+  filed until you say so. ([#66])
+- **Improvement reports**: `Shape of the fix` becomes a short `Proposed fix` — a few bullets,
+  not a spec. ([#66])
+
+[#66]: https://github.com/ddikman/verikun/issues/66
+
 ## [0.22.1] - 2026-08-15
 
 ### Added

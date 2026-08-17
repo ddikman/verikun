@@ -71,7 +71,7 @@ There is also no need for an MCP here: verikun runs locally with all its depende
 
 verikun improves from the rough edges people hit while driving it. When verikun *itself* is the friction — a step that heals on every cached replay (an unstable compiled selector, often a label-only control with no resource-id), a repair "give-up", or a gotcha in its own operation — that's worth an issue at [github.com/ddikman/verikun/issues](https://github.com/ddikman/verikun/issues).
 
-Driving verikun with an AI agent + the [skill](.claude/skills/verikun/SKILL.md)? It hands off to the **`suggest-verikun-improvement`** skill, which drafts a short, TL;DR-first suggestion, **reviews it with you before anything is submitted**, and **redacts every app-under-test specific** (package, on-screen text, selector values, test prose, logs) so no client code or logic can leak.
+Driving verikun with an AI agent + the [skill](.claude/skills/verikun/SKILL.md)? It hands off to the **`suggest-verikun-improvement`** skill, which writes a short, TL;DR-first suggestion **to a local file for you to read and edit**, **files nothing until you say so**, and **redacts every app-under-test specific** (package, on-screen text, selector values, test prose, logs) so no client code or logic can leak.
 
 ## Contributing
 
