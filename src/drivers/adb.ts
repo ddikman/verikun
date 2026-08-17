@@ -1,8 +1,13 @@
-import { Driver, DeviceInfo, Element, HierarchySource, Platform, ToolProbe, Viewport } from '../types';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import {
+  Driver, DeviceInfo, Element, HierarchySource, Platform, ToolProbe, Viewport,
+  StartOpts, StartResult, StopOpts, StopResult,
+} from '../types';
 import type { RawImage } from '../image';
 import { Companion, companionEnabled, releaseCompanionOn } from '../companion/manager';
 import { CliError, NoWindowError, probeFailure } from '../errors';
-import { runText, runBinary, sleepSync, TextResult } from '../exec';
+import { runText, runBinary, sleepSync, commandExists, spawnDetached, TextResult } from '../exec';
 import { parseHierarchy, parseRotation } from '../ui/android-parse';
 import { viewportFor } from '../ui/viewport';
 import {
@@ -14,6 +19,7 @@ import {
 } from '../device/settings';
 import { assertClaimable, claimsEnabled, selectAndClaim } from '../device/claims';
 import { err } from '../output';
+import { pollUntil, throttledProgress } from '../wait';
 
 const ADB = process.env.ADB || 'adb';
 const ADB_HINT = 'install the Android platform-tools (`brew install --cask android-platform-tools`), or point ADB at the binary';
@@ -36,6 +42,12 @@ export function probeAdb(): ToolProbe {
   }
 }
 
+
+/** Short probes only — a boot poll must not block the event loop (see wait.ts). */
+const PROBE_TIMEOUT_MS = 5000;
+/** The boot animation lags sys.boot_completed; waiting it out makes dumps less flaky,
+ *  but it is advisory — never fail a boot because the animation is still running. */
+const BOOTANIM_TIMEOUT_MS = 15000;
 
 // Named keys -> Android keycodes. Numeric codes are also accepted directly.
 const KEYCODES: Record<string, number> = {
@@ -161,6 +173,285 @@ export function severanceRisk(transport: AdbTransport, key: SettingKey, value: s
  *  local writes, so they land in well under a second or not at all. */
 const VERIFY_TIMEOUT_MS = 4000;
 const VERIFY_INTERVAL_MS = 200;
+/**
+ * Parse `adb devices -l` output into DeviceInfo[]. PURE — exported for unit tests
+ * and reused by the device-lifecycle layer, which needs the attached-device list
+ * without a resolved driver.
+ */
+export function parseAdbDevices(stdout: string): DeviceInfo[] {
+  const devices: DeviceInfo[] = [];
+  // The first line is the "List of devices attached" header.
+  for (const line of stdout.split('\n').slice(1)) {
+    const t = line.trim();
+    if (!t || t.startsWith('*')) continue;
+    const fields = t.split(/\s+/);
+    const serial = fields[0];
+    const state = fields[1];
+    if (!serial || !state) continue;
+    const info: DeviceInfo = {
+      serial,
+      state,
+      platform: 'android',
+      // adb addresses emulators as emulator-<console-port>; everything else is
+      // a real handset, which verikun never power-cycles.
+      kind: serial.startsWith('emulator-') ? 'emulator' : 'physical',
+    };
+    for (const kv of fields.slice(2)) {
+      const idx = kv.indexOf(':');
+      if (idx < 0) continue;
+      const k = kv.slice(0, idx);
+      const v = kv.slice(idx + 1);
+      if (k === 'model') info.model = v;
+      if (k === 'product') info.product = v;
+    }
+    devices.push(info);
+  }
+  return devices;
+}
+
+/** Attached Android devices/emulators. Device-unbound (no serial needed). */
+export function listAdbDevices(): DeviceInfo[] {
+  return parseAdbDevices(runText(ADB, ['devices', '-l']).stdout);
+}
+
+// --- emulator (AVD) lifecycle ----------------------------------------------
+
+/**
+ * Locate the SDK's `emulator` binary. PURE given `exists` — exported for unit tests.
+ * Returns null when nothing is found; THROWS when VERIKUN_EMULATOR is set but
+ * unusable, because silently ignoring an explicit override is how you spend an hour
+ * wondering which binary ran.
+ *
+ * Mirrors `const ADB = process.env.ADB || 'adb'`, but needs the extra fallbacks:
+ * unlike `adb`, the SDK installer does not put `emulator` on PATH, and ANDROID_HOME
+ * is frequently unset on a developer laptop.
+ */
+export function resolveEmulatorBinary(opts: {
+  env: NodeJS.ProcessEnv;
+  exists: (p: string) => boolean;
+  platform: NodeJS.Platform;
+  home: string;
+}): string | null {
+  const { env, exists, platform, home } = opts;
+  const bin = platform === 'win32' ? 'emulator.exe' : 'emulator';
+
+  const override = env.VERIKUN_EMULATOR;
+  if (override) {
+    if (!exists(override)) {
+      throw new CliError(`VERIKUN_EMULATOR is set to '${override}', which is not an executable file.`, 3);
+    }
+    return override;
+  }
+  if (exists(bin)) return bin;
+
+  const candidates: string[] = [];
+  for (const root of [env.ANDROID_HOME, env.ANDROID_SDK_ROOT]) {
+    if (root) candidates.push(join(root, 'emulator', bin));
+  }
+  // When ADB points into an SDK tree, its sibling emulator/ dir is the right one.
+  const adb = env.ADB;
+  if (adb && (adb.includes('/') || adb.includes('\\'))) {
+    candidates.push(join(dirname(adb), '..', 'emulator', bin));
+  }
+  if (platform === 'darwin') {
+    candidates.push(join(home, 'Library', 'Android', 'sdk', 'emulator', bin));
+  } else if (platform === 'win32') {
+    const local = env.LOCALAPPDATA;
+    if (local) candidates.push(join(local, 'Android', 'Sdk', 'emulator', bin));
+  } else {
+    candidates.push(join(home, 'Android', 'Sdk', 'emulator', bin));
+    candidates.push(join(home, 'android-sdk', 'emulator', bin));
+    candidates.push(join('/usr', 'lib', 'android-sdk', 'emulator', bin));
+  }
+  return candidates.find(exists) ?? null;
+}
+
+/** Resolve the emulator binary or explain, actionably, how to point us at it. */
+export function requireEmulatorBinary(): string {
+  const bin = resolveEmulatorBinary({
+    env: process.env,
+    exists: commandExists,
+    platform: process.platform,
+    home: homedir(),
+  });
+  if (bin) return bin;
+  throw new CliError(
+    'Could not find the Android `emulator` binary (needed to start an AVD).\n' +
+      'Looked on PATH, $ANDROID_HOME / $ANDROID_SDK_ROOT, next to $ADB, and the default SDK location.\n' +
+      'Set VERIKUN_EMULATOR=/path/to/emulator, or install the SDK\'s "emulator" package.',
+    3,
+  );
+}
+
+/**
+ * Parse `emulator -list-avds`. PURE — exported for unit tests. Some setups
+ * interleave `INFO |`/`Warning:` chatter, so keep only lines that look like an
+ * AVD name (the charset avdmanager permits).
+ */
+export function parseAvdList(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^[A-Za-z0-9._-]+$/.test(l));
+}
+
+/** AVD names defined on this host. [] when the emulator binary is missing. */
+export function listAvds(): string[] {
+  let bin: string;
+  try {
+    bin = requireEmulatorBinary();
+  } catch {
+    return []; // listing degrades; only ACTING on a device fails loudly
+  }
+  try {
+    return parseAvdList(runText(bin, ['-list-avds'], { timeout: 15000 }).stdout);
+  } catch {
+    return [];
+  }
+}
+
+/** Parse `adb emu avd name`, which prints the name then an `OK` status line. PURE. */
+export function parseEmuAvdName(stdout: string): string {
+  const line = stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l && !/^(OK|KO)\b/.test(l));
+  return line ?? '';
+}
+
+/** Which AVD is running as `serial`? '' when it can't be determined (console not
+ *  up yet, auth token missing, not an emulator). Never throws. */
+export function avdNameOf(serial: string): string {
+  try {
+    const r = runText(ADB, ['-s', serial, 'emu', 'avd', 'name'], { timeout: 3000 });
+    return r.code === 0 ? parseEmuAvdName(r.stdout) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Serials of running emulators whose AVD name matches `name`. */
+function runningSerialsFor(name: string): string[] {
+  return listAdbDevices()
+    .filter((d) => d.kind === 'emulator')
+    .filter((d) => avdNameOf(d.serial).toLowerCase() === name.toLowerCase())
+    .map((d) => d.serial);
+}
+
+/** One short device-shell probe. Returns '' on any failure — "not ready yet". */
+function getprop(serial: string, prop: string): string {
+  try {
+    const r = runText(ADB, ['-s', serial, 'shell', 'getprop', prop], { timeout: PROBE_TIMEOUT_MS });
+    return r.code === 0 ? r.stdout.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Boot an AVD and wait until it is genuinely usable (`sys.boot_completed`).
+ * Idempotent: an AVD that is already running returns `started: false` immediately —
+ * that is what makes "ensure a device is up" cheap for `vk server` to offer.
+ */
+export async function bootAvd(name: string, opts: StartOpts): Promise<StartResult> {
+  const bin = requireEmulatorBinary();
+  const t0 = Date.now();
+
+  const already = runningSerialsFor(name);
+  if (already.length) {
+    // --wipe is rejected upstream for a running target (see lifecycle.ts), so
+    // reaching here means a plain start: leave the live device alone.
+    return { serial: already[0], started: false, ready: true, waitedMs: 0 };
+  }
+
+  const before = new Set(listAdbDevices().map((d) => d.serial));
+  const logPath = join(tmpdir(), `verikun-emulator-${name.replace(/[^A-Za-z0-9._-]/g, '_')}.log`);
+  opts.onProgress?.(`booting AVD '${name}' — log: ${logPath}`);
+  spawnDetached(bin, ['-avd', name, ...(opts.wipe ? ['-wipe-data'] : [])], {
+    logFile: logPath,
+    // The emulator must not hold a handle on whatever directory vk was run from.
+    cwd: tmpdir(),
+    onError: (e) => opts.onProgress?.(`emulator failed to start: ${e.message}`),
+  });
+
+  if (!opts.wait) {
+    // Android assigns emulator-<port> at boot, so with no wait there is no serial
+    // to report yet — say so rather than inventing one.
+    return { serial: null, started: true, ready: false, waitedMs: Date.now() - t0, logPath };
+  }
+
+  const tick = throttledProgress(opts.onProgress, 10_000, (ms) =>
+    `waiting for '${name}' to boot… ${Math.round(ms / 1000)}s`,
+  );
+
+  // Diff first (the console is not addressable in the first seconds, so `emu avd
+  // name` is unavailable), then confirm by name once it answers — the confirmation
+  // is what keeps two concurrent boots from claiming each other's serial.
+  const serial = await pollUntil(
+    () => {
+      const fresh = listAdbDevices().filter((d) => d.kind === 'emulator' && !before.has(d.serial));
+      if (!fresh.length) return undefined;
+      const named = fresh.find((d) => avdNameOf(d.serial).toLowerCase() === name.toLowerCase());
+      if (named) return named.serial;
+      return fresh.length === 1 ? fresh[0].serial : undefined;
+    },
+    { timeoutMs: opts.timeoutMs, onTick: tick },
+  );
+  if (!serial) {
+    throw new CliError(
+      `'${name}' did not appear in \`adb devices\` within ${Math.round(opts.timeoutMs / 1000)}s ` +
+        `(the emulator may still be starting; log: ${logPath})`,
+      1,
+    );
+  }
+
+  const remaining = () => Math.max(0, opts.timeoutMs - (Date.now() - t0));
+  const booted = await pollUntil(() => (getprop(serial, 'sys.boot_completed') === '1' ? true : undefined), {
+    timeoutMs: remaining(),
+    onTick: tick,
+  });
+  if (!booted) {
+    // Leave it running: a slow machine is retryable, and killing it would throw away
+    // most of a boot the user is about to want.
+    throw new CliError(
+      `'${name}' (${serial}) did not finish booting within ${Math.round(opts.timeoutMs / 1000)}s ` +
+        `— it is still starting, so retrying may succeed (log: ${logPath})`,
+      1,
+    );
+  }
+
+  // Advisory: dumps are flaky while the boot animation plays. Never fatal.
+  await pollUntil(() => (getprop(serial, 'init.svc.bootanim') === 'stopped' ? true : undefined), {
+    timeoutMs: Math.min(BOOTANIM_TIMEOUT_MS, remaining()),
+  });
+
+  const waitedMs = Date.now() - t0;
+  opts.onProgress?.(`'${name}' ready as ${serial} (${(waitedMs / 1000).toFixed(1)}s)`);
+  return { serial, started: true, ready: true, waitedMs, logPath };
+}
+
+/** Shut down a running emulator via its console, and wait for adb to forget it. */
+export async function killEmulator(serial: string, opts: StopOpts): Promise<StopResult> {
+  const present = () => listAdbDevices().some((d) => d.serial === serial);
+  if (!present()) return { serial, stopped: false };
+
+  opts.onProgress?.(`stopping ${serial}…`);
+  try {
+    runText(ADB, ['-s', serial, 'emu', 'kill'], { timeout: PROBE_TIMEOUT_MS });
+  } catch {
+    /* the console may already be gone; the poll below is the real check */
+  }
+  const gone = await pollUntil(() => (present() ? undefined : true), { timeoutMs: opts.timeoutMs });
+  if (!gone) {
+    throw new CliError(`${serial} is still attached ${Math.round(opts.timeoutMs / 1000)}s after \`emu kill\`.`, 1);
+  }
+  // The AVD's lock files outlive the process by a moment; booting the same AVD
+  // immediately afterwards fails without this settle. (Why `restart` is one
+  // primitive rather than stop-then-start composed by a caller.)
+  await pollUntil(() => undefined, { timeoutMs: 1000, intervalMs: 1000 });
+  opts.onProgress?.(`${serial} stopped`);
+  return { serial, stopped: true };
+}
 
 export class AdbDriver implements Driver {
   readonly platform: Platform = 'android';
@@ -200,27 +491,7 @@ export class AdbDriver implements Driver {
   }
 
   listDevices(): DeviceInfo[] {
-    const { stdout } = runText(ADB, ['devices', '-l']);
-    const devices: DeviceInfo[] = [];
-    for (const line of stdout.split('\n').slice(1)) {
-      const t = line.trim();
-      if (!t || t.startsWith('*')) continue;
-      const fields = t.split(/\s+/);
-      const serial = fields[0];
-      const state = fields[1];
-      if (!serial || !state) continue;
-      const info: DeviceInfo = { serial, state, platform: 'android' };
-      for (const kv of fields.slice(2)) {
-        const idx = kv.indexOf(':');
-        if (idx < 0) continue;
-        const k = kv.slice(0, idx);
-        const v = kv.slice(idx + 1);
-        if (k === 'model') info.model = v;
-        if (k === 'product') info.product = v;
-      }
-      devices.push(info);
-    }
-    return devices;
+    return listAdbDevices();
   }
 
   resolvedSerial(): string {

@@ -117,19 +117,41 @@ Change the *device* the app runs on, then put it back. Full detail:
 
 | Command | Description |
 |---|---|
-| `server [--bind addr] [--port n] [--auth-key k] [--allow-install] [--allow-unsafe-anonymous]` | Expose this machine's connected device to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
+| `server [--bind addr] [--port n] [--auth-key k] [--allow-install] [--allow-device-control[=names]] [--allow-unsafe-anonymous]` | Expose this machine's connected device to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
 
 Clients pass `--server <url>` (or `VERIKUN_SERVER`) plus `--auth-key` (or
 `VERIKUN_SERVER_AUTH_KEY`) to `ai`, `suite` and `install`. **The server's device and platform
-apply** — client flags cannot repoint them.
+apply** — no flag on an `exec` request can repoint them.
+
+`--allow-device-control` is the one exception, and it is opt-in: it lets a client
+`restart`/`stop` the server's *own* device, and `--allow-device-control=<names>` additionally
+lets it `start` one of those operator-declared targets. The device lifecycle commands below all
+accept `--server <url>` to act on a remote server's device.
 
 ## Environment
 
 | Command | Description |
 |---|---|
-| `devices [--json]` | List attached devices and simulators. Probes both backends. A `USED BY` column appears when another job holds one — see [Device claims](/verikun/reference/device-claims/). |
+| `devices [--all] [--json]` | List attached devices and simulators. Probes both backends. A `USED BY` column appears when another job holds one — see [Device claims](/verikun/reference/device-claims/). `--all` also lists **startable** (not-yet-booted) AVDs and simulators. |
+| `devices start <name> [--wipe] [--timeout dur] [--no-wait]` | Boot an Android AVD or iOS simulator, waiting until it is genuinely drivable; prints the resolved serial on stdout. Already running = a no-op. |
+| `devices stop <name\|serial>` | Shut a running emulator or simulator down. |
+| `devices restart <name> [--wipe]` | Stop then boot — the fix for a wedged or flaky device. |
 | `doctor [--fix]` | Diagnose adb + device, and report the CLI/plugin versions. `--fix` sets the three animation scales to `0` for deterministic UI. `--ios` checks the idb toolchain. Version staleness is reported as a **warning** and does not affect the exit code — only a genuinely unusable setup gives `3`. |
 | `companion <status\|stop> [--json]` | Inspect or stop the on-device hierarchy reader (Android only). `stop` hands back the device's single `UiAutomation` connection so Appium or Layout Inspector can use it. See [Companion](/verikun/guides/companion/). |
+
+`vk devices stop` powers a **device** off; `vk stop <appId>` force-stops an **app**, and
+`vk device set` (singular) changes settings on the device you are driving.
+
+Physical devices are never power-cycled — `start`/`stop`/`restart` refuse them with exit 2.
+An ambiguous name is exit 2 with the candidates listed: simulator names repeat across iOS
+runtimes, so `iPhone 17 Pro` genuinely identifies two devices and you pass the UDID instead.
+A boot that times out is exit **1** (retryable — the device is left running); a missing
+toolchain is exit **3**. Set `VERIKUN_EMULATOR` if the SDK's `emulator` binary is not on
+`PATH` or under `$ANDROID_HOME`.
+
+`--wipe` (`emulator -wipe-data` / `simctl erase`) is the only destructive path: `start` and
+`restart` only, never a physical device, and never against an already-running target — use
+`restart --wipe`, whose name says it tears the device down.
 
 ## Test runs
 

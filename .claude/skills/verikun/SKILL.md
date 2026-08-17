@@ -17,7 +17,9 @@ description: >-
   directory of natural-language tests as a gated suite with `vk suite <dir>`
   (overview report + non-zero exit on failure — the CI gate). A remote device is
   reachable via `--server <url>` (ai/suite/install) against a `vk server` running
-  next to it. iOS (--ios): full parity via idb (tap/type/swipe/`ui` +
+  next to it. If no device is available, or one has gone flaky, start or restart it
+  with `vk devices start|stop|restart <name>` (`vk devices --all` lists what is
+  startable). iOS (--ios): full parity via idb (tap/type/swipe/`ui` +
   screenshot/launch/stop), on simulators and devices; install idb and see
   `vk doctor --ios`.
 ---
@@ -427,8 +429,28 @@ vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
 ```
 
 A wrong URL/key fails fast with exit 3; `409` means another run holds the
-device. To expose a device from THIS machine: `vk server --allow-install`
+device; `503` means the server has no device attached — boot one (below). To
+expose a device from THIS machine: `vk server --allow-install`
 (add `--bind <addr>` to leave loopback; auth key auto-generates if unset).
+
+## The device is missing or wedged
+
+```sh
+vk devices --all                    # what's attached AND what could be started
+vk devices start Pixel_6_API_34     # boot it; prints the serial when drivable
+vk devices restart Pixel_6_API_34   # a live device gone flaky
+```
+
+Exit codes tell you whether to retry: **1** = unknown name, or the boot timed out
+(the device is still starting — retrying often works, and it is left running).
+**2** = ambiguous name (simulator names repeat across iOS runtimes — pass the UDID
+from `vk devices --all`), or the target is a physical device (never power-cycled).
+**3** = the toolchain is missing (set `VERIKUN_EMULATOR` to the SDK's `emulator`
+binary) — retrying will not help.
+
+`start` is idempotent, so it is safe to call when unsure. Add `--ensure-device` to
+`vk ai` / `vk suite` / `vk install` to boot once before the first step instead. Both
+work against a remote server (`--server <url>`) when it runs `--allow-device-control`.
 
 ## Test runs & reports
 

@@ -67,13 +67,22 @@ export interface Element {
   password: boolean;
 }
 
+/** What kind of target this is — decides whether verikun may power-cycle it. */
+export type DeviceKind = 'emulator' | 'simulator' | 'physical';
+
 export interface DeviceInfo {
+  /** adb serial / simulator UDID. '' for a startable-but-not-running AVD, which
+   *  has no adb address until it boots — address those by `name` instead. */
   serial: string;
   /** "device" | "offline" | "unauthorized" (android) | "booted" | "shutdown" (ios) */
   state: string;
   model?: string;
   product?: string;
   platform: Platform;
+  kind?: DeviceKind;
+  /** The token `vk devices start|stop|restart` accepts: the AVD name on Android,
+   *  the simulator name on iOS. Absent for physical devices (not power-cyclable). */
+  name?: string;
   /** Optional caveat shown in `vk devices` output, e.g. for partially-supported devices. */
   note?: string;
   /**
@@ -82,6 +91,45 @@ export interface DeviceInfo {
    * but nothing about who else is using it.
    */
   claim?: ClaimSummary;
+}
+
+// --- device lifecycle (start/stop a device, as opposed to driving one) -------
+// These live here rather than in drivers/lifecycle.ts so the platform modules
+// (drivers/adb.ts, drivers/ios.ts) can implement against them without importing
+// the dispatcher that imports THEM.
+
+export interface StartOpts {
+  timeoutMs: number;
+  /** false (`--no-wait`) = issue the boot and return without waiting for readiness. */
+  wait: boolean;
+  /** Erase the device's data as part of the boot (`-wipe-data` / `simctl erase`). */
+  wipe: boolean;
+  /** Progress lines for a human; the drivers never write to stdout/stderr themselves. */
+  onProgress?: (message: string) => void;
+}
+
+export interface StopOpts {
+  timeoutMs: number;
+  onProgress?: (message: string) => void;
+}
+
+export interface StartResult {
+  /** The serial the device came up as. null only under `--no-wait` on Android,
+   *  which assigns `emulator-<console-port>` at boot and so cannot know it yet. */
+  serial: string | null;
+  /** false when the target was already running — `start` is idempotent. */
+  started: boolean;
+  /** Did the readiness probe pass inside the window? */
+  ready: boolean;
+  waitedMs: number;
+  /** Where the detached emulator's output is being written (Android only). */
+  logPath?: string;
+}
+
+export interface StopResult {
+  serial: string;
+  /** false when it was already down — `stop` is idempotent. */
+  stopped: boolean;
 }
 
 /**

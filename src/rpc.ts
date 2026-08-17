@@ -9,7 +9,7 @@
 // unit tests) can import it without dragging in transport code.
 
 import { CliError, SelectorNotFoundError, AmbiguousSelectorError } from './errors';
-import type { Element, HierarchySource, Platform } from './types';
+import type { DeviceInfo, Element, HierarchySource, Platform } from './types';
 import type { RunStep } from './run';
 
 /** One validated leaf command, exactly the triple `executeOutcome` consumes. */
@@ -63,7 +63,9 @@ export interface HealthResponse {
   ok: boolean;
   version: string;
   platform: Platform;
-  serial: string;
+  /** Resolved serial/udid, or null when the server is running with NO device bound
+   *  — only reachable with --allow-device-control. Older servers always send a string. */
+  serial: string | null;
   /** Whether POST /v1/install is enabled on this server (`--allow-install`). */
   installEnabled: boolean;
   /**
@@ -75,6 +77,44 @@ export interface HealthResponse {
    * companion that had silently stood down went unnoticed for a whole suite (issue #77).
    */
   reads?: HierarchySource;
+  /** Whether POST /v1/devices/* is available (`--allow-device-control`). ABSENT on
+   *  servers predating the flag, so a client MUST treat undefined as false — and must
+   *  feature-detect on these fields rather than comparing `version`, because "old
+   *  server" and "new server, flag off" are indistinguishable and need the same answer. */
+  deviceControlEnabled?: boolean;
+  /** Whether a named target may be requested (`--allow-device-control=<names>`). */
+  deviceNamingEnabled?: boolean;
+  /** Derived from `serial` wherever health is built, so the two can never disagree. */
+  deviceState?: 'ready' | 'none';
+}
+
+/** Body of POST /v1/devices/{start,restart,stop}. An empty body is the only form a
+ *  server without an --allow-device-control allowlist accepts. */
+export interface DeviceOpRequest {
+  /** AVD name / simulator name-or-UDID. Rejected unless the server allowlists it. */
+  target?: string;
+  /** Erase the device's data as part of the operation. Never defaulted on. */
+  wipe?: boolean;
+}
+
+export interface DeviceOpResponse {
+  ok: true;
+  platform: Platform;
+  /** The serial the server is now bound to; null after a successful stop. */
+  serial: string | null;
+  /** false when the call was a no-op (a healthy device was already bound). */
+  changed: boolean;
+  durationMs: number;
+}
+
+export interface DeviceListResponse {
+  /** What the server can see. Filtered to the allowlist when one is configured — a
+   *  CI job has no business learning the names of the operator's other devices. */
+  devices: DeviceInfo[];
+  /** Names this server will boot on request (the --allow-device-control allowlist). */
+  startable: string[];
+  /** The serial currently bound, or null. */
+  bound: string | null;
 }
 
 /** Body of every non-2xx JSON response (auth, lock, validation, handler crash). */
