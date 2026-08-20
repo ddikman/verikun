@@ -366,18 +366,23 @@ Consider `--retries 2` — environment failures earn retries with increasing bac
 
 ### The run costs more than expected
 
-Every run reports `compile / repairs / replay=$0 / est $…`. If `replay` is not `$0`, the plan
-is not being cached — check whether `--recompile` is set, whether the prose changes between
-runs, or whether verikun was updated (which
+Every run reports a cost line —
+`compile=$0.0184 · repairs=$0.0000 · replay=$0 · cache_read=12043 tok · est $0.0184`. On a
+repeat run `compile` should be `$0.0000`; if it is not, the plan is not being cached — check
+whether `--recompile` is set, whether the prose changes between runs, or whether verikun was
+updated (which
 [rotates the cache fingerprint](/verikun/internals/contracts/#the-plan-cache-fingerprint)
-on purpose).
+on purpose). A non-zero `repairs` means steps are drifting instead — tighten the selectors the
+prose names. [Reading the cost line](/verikun/reference/cost/#reading-the-cost-line) breaks
+down each field.
 
 On CI, check one more thing first: whether the job restores `./.verikun/plans/` at all. A fresh
 runner has no cache, so every test recompiles every run —
 [persisting it](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache) is what
 gets you to the \$0 steady state.
 
-Cap it: `--max-cost-usd 0.50`.
+Cap it: `--max-cost-usd 0.50`. Note the cap is **per test**, so a suite's ceiling is that
+figure times the number of tests — see [the budget](/verikun/reference/cost/#the-budget).
 
 ## Still stuck?
 

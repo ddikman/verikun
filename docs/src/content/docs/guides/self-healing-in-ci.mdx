@@ -111,7 +111,8 @@ machine that keeps its cache.** A CI runner usually does not.
 The plan cache lives in `./.verikun/plans/`, relative to the working directory. A fresh
 `ubuntu-latest` checkout has no such directory, so **every test recompiles on every run** —
 you pay the first-compile price every time, forever, and never reach the steady state the
-cost model describes.
+cost model describes. [Cost & budget](/verikun/reference/cost/#keeping-it-cheap) covers the
+other levers.
 
 Persist it:
 

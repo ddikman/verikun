@@ -26,6 +26,10 @@ That steady state assumes a machine that **keeps** `./.verikun/plans/`. A throwa
 starts cold and recompiles every test on every run unless you persist it — see
 [Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache).
 
+For the arithmetic behind the number — when a model is called, how the estimate is computed,
+and why the `--max-cost-usd` ceiling is per test rather than per suite — see
+[Cost & budget](/verikun/reference/cost/).
+
 ```sh
 vk ai onboarding.md                       # first run: compile, then run
 vk ai onboarding.md                       # cached: replays with no model call
@@ -130,10 +134,10 @@ regression the test exists to catch. See
   path** (or a JSON summary with `--json`). The compiled plan is logged to the run before it
   executes, for troubleshooting.
 - **Cost and time are bounded by default.** Each run reports
-  `compile / repairs / replay=$0 / est $…` and aborts if the estimate crosses
-  **`--max-cost-usd` (default \$3)** or the wall clock passes **`--timeout` (default 15m)** —
-  so a runaway loop or repair cannot spend or hang without limit. `--cost-override
-  <input/output>` overrides the bundled per-1M price table if it drifts.
+  `compile=$… · repairs=$… · replay=$0 · cache_read=… tok · est $…` and aborts if the estimate
+  crosses **`--max-cost-usd` (default \$3, per test)** or the wall clock passes **`--timeout`
+  (default 15m)** — so a runaway loop or repair cannot spend or hang without limit. See
+  [Cost & budget](/verikun/reference/cost/).
 - **The same JUnit + HTML report** as any other flow, plus the cost line and any **suggested
   test improvements** — workarounds the model applied, which you can fold back into the
   prose to stabilise the test and cut tokens.

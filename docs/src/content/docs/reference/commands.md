@@ -103,10 +103,10 @@ Change the *device* the app runs on, then put it back. Full detail:
 | Flag | Default | Effect |
 |---|---|---|
 | `--model <m>` | `claude-sonnet-4-6` | Model **and** provider — see [Models](/verikun/reference/ai-plans/#models) |
-| `--max-cost-usd <n>` | `3` | Abort the run if the cost estimate crosses this |
+| `--max-cost-usd <n>` | `3` | Abort if the cost estimate crosses this — **per test**, see [Cost & budget](/verikun/reference/cost/#the-budget) |
 | `--timeout <dur>` | `15m` | Abort on wall clock |
-| `--cost-override <in/out>` | — | Override the bundled per-1M price table if it drifts |
-| `--effort <e>` | — | Reasoning effort, where the provider supports it |
+| `--cost-override <in/out>` | — | Override the bundled per-1M price table if it [drifts](/verikun/reference/cost/#where-the-rates-come-from) |
+| `--effort <e>` | — | Reasoning effort, where the provider supports it. Bills through the [output rate](/verikun/reference/cost/#how-the-estimate-is-calculated). |
 | `--package <pkg>` | inferred | App id, used as part of the plan-cache key |
 | `--app-build <id>` | — | Build identity; a change invalidates the cached plan |
 | `--server <url>` | `VERIKUN_SERVER` | Run device I/O against a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) |

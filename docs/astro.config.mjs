@@ -62,6 +62,7 @@ export default defineConfig({
             { label: 'Device claims', slug: 'reference/device-claims' },
             { label: 'Screenshots', slug: 'reference/screenshots' },
             { label: 'AI plans & models', slug: 'reference/ai-plans' },
+            { label: 'Cost & budget', slug: 'reference/cost' },
           ],
         },
         {

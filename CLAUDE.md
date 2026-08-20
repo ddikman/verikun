@@ -265,6 +265,7 @@ npm run docs:build           # = npm run build --prefix docs; production build â
   | report/run/suite-manifest shape or rollover | `reference/reports-and-test-runs.mdx` |
   | a `device set` key | `reference/device-state.md` |
   | the `vk ai` grammar, IR or model list | `reference/ai-plans.md` + `internals/plan-ir-and-engine.md` |
+  | the cost mechanism, the estimate formula, or a budget flag | `reference/cost.md` |
   | a cross-cutting invariant | `internals/core-principles.md` + `internals/contracts.md` |
   | **a platform gap, an honest degrade, or anything that differs simulator-vs-device** | `guides/platform-support.md` |
   | the version check | `getting-started/installation.md` |

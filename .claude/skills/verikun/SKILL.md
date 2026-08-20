@@ -378,7 +378,12 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   failure).
 - **Bounded by default:** the run aborts if the estimated spend crosses **$3**
   (`--max-cost-usd`) or the wall-clock passes **15m** (`--timeout`), so a runaway
-  compile/repair loop can't spend or hang without limit.
+  compile/repair loop can't spend or hang without limit. The ceiling is **per test, not per
+  suite** — `vk suite` gives each `*.md` its own fresh budget, so 20 tests at the default can
+  reach $60; there is no suite-wide cap, so lower the per-test figure instead. A model is only
+  ever called to **compile** (once, on a cache miss) or to **repair** (≤3 per failing step);
+  replay is always $0, and every non-`ai` command is $0 always. Full mechanism, the estimate
+  formula and the cache multipliers: <https://ddikman.github.io/verikun/reference/cost/>.
 - Exit `0` pass · `1` a step failed (or the budget/timeout was hit) · `2` usage · `3` environment
   (e.g. the model's API key — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — unset, or the `codex` /
   `cursor-agent` CLI missing / not logged in for `--model codex-cli` / `cursor-cli`).
