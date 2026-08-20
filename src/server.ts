@@ -46,13 +46,15 @@ import { ClaimOpts, claimDevice, claimsEnabled, releaseClaim, setProcessScoped, 
 import { classifyFailure, classifyInstallFailure, failoverCandidates, FailoverVerdict } from './device/failover';
 import { assertActionable, chooseTarget, lifecycleFor, restartTarget } from './drivers/lifecycle';
 import { err, setOutputQuiet } from './output';
-import { DeviceInfo, Driver, HierarchySource, Platform } from './types';
+import { DeviceInfo, HierarchySource, Platform } from './types';
+import { DeviceHandle, DevicePool, WorkerDevicePool } from './server-pool';
 import { FlagSpec, InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
 import {
-  describeError, DeviceChange, DeviceListResponse, DeviceOpRequest, DeviceOpResponse,
-  ExecRequest, ExecResponse, HealthResponse, InstallResponse, LogsRequest, LogsResponse, RpcErrorBody,
+  rebuildError, DeviceChange, DeviceListResponse, DeviceOpRequest, DeviceOpResponse,
+  ExecRequest, ExecResponse, HealthResponse, InstallResponse, LeaseResponse, LogsRequest,
+  LogsResponse, RpcErrorBody,
 } from './rpc';
-import { executeForServer, platformFromFlags, deviceFromFlags } from './cli';
+import { platformFromFlags, deviceFromFlags } from './cli';
 import { VERSION } from './version';
 
 /**
@@ -63,13 +65,15 @@ import { VERSION } from './version';
  * the server is reachable at all — a companion probe must never be the reason that answer
  * cannot be given.
  */
-function safeHierarchySource(driver: Driver): HierarchySource | null {
+async function safeReads(handle: DeviceHandle | undefined): Promise<HierarchySource | null> {
+  if (!handle) return null;
   try {
-    return driver.hierarchySource?.() ?? null;
+    return await handle.reads();
   } catch {
     return null;
   }
 }
+
 
 const DEFAULT_PORT = 8391;
 const EXEC_BODY_CAP = 1024 * 1024; // 1 MB of JSON is far beyond any leaf command
@@ -139,17 +143,17 @@ export interface ServerConfig {
   deviceControl?: DeviceControlPolicy;
   /** undefined = this server stays on its device whatever happens (pinned, or opted out). */
   failover?: FailoverPolicy;
-  // --- initial device binding ---
-  driver: Driver;
-  /** null = started with NO device bound (only reachable with deviceControl). */
-  serial: string | null;
+  // --- the devices ---
+  /** What this server serves. EMPTY = started with no device (only reachable with
+   *  deviceControl). Injected as a seam so the whole policy matrix — leases, failover,
+   *  device control — is testable with neither a device nor a worker thread. */
+  pool: DevicePool;
   /** Called whenever /v1/devices/* changes the binding, so the owner can track which
    *  device is live — shutdown must release the companion on the CURRENT device, not
    *  whichever one happened to be bound at startup. */
   onRebind?: (serial: string | null) => void;
   // --- seams (tests) ---
   lifecycle?: ServerLifecycle;
-  makeDriver?: (platform: Platform, device: string) => Driver;
   /** Points the host-global claim store somewhere throwaway. Undefined in production,
    *  where the store is $HOME-relative — without this a unit test asserting the failover
    *  claim hand-off would write into the developer's real `~/.verikun/devices`. */
@@ -261,28 +265,22 @@ const realLifecycle: ServerLifecycle = {
 export function buildServer(config: ServerConfig): Server {
   const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest();
   const lifecycle = config.lifecycle ?? realLifecycle;
-  const makeDriver = config.makeDriver ?? getDriver;
+  const pool = config.pool;
   const claimOpts = config.claimOpts ?? {};
   const claimEnv = claimOpts.env ?? process.env;
 
-  // The ONE piece of server state a request can change, and only via /v1/devices/*.
-  // Everything in `config` is startup policy and is never written. Grep `bound =`
-  // to find every rebind.
-  let bound: { driver: Driver; serial: string | null } = { driver: config.driver, serial: config.serial };
+  /** The serial, when this server has exactly one device. Device control and the
+   *  backwards-compatible `health.serial` are both single-device concepts. */
+  const soleSerial = (): string | null => (pool.serials().length === 1 ? pool.serials()[0] : null);
 
-  // Rebuild the driver rather than invalidating a cache: AdbDriver caches BOTH its
-  // resolved serial and a pinned `requested` without probing, so an AVD that returns
-  // on a different port would leave a permanently dead instance. Always rebind to the
-  // CONCRETE serial the lifecycle layer returned — never undefined, which would
-  // auto-resolve and could silently latch onto a different attached device.
-  //
-  // `driver` is passed when the caller has ALREADY built and probed one (failover), so
-  // the instance that answered the probe is the instance we go on to use.
-  const rebind = (serial: string | null, driver?: Driver): void => {
-    bound =
-      serial === null
-        ? { driver: bound.driver, serial: null }
-        : { driver: driver ?? makeDriver(config.platform, serial), serial };
+  // Rebuild the worker rather than invalidating a cache: both drivers cache a pinned
+  // serial without probing, so an AVD that returns on a different port would leave a
+  // permanently dead instance. Always rebind to the CONCRETE serial the lifecycle layer
+  // returned — never undefined, which would auto-resolve and could silently latch onto a
+  // different attached device.
+  const rebind = async (serial: string | null): Promise<void> => {
+    await pool.rebind(serial);
+    leases.clear(); // whatever they were holding no longer exists
     config.onRebind?.(serial);
     err(`[server] device: ${config.platform} · ${serial ?? '(none)'}`);
   };
@@ -307,32 +305,88 @@ export function buildServer(config: ServerConfig): Server {
     [...quarantine.entries()].map(([serial, q]) => ({ serial, reason: q.reason }));
 
   /**
-   * Move to another healthy device. Returns the serial moved to, or null when none
-   * remains (which is not an error here — the caller reports the ORIGINAL failure).
+   * Bring in a healthy replacement for `failed`. Returns the serial moved to, or null
+   * when none remains (which is not an error here — the caller reports the ORIGINAL
+   * failure).
    *
    * The walk order is load-bearing: claim-new -> probe -> commit -> release-old.
-   * Releasing the old claim first would leave this server bound to a device it no longer
+   * Releasing the old claim first would leave this server serving a device it no longer
    * holds, and another job on the host would take it mid-request.
+   *
+   * The probe is not a separate step here as it is on a single-device server: a worker
+   * only reports ready once its OWN `preflight()` has passed, so starting the worker IS
+   * the probe, run on the thread that will go on to use it.
    */
-  const pickFailoverDevice = (): string | null => {
+  /**
+   * Failover runs ONE AT A TIME, process-wide.
+   *
+   * The claim store cannot provide this: `claimDevice` returns ok for a claim this
+   * process already holds (`isMine`, by design), so two devices failing at once would
+   * BOTH pass the claim check on the same spare, both start a worker for it, and end up
+   * with two run tokens on one phone — the exact collision the pool exists to prevent.
+   * Concurrency here is real: `/v1/exec` on two leases, and the per-device install
+   * failovers that `Promise.all` fans out.
+   *
+   * Serializing is cheap because failover is the exceptional path, and it is also what
+   * makes the second caller CORRECT rather than merely safe: by the time it runs, its
+   * `pool.serials()` read already includes the spare the first one took, so it excludes
+   * that device and looks for another (or shrinks).
+   */
+  let failoverGate: Promise<unknown> = Promise.resolve();
+  const serializeFailover = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = failoverGate.then(fn, fn);
+    failoverGate = next.catch(() => undefined);
+    return next;
+  };
+
+  const pickFailoverDevice = (failed: string): Promise<string | null> =>
+    serializeFailover(() => pickFailoverDeviceLocked(failed));
+
+  const pickFailoverDeviceLocked = async (failed: string): Promise<string | null> => {
     const policy = config.failover;
     if (!policy) return null;
-    const from = bound.serial;
+    // Another failover may have already dealt with this device while we queued.
+    if (!pool.get(failed)) return null;
     // lifecycle.list is the SAME source /v1/devices answers from, so what a client can
-    // see and where the server will actually go cannot drift. bound.driver is not: it
-    // may be pointed at a corpse.
+    // see and where the server will actually go cannot drift. A pool member's own driver
+    // is not: it may be pointed at a corpse.
+    /**
+     * Nothing healthier exists. Shed the failed device — continuing to hand it out is
+     * what makes a pool a coin flip per lease — but ONLY while another remains.
+     *
+     * The LAST device stays, deliberately. A server that shed it would answer every
+     * later request `503 no device attached`, replacing the device's own error (full
+     * disk, no space, whatever it actually was) with a message that names nothing. A
+     * caller stuck on one broken device is better served by the truth about it.
+     */
+    const shrink = async (): Promise<null> => {
+      if (pool.serials().length <= 1) {
+        err(`[server] failover: nothing healthier to move to — staying on ${failed}`);
+        return null;
+      }
+      await pool.replace(failed, null);
+      err(`[server] failover: nothing healthier to move to — ${failed} left the pool (${pool.serials().length} device(s) remain)`);
+      releaseCompanionOn(failed);
+      if (claimsEnabled(claimEnv)) releaseClaim(failed, { ...claimOpts, mineOnly: true });
+      config.onRebind?.(soleSerial());
+      return null;
+    };
+
     let seen: DeviceInfo[] = [];
     try {
       seen = lifecycle.list(config.platform);
     } catch (e) {
       err(`[server] failover: cannot enumerate devices (${firstLine((e as Error).message)})`);
-      return null;
+      return shrink();
     }
     const candidates = failoverCandidates(seen, {
-      exclude: [...(from ? [from] : []), ...quarantine.keys()],
+      // Everything ALREADY IN THE POOL is excluded, not merely the failed device: on a
+      // pool, moving onto a device another lease is mid-step on would be the collision
+      // this whole feature exists to prevent.
+      exclude: [...pool.serials(), ...quarantine.keys()],
       allow: policy.allowedTargets,
     });
-    if (!candidates.length) return null;
+    if (!candidates.length) return shrink();
     err(`[server] failover: ${candidates.length} candidate(s) — ${candidates.map((d) => d.serial).join(', ')}`);
 
     for (const c of candidates) {
@@ -342,28 +396,33 @@ export function buildServer(config: ServerConfig): Server {
         err(`[server] failover: ${c.serial} is held by another job — skipping`);
         continue;
       }
-      const driver = makeDriver(config.platform, c.serial);
-      try {
-        // ONE probe per candidate, against TWO for the bound device on the unknown path.
-        // Deliberate: a false negative here just moves to the next candidate, while a
-        // false positive there quarantines a device that was fine.
-        driver.preflight();
-      } catch (e) {
+      const arrived = await pool.replace(failed, c.serial);
+      if (!arrived) {
+        // The worker refused to come up, which means its preflight failed — the same
+        // verdict a standalone probe would have reached, reported by the thread that ran it.
         if (claimsEnabled(claimEnv)) releaseClaim(c.serial, { ...claimOpts, mineOnly: true });
-        quarantineDevice(c.serial, `probe failed (${firstLine((e as Error).message)})`);
+        quarantineDevice(c.serial, 'probe failed (the device would not start serving)');
         continue;
       }
       err(`[server] failover: ${c.serial} probe ok — moving`);
-      if (from) {
-        // Hand back the old device's ONE UiAutomation connection, or it stays held for
-        // up to 15 minutes with nothing on the host able to explain why. Never throws.
-        releaseCompanionOn(from);
-        if (claimsEnabled(claimEnv)) releaseClaim(from, { ...claimOpts, mineOnly: true });
+      // The LEASE FOLLOWS THE MOVE. A holder that lost its device must land on the
+      // replacement the server just chose and reported, not on some third free device
+      // its next request happens to draw — and it must not lose its place in the queue
+      // either, since a move is not a reason to hand the floor to a racing job. The step
+      // that failed is still never replayed: it keeps this device's error, and the
+      // client re-points its run context on `deviceChanged`, which seals the old run and
+      // opens a fresh one so no report ever spans two devices.
+      for (const lease of leases.values()) {
+        if (lease.serial === failed) lease.serial = arrived;
       }
-      rebind(c.serial, driver);
-      return c.serial;
+      // Hand back the old device's ONE UiAutomation connection, or it stays held for
+      // up to 15 minutes with nothing on the host able to explain why. Never throws.
+      releaseCompanionOn(failed);
+      if (claimsEnabled(claimEnv)) releaseClaim(failed, { ...claimOpts, mineOnly: true });
+      config.onRebind?.(soleSerial());
+      return arrived;
     }
-    return null;
+    return shrink();
   };
 
   /** Why no move happened, in a form worth putting in front of an operator. */
@@ -384,17 +443,17 @@ export function buildServer(config: ServerConfig): Server {
   };
 
   /**
-   * Is the bound device actually gone? Two probes a second apart, because that gap is the
-   * only thing separating a USB re-enumeration or a mid-`launch --clear` gap from a dead
-   * box — and quarantining a healthy device is the expensive mistake here. Returns the
-   * reason when dead, undefined when it was a blip.
+   * Is this device actually gone? Two probes a second apart, because that gap is the only
+   * thing separating a USB re-enumeration or a mid-`launch --clear` gap from a dead box —
+   * and quarantining a healthy device is the expensive mistake here. Returns the reason
+   * when dead, undefined when it was a blip.
    */
-  const boundDeviceIsDead = async (): Promise<string | undefined> => {
+  const deviceIsDead = async (handle: DeviceHandle): Promise<string | undefined> => {
     let last = '';
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) await sleep(PROBE_RETRY_MS);
       try {
-        bound.driver.preflight();
+        await handle.preflight();
         return undefined;
       } catch (e) {
         last = firstLine((e as Error).message);
@@ -408,15 +467,22 @@ export function buildServer(config: ServerConfig): Server {
    * but NEVER replay the operation there.
    *
    * That restraint is the whole point. A `vk ai` step twelve deep presupposes the eleven
-   * before it ran on THIS device; device B's app is at whatever an earlier run left
+   * before it ran on THIS device; another device's app is at whatever an earlier run left
    * behind. Replaying would either find something matching and go green (a false green
    * that ships a regression) or wake the repair model against the wrong screen. So the
    * failing operation still fails, honestly, with the ORIGINAL device's error — and it is
    * the NEXT request that benefits from the move.
    *
+   * The LEASE, unlike the step, does follow the move: the holder is re-pointed onto the
+   * replacement in `pickFailoverDevice`, so its next request lands on the device this
+   * response named rather than on some third one it happens to draw — and it keeps its
+   * place in the queue, because a move is not a reason to hand the floor to a racing job.
+   * `reapLeases` only drops a lease when its device left with NO replacement (the shrink
+   * case). Every other lease is untouched throughout.
+   *
    * Returns the change to report, or undefined when we stayed put.
    */
-  const considerFailover = async (e: unknown, what: string): Promise<DeviceChange | undefined> => {
+  const considerFailover = async (e: unknown, what: string, handle: DeviceHandle): Promise<DeviceChange | undefined> => {
     if (!config.failover) return undefined;
     const verdict = classifyFailure(e);
     let reason = verdict.reason;
@@ -424,19 +490,19 @@ export function buildServer(config: ServerConfig): Server {
       // Only an unrecognised exit 3 earns a probe; `transient` and `toolchain` set
       // probe:false precisely so a mid-launch gap or a missing adb cannot become a move.
       if (!verdict.probe) return undefined;
-      const dead = await boundDeviceIsDead();
+      const dead = await deviceIsDead(handle);
       if (!dead) return undefined; // a blip — the test rerun is the right answer, not a new device
       reason = dead;
       noteVerdict({ ...verdict, move: true }, e, what);
     }
-    err(`[server] ${what}: FAILED on ${bound.serial ?? '(none)'} — ${reason}`);
-    const from = bound.serial ?? '(none)';
-    quarantineDevice(bound.serial, reason);
-    const to = pickFailoverDevice();
-    if (!to) {
-      err(`[server] failover: nothing healthier to move to — staying on ${from}`);
-      return undefined;
-    }
+    const from = handle.serial;
+    err(`[server] ${what}: FAILED on ${from} — ${reason}`);
+    quarantineDevice(from, reason);
+    // pickFailoverDevice has already said which of the two no-move outcomes happened —
+    // the device was shed, or it was the last one and stayed. A second line here would
+    // contradict one of them.
+    const to = await pickFailoverDevice(from);
+    if (!to) return undefined;
     return { from, to, reason, retried: false };
   };
 
@@ -448,28 +514,76 @@ export function buildServer(config: ServerConfig): Server {
     return timingSafeEqual(sha(m[1]), sha(config.authKey));
   };
 
-  // One active run-token owns the device; see LOCK_IDLE_MS for takeover.
-  let lock: { token: string; lastSeenMs: number } | null = null;
-  const acquireLock = (token: string): boolean => {
-    const now = Date.now();
-    if (lock && lock.token !== token) {
-      if (now - lock.lastSeenMs < LOCK_IDLE_MS) return false;
-      err(`[server] device lock: idle run ${lock.token.slice(0, 8)}… taken over by ${token.slice(0, 8)}…`);
+  // --- leases ---------------------------------------------------------------
+  //
+  // One run token holds one device for the whole run. With a single device this is
+  // exactly the old lock (second token → 409, idle takeover after LOCK_IDLE_MS); with a
+  // pool it is what gives a parallel suite N devices behind one URL while keeping every
+  // call of a given run — including its repairs — on the phone that run started on.
+
+  const leases = new Map<string, { serial: string; lastSeenMs: number }>();
+
+  /** Drop leases nobody has touched lately, and any whose device has left the pool.
+   *  The second half is how failover reaches a lease: a quarantined device's holder is
+   *  released here, so its NEXT request takes a healthy one. */
+  function reapLeases(now: number): void {
+    const live = new Set(pool.serials());
+    for (const [token, lease] of leases) {
+      if (!live.has(lease.serial)) {
+        leases.delete(token);
+      } else if (now - lease.lastSeenMs >= LOCK_IDLE_MS) {
+        err(`[server] lease: idle run ${token.slice(0, 8)}… released ${lease.serial}`);
+        leases.delete(token);
+      }
     }
-    lock = { token, lastSeenMs: now };
-    return true;
-  };
+  }
 
-  // The device can serve one interaction at a time — serialize the device endpoints
-  // through a promise chain (requests queue in arrival order).
-  let queue: Promise<unknown> = Promise.resolve();
-  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
-    const next = queue.then(fn, fn);
-    queue = next.catch(() => undefined);
-    return next;
-  };
+  /** This token's device, taking a free one when it has none. Null = pool exhausted. */
+  function leaseFor(token: string): string | null {
+    const now = Date.now();
+    reapLeases(now);
+    const mine = leases.get(token);
+    if (mine) {
+      mine.lastSeenMs = now; // the heartbeat that keeps a long step from losing its device
+      return mine.serial;
+    }
+    const taken = new Set([...leases.values()].map((l) => l.serial));
+    const free = pool.serials().find((s) => !taken.has(s));
+    if (!free) return null;
+    leases.set(token, { serial: free, lastSeenMs: now });
+    err(`[server] lease: ${free} → run ${token.slice(0, 8)}…`);
+    return free;
+  }
 
-  async function handleExec(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  function busyError(): HttpError {
+    const n = pool.serials().length;
+    return new HttpError(
+      409,
+      n > 1
+        ? `all ${n} devices are leased by other active runs — retry when one finishes`
+        : 'device is locked by another active run — retry when it finishes',
+    );
+  }
+
+  /** The device this request runs against. Commands are serialized per device by the
+   *  handle itself, so two leases proceed independently. */
+  function leasedHandle(token: string): DeviceHandle {
+    const serial = leaseFor(token);
+    if (!serial) throw busyError();
+    const handle = pool.get(serial);
+    if (!handle) throw new HttpError(503, `device ${serial} is no longer attached`, 3);
+    return handle;
+  }
+
+  /** Whether anyone ELSE is mid-run. Guards the two whole-server operations — install
+   *  (which writes a binary to every device) and device control (which power-cycles
+   *  one) — so neither can happen under a running suite. */
+  function othersActive(token: string): boolean {
+    reapLeases(Date.now());
+    return [...leases.entries()].some(([t]) => t !== token);
+  }
+
+  async function handleExec(handle: DeviceHandle, req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readBody(req, EXEC_BODY_CAP);
     let parsed: ExecRequest;
     try {
@@ -492,20 +606,21 @@ export function buildServer(config: ServerConfig): Server {
     if (node.type !== 'command') throw new HttpError(400, 'rejected: not a command leaf');
 
     const t0 = Date.now();
-    const { code, error, step, artifacts, logStart } = await executeForServer(
-      node.command,
-      node.positionals,
-      leafToFlags(node),
-      bound.driver,
-      config.platform,
-    );
-    err(`[server] exec ${node.command} ${node.positionals.join(' ')} → exit ${code} (${Date.now() - t0}ms)`);
+    // Off to this device's worker thread: the call underneath is a blocking spawnSync,
+    // and running it here would stall every other device's requests.
+    const { code, error, step, artifacts, logStart } = await handle.exec({
+      command: node.command,
+      positionals: node.positionals,
+      flags: leafToFlags(node),
+    });
+    err(`[server] ${handle.serial} exec ${node.command} ${node.positionals.join(' ')} → exit ${code} (${Date.now() - t0}ms)`);
     // The step keeps its own verdict whatever we decide here: the error below is the one
-    // THIS device produced, never a replay's. Only the binding moves.
-    const deviceChanged = code !== 0 && error ? await considerFailover(error, 'exec') : undefined;
+    // THIS device produced, never a replay's. Only the pool membership moves.
+    const deviceChanged =
+      code !== 0 && error ? await considerFailover(rebuildError(error), 'exec', handle) : undefined;
     const payload: ExecResponse = {
       code,
-      ...(error ? { error: describeError(error) } : {}),
+      ...(error ? { error } : {}),
       ...(deviceChanged ? { deviceChanged } : {}),
       ...(step ? { step } : {}),
       ...(artifacts && Object.keys(artifacts).length ? { artifacts: encodeArtifacts(artifacts) } : {}),
@@ -514,23 +629,23 @@ export function buildServer(config: ServerConfig): Server {
     sendJson(res, 200, payload);
   }
 
-  async function handleElements(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function handleElements(handle: DeviceHandle, req: IncomingMessage, res: ServerResponse): Promise<void> {
     await readBody(req, EXEC_BODY_CAP); // drain (the body is unused; keeps keep-alive sane)
     try {
-      const elements = bound.driver.getElements(); // CliError(3) on dump failure → 500 below
+      const elements = await handle.elements(); // CliError(3) on dump failure → 500 below
       sendJson(res, 200, { elements });
     } catch (e) {
       // Move if the device is at fault, but NEVER answer with the new device's screen:
       // this is the engine's `if-present` guard input and its repair context, and a
       // hierarchy from somewhere else is worse than an error. The client's connect probe
       // re-asks after a reported move — see remote.ts's preflight.
-      const deviceChanged = await considerFailover(e, 'read');
+      const deviceChanged = await considerFailover(e, 'read', handle);
       if (!deviceChanged) throw e;
       throw new HttpError(500, (e as Error).message, e instanceof CliError ? e.exitCode : 3, deviceChanged);
     }
   }
 
-  async function handleLogs(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function handleLogs(handle: DeviceHandle, req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readBody(req, EXEC_BODY_CAP);
     let parsed: LogsRequest = {};
     if (body.length) {
@@ -564,7 +679,9 @@ export function buildServer(config: ServerConfig): Server {
     // The BOUND driver, never config.driver: after a rebind (device control, or a
     // failover) the startup driver is pinned to a serial that may be gone, and logs
     // are evidence about the run that just failed — serving another device's is a lie.
-    const logs = bound.driver.getLogs({
+    // The LEASED device, not a driver captured at startup: reading logs off a device the
+    // caller never drove would attribute one phone's output to another's report.
+    const logs = await handle.logs({
       ...(lines !== undefined ? { lines } : {}),
       ...(parsed.since ? { since: parsed.since } : {}),
       ...(appId ? { appId } : {}),
@@ -585,14 +702,16 @@ export function buildServer(config: ServerConfig): Server {
    * On exhaustion it throws the FIRST device's error, never the last. That inversion is
    * what makes move-by-default safe: a wrong move costs time, not the diagnosis.
    */
-  function installWithFailover(tmpPath: string): { change?: DeviceChange; moves: number } {
+  async function installWithFailover(serial: string, tmpPath: string): Promise<{ change?: DeviceChange; moves: number }> {
     let change: DeviceChange | undefined;
     let moves = 0;
     let firstError: unknown;
+    let from = serial;
     for (let hop = 0; ; hop++) {
-      const from = bound.serial ?? '(none)';
+      const handle = pool.get(from);
+      if (!handle) throw firstError ?? new HttpError(503, `device ${from} is no longer attached`, 3);
       try {
-        bound.driver.install(tmpPath);
+        await handle.install(tmpPath);
         return { change, moves };
       } catch (e) {
         if (firstError === undefined) firstError = e;
@@ -602,14 +721,15 @@ export function buildServer(config: ServerConfig): Server {
         // The artifact is broken / the caller is wrong / failover is off / we are out of
         // hops: report the first failure unchanged, exactly as before this feature.
         if (!verdict.move || !config.failover || hop >= MAX_FAILOVER_HOPS) throw firstError;
-        quarantineDevice(bound.serial, verdict.reason);
-        const to = pickFailoverDevice();
+        quarantineDevice(from, verdict.reason);
+        const to = await pickFailoverDevice(from);
         if (!to) {
           const original = firstError instanceof Error ? firstError.message : String(firstError);
           throw new HttpError(500, `${original}${exhaustedNote()}`, 3, change);
         }
         change = { from, to, reason: verdict.reason, retried: true };
         moves++;
+        from = to;
         err(`[server] install: retrying on ${to}…`);
       }
     }
@@ -645,10 +765,43 @@ export function buildServer(config: ServerConfig): Server {
       if (expected && expected !== digest) {
         throw new HttpError(400, `sha256 mismatch: upload arrived corrupted (got ${digest.slice(0, 12)}…, expected ${expected.slice(0, 12)}…)`);
       }
-      err(`[server] install: received ${size} bytes (.${ext}), installing…`);
-      const { change, moves } = installWithFailover(tmpPath);
-      err(`[server] install: done${change ? ` on ${change.to} (after ${moves} move${moves === 1 ? '' : 's'})` : ''}`);
-      const body: InstallResponse = { ok: true, bytes: size, sha256: digest, ...(change ? { deviceChanged: change } : {}) };
+      // EVERY device in the pool, concurrently. A parallel suite deals its tests across
+      // all of them, so installing on one would leave the other lanes running the
+      // previous build — a wrong-but-green result, which is the worst kind. Each device
+      // carries its own failover budget, so one full disk costs that device, not the build.
+      const targets = pool.serials();
+      err(`[server] install: received ${size} bytes (.${ext}), installing on ${targets.join(', ')}…`);
+      const outcomes = await Promise.all(
+        targets.map(async (serial) => {
+          try {
+            return { serial, ...(await installWithFailover(serial, tmpPath)), error: null as unknown };
+          } catch (e) {
+            return { serial, change: undefined, moves: 0, error: e };
+          }
+        }),
+      );
+      const failed = outcomes.filter((o) => o.error);
+      if (failed.length) {
+        // One artifact, many devices: if it failed everywhere the file is the suspect, so
+        // surface the FIRST device's error unchanged rather than a summary that buries it.
+        if (failed.length === targets.length) throw failed[0].error;
+        throw new HttpError(
+          500,
+          `install failed on ${failed.map((f) => `${f.serial} (${firstLine((f.error as Error).message)})`).join('; ')}`,
+          3,
+        );
+      }
+      const moved = outcomes.filter((o) => o.change);
+      for (const m of moved) err(`[server] install: ${m.serial} → ${m.change!.to} (${m.moves} move(s))`);
+      err(`[server] install: done on ${pool.serials().join(', ')}`);
+      const body: InstallResponse = {
+        ok: true,
+        bytes: size,
+        sha256: digest,
+        devices: pool.serials(),
+        // The wire field is singular; a pool that moved more than one device logs the rest.
+        ...(moved.length ? { deviceChanged: moved[0].change } : {}),
+      };
       sendJson(res, 200, body);
     } finally {
       try {
@@ -656,6 +809,26 @@ export function buildServer(config: ServerConfig): Server {
       } catch {
         /* upload may have failed before the file existed */
       }
+    }
+  }
+
+  /**
+   * Device-control MUTATIONS are a single-device concept.
+   *
+   * The protocol names no device, so on a pool "restart the device" has no answer — and
+   * guessing (the caller's lease? the first serial?) would let one job power-cycle a
+   * phone another job is mid-test on. Refusing plainly beats a rule nobody can predict.
+   * The GET listing stays available, because reading what is attached is safe.
+   */
+  function requireSingleDevice(op: string): void {
+    const n = pool.serials().length;
+    if (n > 1) {
+      throw new HttpError(
+        403,
+        `this server pools ${n} devices, so '${op}' has no single device to act on. ` +
+          'Run one server per device if you need remote device control.',
+        3,
+      );
     }
   }
 
@@ -702,12 +875,12 @@ export function buildServer(config: ServerConfig): Server {
     } else {
       // No name given: act on what this server is for — its bound device, else the
       // operator's declared default.
-      target = bound.serial ?? policy.allowedTargets[0];
+      target = soleSerial() ?? policy.allowedTargets[0];
     }
     // `stop` acts on the binding, so answer its own precondition before the
     // start/restart "what would I even boot?" one, or a stop against a device-less
     // server reports a confusing "no default startable target".
-    if (op === 'stop' && bound.serial === null) {
+    if (op === 'stop' && soleSerial() === null) {
       throw new HttpError(409, 'no device is bound — nothing to stop', 3);
     }
     if (!target) {
@@ -732,17 +905,17 @@ export function buildServer(config: ServerConfig): Server {
 
     if (op === 'stop') {
       await lifecycle.stop(config.platform, target, opts);
-      rebind(null);
+      await rebind(null);
       result = { ok: true, platform: config.platform, serial: null, changed: true, durationMs: Date.now() - t0 };
     } else if (op === 'restart') {
       if (wipe) err('[server] device: WIPE requested — the device\'s data will be erased');
       const { serial } = await lifecycle.restart(config.platform, target, opts);
-      rebind(serial);
+      await rebind(serial);
       result = { ok: true, platform: config.platform, serial, changed: true, durationMs: Date.now() - t0 };
     } else {
       if (wipe) err('[server] device: WIPE requested — the device\'s data will be erased');
       const { serial, started } = await lifecycle.start(config.platform, target, opts);
-      if (started || serial !== bound.serial) rebind(serial);
+      if (started || serial !== soleSerial()) await rebind(serial);
       result = { ok: true, platform: config.platform, serial, changed: started, durationMs: Date.now() - t0 };
     }
 
@@ -764,23 +937,29 @@ export function buildServer(config: ServerConfig): Server {
       if (config.authKey && req.headers.authorization && !authorized(req)) {
         throw new HttpError(401, 'invalid auth key');
       }
-      const reads = bound.serial === null ? null : safeHierarchySource(bound.driver);
+      const serials = pool.serials();
+      // `reads` is a single-device answer, and on a pool the useful one is per-lease —
+      // /v1/lease carries it there, so the client logs the read path of the device it
+      // actually got rather than an arbitrary member's.
+      const reads = serials.length === 1 ? await safeReads(pool.get(serials[0])) : null;
+      const quarantined = quarantineList();
       const health: HealthResponse = {
         ok: true,
         version: VERSION,
         platform: config.platform,
-        serial: bound.serial,
+        // Kept as the SERIAL for a single-device server, so every existing client is
+        // untouched; a pool reports null here and speaks through capacity/devices.
+        serial: serials.length === 1 ? serials[0] : null,
+        capacity: serials.length,
+        devices: serials,
         installEnabled: config.allowInstall,
         ...(reads ? { reads } : {}),
         deviceControlEnabled: config.deviceControl !== undefined,
         deviceNamingEnabled: (config.deviceControl?.allowedTargets.length ?? 0) > 0,
         failoverEnabled: config.failover !== undefined,
-        // Omitted when empty, so a CI job can assert on its ABSENCE. Unauthenticated
-        // like the rest of health, which is what makes "is the pool ok?" answerable
-        // without holding a run token.
-        ...(quarantine.size ? { quarantined: quarantineList() } : {}),
-        // Derived from `serial` right here, so the two can never drift apart.
-        deviceState: bound.serial === null ? 'none' : 'ready',
+        ...(quarantined.length ? { quarantined } : {}),
+        // Derived from the pool right here, so the two can never drift apart.
+        deviceState: serials.length ? 'ready' : 'none',
       };
       sendJson(res, 200, health);
       return;
@@ -788,33 +967,25 @@ export function buildServer(config: ServerConfig): Server {
 
     if (!authorized(req)) throw new HttpError(401, 'missing or invalid auth key');
     const token = String(req.headers['x-verikun-run'] ?? '(anonymous)');
-    const deviceEndpoint = (fn: () => Promise<void>): Promise<void> =>
-      serialize(async () => {
-        if (!acquireLock(token)) {
-          throw new HttpError(409, 'device is locked by another active run — retry when it finishes');
-        }
-        await fn();
-      });
+    const served = new Set(pool.serials());
 
     if (req.method === 'POST' && path === '/v1/release') {
-      // A finished client frees its lock so the NEXT command (a fresh run token)
-      // proceeds immediately instead of waiting out the idle takeover. Serialized
-      // so it lands after any in-flight request; only the holder can release.
-      return serialize(async () => {
-        await readBody(req, EXEC_BODY_CAP); // drain
-        const released = lock !== null && lock.token === token;
-        if (released) lock = null;
-        sendJson(res, 200, { ok: true, released });
-      });
+      // A finished client frees its lease so the NEXT run proceeds immediately instead
+      // of waiting out the idle takeover. Only the holder can release.
+      await readBody(req, EXEC_BODY_CAP); // drain
+      const released = leases.delete(token);
+      sendJson(res, 200, { ok: true, released });
+      return;
     }
-    // Device control. Every MUTATION takes the full device lock: a restart while
-    // another run holds the device is sabotage (→ 409), while the recovery case still
-    // works because the HOLDER passes its own run token, which acquireLock accepts and
-    // refreshes. You may power-cycle your own device; nobody else may.
+    // Device control. Every MUTATION is refused while ANOTHER run is live: power-cycling
+    // a phone someone else is mid-test on is sabotage. The recovery case still works,
+    // because the holder passes its own run token.
     if (req.method === 'POST' && (path === '/v1/devices/start' || path === '/v1/devices/restart' || path === '/v1/devices/stop')) {
       const policy = requireDeviceControl();
       const op = path.slice('/v1/devices/'.length) as 'start' | 'restart' | 'stop';
-      return deviceEndpoint(() => handleDeviceOp(op, policy, req, res));
+      requireSingleDevice(op);
+      if (othersActive(token)) throw busyError();
+      return handleDeviceOp(op, policy, req, res);
     }
     if (req.method === 'GET' && path === '/v1/devices') {
       // Neither locked nor serialized: a diagnostic must stay answerable DURING
@@ -845,10 +1016,10 @@ export function buildServer(config: ServerConfig): Server {
       }
       const body: DeviceListResponse = {
         devices: policy.allowedTargets.length
-          ? seen.filter((d) => d.serial === bound.serial || policy.allowedTargets.includes(d.name ?? ''))
-          : seen.filter((d) => d.serial === bound.serial),
+          ? seen.filter((d) => served.has(d.serial) || policy.allowedTargets.includes(d.name ?? ''))
+          : seen.filter((d) => served.has(d.serial)),
         startable: policy.allowedTargets,
-        bound: bound.serial,
+        bound: soleSerial(),
       };
       sendJson(res, 200, body);
       return;
@@ -859,8 +1030,8 @@ export function buildServer(config: ServerConfig): Server {
     // resolved a device — one that DIED mid-run still has a non-null binding and keeps
     // today's behaviour (the exec returns exit 3 in its body).
     if (
-      bound.serial === null &&
-      (path === '/v1/exec' || path === '/v1/elements' || path === '/v1/logs' || path === '/v1/install')
+      served.size === 0 &&
+      (path === '/v1/exec' || path === '/v1/elements' || path === '/v1/logs' || path === '/v1/install' || path === '/v1/lease')
     ) {
       throw new HttpError(
         503,
@@ -871,14 +1042,36 @@ export function buildServer(config: ServerConfig): Server {
       );
     }
 
-    if (req.method === 'POST' && path === '/v1/exec') return deviceEndpoint(() => handleExec(req, res));
-    if (req.method === 'POST' && path === '/v1/elements') return deviceEndpoint(() => handleElements(req, res));
-    if (req.method === 'POST' && path === '/v1/logs') return deviceEndpoint(() => handleLogs(req, res));
+    if (req.method === 'POST' && path === '/v1/lease') {
+      // Take (or confirm) this run's device UP FRONT, so the caller knows which phone it
+      // got before its first step — a step attributed to the wrong device is worse than
+      // one attributed to none. Idempotent: re-leasing returns the same device.
+      await readBody(req, EXEC_BODY_CAP); // drain
+      const handle = leasedHandle(token);
+      const reads = await safeReads(handle);
+      const body: LeaseResponse = {
+        platform: config.platform,
+        serial: handle.serial,
+        ...(reads ? { reads } : {}),
+      };
+      sendJson(res, 200, body);
+      return;
+    }
+    if (req.method === 'POST' && path === '/v1/exec') return handleExec(leasedHandle(token), req, res);
+    if (req.method === 'POST' && path === '/v1/elements') return handleElements(leasedHandle(token), req, res);
+    if (req.method === 'POST' && path === '/v1/logs') return handleLogs(leasedHandle(token), req, res);
     if (req.method === 'POST' && path === '/v1/install') {
       if (!config.allowInstall) {
         throw new HttpError(403, 'install is disabled on this server (start it with --allow-install)', 3);
       }
-      return deviceEndpoint(() => handleInstall(req, res));
+      // Installing writes a binary to EVERY device, so it cannot happen under someone
+      // else's run — otherwise a suite's later lanes would silently swap builds mid-run.
+      if (othersActive(token)) throw busyError();
+      // …and the installer KEEPS a lease afterwards, so a racing job cannot take a device
+      // in the gap between `vk install` and the suite that follows it. The client's own
+      // `close()` hands it back, which is what lets install-then-suite chain in one job.
+      leaseFor(token);
+      return handleInstall(req, res);
     }
     throw new HttpError(404, `unknown endpoint ${req.method} ${path}`);
   }
@@ -911,6 +1104,16 @@ export function buildServer(config: ServerConfig): Server {
   // A 512 MB upload over a slow link can legitimately exceed Node's 5-minute
   // default request window.
   server.requestTimeout = 30 * 60 * 1000;
+  // Node hangs up an idle keep-alive connection after FIVE SECONDS by default, and
+  // advertises that in its `Keep-Alive` header — which the client's fetch pool honours.
+  // A verikun client routinely pauses far longer than that between requests: compiling a
+  // test with the model takes tens of seconds, during which the client is one blocking
+  // `spawnSync` and cannot even notice the socket close. The next request then writes to a
+  // dead socket and surfaces as `fetch failed`, which the suite reads as the DEVICE being
+  // unreachable — a lane retired for a healthy server. Outliving the lease's own idle
+  // window is the honest number: a connection should survive exactly as long as the run
+  // holding it is still considered alive.
+  server.keepAliveTimeout = LOCK_IDLE_MS;
   return server;
 }
 
@@ -1005,12 +1208,90 @@ export function parseFailover(
   return { policy: { allowedTargets: [] }, why: 'ENABLED · any attached device on this host' };
 }
 
+/** What `--devices` asked for. Pure — exported for unit tests. */
+export interface DevicePoolSpec {
+  /** Every usable device of the platform, rather than a named list. */
+  all: boolean;
+  /** The named serials, when `all` is false. */
+  serials: string[];
+  /** Platform pinned by the `all-android` / `all-ios` spelling. */
+  platform?: Platform;
+}
+
+/**
+ * Parse `--devices all | all-android | all-ios | <serial>,<serial>`.
+ *
+ * `all-android` / `all-ios` both SELECT and pin the platform, so the intent is one
+ * self-documenting flag rather than `--android --devices all` read as a pair — and,
+ * more usefully, so a bare `--devices all` on a Mac with both emulators and simulators
+ * attached cannot silently resolve to whichever platform happened to be the default.
+ */
+export function parseDevicePool(flags: Flags): DevicePoolSpec | undefined {
+  const raw = flags['devices'];
+  if (raw === undefined || raw === false) return undefined;
+  if (raw === true) throw new CliError("--devices needs a value: 'all', 'all-android', 'all-ios', or a comma-separated list of serials.", 2);
+  const entries = [...new Set(String(raw).split(',').map((e) => e.trim()).filter(Boolean))];
+  if (!entries.length) {
+    throw new CliError("--devices needs a value: 'all', 'all-android', 'all-ios', or a comma-separated list of serials.", 2);
+  }
+  const alls = entries.filter((e) => /^all(-android|-ios)?$/i.test(e));
+  if (alls.length && entries.length > 1) {
+    throw new CliError(`--devices '${alls[0]}' selects every device, so it cannot be combined with named serials.`, 2);
+  }
+  if (alls.length) {
+    const suffix = /^all(?:-(android|ios))?$/i.exec(alls[0])![1];
+    return { all: true, serials: [], ...(suffix ? { platform: suffix.toLowerCase() as Platform } : {}) };
+  }
+  return { all: false, serials: entries };
+}
+
+/** Was a platform named on the command line, as opposed to defaulted? */
+function platformWasNamed(flags: Flags): boolean {
+  return flagBool(flags, 'ios') || flagBool(flags, 'android') || !!flagStr(flags, 'platform');
+}
+
+/**
+ * Which serials this server will pool.
+ *
+ * `all` takes only devices in a usable state — the same predicate `vk devices` applies —
+ * so an offline or unauthorized phone never becomes advertised capacity. A NAMED serial
+ * that is not attached is fatal rather than skipped: the operator asked for a specific
+ * device, and silently serving fewer than requested is how a suite quietly loses a lane.
+ */
+function poolSerials(platform: Platform, spec: DevicePoolSpec): string[] {
+  const attached = getDriver(platform, undefined).listDevices();
+  const usable = attached.filter((d) => d.state === 'device').map((d) => d.serial);
+  if (spec.all) {
+    if (!usable.length) throw new CliError(`--devices: no usable ${platform} device is attached.`, 3);
+    return usable;
+  }
+  const missing = spec.serials.filter((x) => !usable.includes(x));
+  if (missing.length) {
+    throw new CliError(
+      `--devices: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not attached. ` +
+        `Usable ${platform} devices: ${usable.length ? usable.join(', ') : '(none)'}`,
+      3,
+    );
+  }
+  return spec.serials;
+}
+
 export async function cmdServer(positionals: string[], flags: Flags): Promise<number> {
   if (positionals.length > 0) {
-    throw new CliError(`server: unexpected argument '${positionals[0]}'. Usage: verikun server [--bind addr] [--port n] [--auth-key k] [--allow-install] [--allow-device-control[=names]] [--allow-failover[=serials]|--no-failover] [--allow-unsafe-anonymous]`, 2);
+    throw new CliError(`server: unexpected argument '${positionals[0]}'. Usage: verikun server [--bind addr] [--port n] [--auth-key k] [--devices all|a,b] [--allow-install] [--allow-device-control[=names]] [--allow-failover[=serials]|--no-failover] [--allow-unsafe-anonymous]`, 2);
   }
-  const platform = platformFromFlags(flags);
+  const poolSpec = parseDevicePool(flags);
+  if (poolSpec?.platform && platformWasNamed(flags) && platformFromFlags(flags) !== poolSpec.platform) {
+    throw new CliError(
+      `--devices all-${poolSpec.platform} contradicts the platform flag (${platformFromFlags(flags)}). Pass one or the other.`,
+      2,
+    );
+  }
+  const platform = poolSpec?.platform ?? platformFromFlags(flags);
   const device = deviceFromFlags(flags, platform);
+  if (poolSpec && flagStr(flags, 'device')) {
+    throw new CliError('--devices and --device are alternatives: pass a pool or a single device, not both.', 2);
+  }
   const bind = flagStr(flags, 'bind') || '127.0.0.1';
   const port = flagNum(flags, 'port') ?? DEFAULT_PORT;
   const allowInstall = flagBool(flags, 'allow-install');
@@ -1043,17 +1324,22 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
   // The server owns its device for as long as it listens, so its pid is exact liveness
   // evidence — set before resolving, since that is where the claim is taken.
   setProcessScoped(true);
-  const driver = getDriver(platform, device);
-  let serial: string | null = null;
+  let serials: string[] = [];
   try {
-    serial = driver.resolvedSerial();
-    // Both drivers TRUST a pinned --device without probing (adb.ts / ios.ts), so
-    // `vk server --device X` already starts "bound" to a device that may not exist.
-    // Verify it here, or the device-less path is never entered and every request
-    // fails with nothing a client could do about it.
-    if (deviceControl && device && !driver.listDevices().some((d) => d.serial === serial)) {
-      err(`[server] --device ${serial} is not attached — starting with NO device bound`);
-      serial = null;
+    if (poolSpec) {
+      serials = poolSerials(platform, poolSpec);
+    } else {
+      const driver = getDriver(platform, device);
+      const serial = driver.resolvedSerial();
+      // Both drivers TRUST a pinned --device without probing (adb.ts / ios.ts), so
+      // `vk server --device X` already starts "bound" to a device that may not exist.
+      // Verify it here, or the device-less path is never entered and every request
+      // fails with nothing a client could do about it.
+      if (deviceControl && device && !driver.listDevices().some((d) => d.serial === serial)) {
+        err(`[server] --device ${serial} is not attached — starting with NO device bound`);
+      } else {
+        serials = [serial];
+      }
     }
   } catch (e) {
     // Ambiguity (exit 2) is an OPERATOR error — booting another device makes it
@@ -1063,11 +1349,14 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
     err(`[server] no device resolved (${(e as Error).message})`);
     err('[server] listening anyway — device control is enabled. Boot one with:');
     err('[server]     vk devices start --server <url>');
-    serial = null;
   }
-  // A device resolved, so the toolchain must be able to drive it — otherwise the
-  // server listens on a box with no idb and 500s every /v1/exec.
-  if (serial !== null) driver.preflight();
+  // Each device gets a worker thread, and a worker only reports ready once preflight()
+  // says its toolchain can actually drive it — so the pool never advertises capacity it
+  // cannot serve. One device that will not come up costs its own lane, not the server.
+  const pool = await WorkerDevicePool.start(platform, serials);
+  if (serials.length && !pool.serials().length && !deviceControl) {
+    throw new CliError('server: no device could be driven — see the errors above.', 3);
+  }
   if (deviceControl?.allowedTargets.length) {
     // Typo detection only — non-fatal, since the tooling may be missing entirely.
     const known = new Set(realLifecycle.list(platform).map((d) => d.name).filter(Boolean));
@@ -1079,23 +1368,29 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
   // data channel, so silence them — request logging goes to stderr instead.
   setOutputQuiet(true);
 
-  // Track the LIVE binding: a client may boot or swap the device after startup, and
-  // shutdown has to release the companion on whatever is bound then.
-  let boundSerial: string | null = serial;
+  // Track the LIVE devices: a client may boot or swap one after startup, and shutdown
+  // has to release the companion on whatever is bound then.
+  let live: string[] = pool.serials();
   const server = buildServer({
-    driver, platform, serial, authKey, allowInstall, deviceControl, failover: failover.policy,
-    onRebind: (s) => { boundSerial = s; },
+    platform, pool, authKey, allowInstall, deviceControl, failover: failover.policy,
+    onRebind: (s) => { live = s === null ? [] : [s]; },
   });
 
   return new Promise<number>((resolve, reject) => {
     server.on('error', (e) => reject(new CliError(`server: could not listen on ${bind}:${port} (${(e as Error).message})`, 3)));
-    server.listen(port, bind, () => {
+    server.listen(port, bind, async () => {
       err(`[server] verikun ${VERSION} listening on http://${bind}:${port}`);
-      err(`[server] device: ${platform} · ${serial ?? '(none bound)'}`);
+      err(`[server] devices: ${platform} · ${live.length ? live.join(', ') : '(none bound)'}`);
+      if (live.length > 1) {
+        err(`[server] pooled: ${live.length} devices, one run token leases one device — a parallel`);
+        err('[server]         `vk suite --server <url>` sizes itself from this automatically.');
+      }
       // Say the read path out loud. It is the difference between a suite that takes 8s and
       // one that takes 43s, and it used to be invisible from both ends (issue #77).
-      const reads = serial === null ? null : safeHierarchySource(driver);
-      if (reads) err(`[server] reads: ${reads.path} (${reads.detail})`);
+      for (const serial of live) {
+        const reads = await safeReads(pool.get(serial));
+        if (reads) err(`[server] reads: ${serial} → ${reads.path} (${reads.detail})`);
+      }
       err(`[server] install endpoint: ${allowInstall ? 'ENABLED (--allow-install)' : 'disabled (pass --allow-install to accept builds)'}`);
       err(
         `[server] device control: ${
@@ -1137,7 +1432,8 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
       // process that started it and would otherwise keep the connection for up to its full
       // 15-minute idle window, blocking Appium, Layout Inspector and TalkBack on this host —
       // with no obvious cause, and no way to stop it from a `--server` client.
-      if (boundSerial) releaseCompanionOn(boundSerial);
+      for (const serial of live) releaseCompanionOn(serial);
+      void pool.disposeAll();
       server.close();
       resolve(0);
     };

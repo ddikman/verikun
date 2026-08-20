@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep, join } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, NoWindowError, SelectorNotFoundError, isEnvError } from './errors';
-import { runText, commandExists } from './exec';
+import { runText, commandExists, spawnCollect } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
 import { adbTransport, severanceRisk, avdNameOf, listAvds, lockKindOf } from './drivers/adb';
 import {
@@ -20,6 +20,7 @@ import {
   parseDeviceAssignments,
 } from './device/settings';
 import {
+  assertClaimable,
   claimsEnabled,
   describeClaim,
   releaseClaim,
@@ -68,7 +69,7 @@ import {
   visibleFraction,
 } from './ui/viewport';
 import { out, err, json, defaultScreenshotPath, setOutputQuiet } from './output';
-import { Recorder, isRecordable, RunStep, archiveLogWindow, wantsArchiveLogs, inferRunAppId } from './run';
+import { Recorder, isRecordable, RunState, RunStep, archiveLogWindow, wantsArchiveLogs, inferRunAppId } from './run';
 import { capturePng } from './capture';
 import { Companion, companionEnabled } from './companion/manager';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
@@ -82,7 +83,7 @@ import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DE
 import { Plan } from './agent/ir';
 import { DeviceChange, ExecBackend, HealthResponse } from './rpc';
 import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
-import { cmdSuite, AiRunResult } from './suite';
+import { cmdSuite, AiRunResult, Lane } from './suite';
 import { sleep, DEFAULT_BOOT_TIMEOUT_MS, DEFAULT_STOP_TIMEOUT_MS } from './wait';
 import { VERSION } from './version';
 import { updateProbes } from './update-check';
@@ -1969,6 +1970,18 @@ interface AiOptions {
   pkg?: string;
   build?: string;
   recompile: boolean;
+  /**
+   * `--reset-app <id>`: clear (Android) / force-stop (iOS) this app through the run's
+   * OWN backend before the first step.
+   *
+   * `vk suite` does its between-test reset itself, so this exists for the PARALLEL
+   * suite, where it has to move inside the test. Against a pooled `vk server` the
+   * device is leased per run token, so a reset issued from the parent would take its
+   * own lease and could easily land on a different device than the test that follows —
+   * resetting one phone and testing another. Doing it here means the reset and the run
+   * are the same lease by construction.
+   */
+  resetApp?: string;
 }
 
 function parseAiOptions(flags: Flags): AiOptions {
@@ -1980,6 +1993,8 @@ function parseAiOptions(flags: Flags): AiOptions {
   // Whole-run wall-clock ceiling (default 15m) so a runaway loop/repair can't hang the run.
   const timeoutFlag = flagStr(flags, 'timeout');
   const timeoutMs = timeoutFlag ? parseDuration(timeoutFlag, 'timeout') : DEFAULT_RUN_TIMEOUT_MS;
+  const resetApp = flagStr(flags, 'reset-app');
+  if (resetApp) assertSafeAppId(resetApp);
   return {
     model,
     price: priceFor(model, override),
@@ -1989,6 +2004,7 @@ function parseAiOptions(flags: Flags): AiOptions {
     pkg: flagStr(flags, 'package'),
     build: flagStr(flags, 'app-build'),
     recompile: flagBool(flags, 'recompile') || flagBool(flags, 'no-cache'),
+    ...(resetApp ? { resetApp } : {}),
   };
 }
 
@@ -2230,6 +2246,13 @@ async function ensureRemoteDevice(
 ): Promise<HealthResponse> {
   const want = ensureDeviceTarget(flags);
   if (want === null) return health;
+  if ((health.capacity ?? 0) > 1) {
+    // A pooled server has devices; it just has no single one to report as `serial`.
+    // Booting here would 403 (device control is single-device by design), so say what
+    // is actually true rather than failing on a technicality.
+    err(`[verikun] --ensure-device: ${url} already pools ${health.capacity} devices — nothing to boot`);
+    return health;
+  }
   if (health.serial) {
     err(`[verikun] --ensure-device: ${health.serial} is already bound on ${url}${want ? ` — not booting '${want}'` : ''}`);
     return health;
@@ -2375,12 +2398,21 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   // into the run context and the returned device, so booting afterwards would
   // attribute every spliced step to a device that didn't exist yet.
   health = await ensureRemoteDevice(health, opts, server, flags);
-  runCtx = { platform: health.platform, device: health.serial ?? undefined };
+  const remote = createRemoteBackend(opts, health);
+  // Take this run's device BEFORE runCtx is fixed. Against a pool the client asked for a
+  // URL, so the lease is the ONLY thing that knows which phone it got — and a step
+  // attributed to the wrong device is worse than one attributed to none. Idempotent, and
+  // null against a server that predates pooling (health.serial is the answer there).
+  const lease = await remote.lease();
+  const serial = lease?.serial ?? health.serial ?? undefined;
+  const reads = lease?.reads ?? health.reads;
+  runCtx = { platform: health.platform, device: serial };
   err(
-    `[verikun] server ${server}: ${health.platform} · device ${health.serial ?? '(none)'} · verikun ${health.version}` +
+    `[verikun] server ${server}: ${health.platform} · device ${serial ?? '(none)'} · verikun ${health.version}` +
+      ((health.capacity ?? 1) > 1 ? ` (leased from a pool of ${health.capacity})` : '') +
       (health.failoverEnabled ? ' · failover: on' : ''),
   );
-  // A pool the server has already ruled out explains a lot of otherwise-baffling
+  // Devices the server has already ruled out explain a lot of otherwise-baffling
   // behaviour ("why is it on THAT phone?"), so say it once, up front.
   if (health.quarantined?.length) {
     err(`[verikun] server has ruled out ${health.quarantined.length} device(s):`);
@@ -2390,8 +2422,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   // connection that knows it — and without it a companion that had silently stood down was
   // indistinguishable from one that never engaged, for a whole suite (issue #77). An older
   // server omits the field; saying nothing is better than guessing.
-  if (health.reads) err(`[verikun] server reads: ${health.reads.path} (${health.reads.detail})`);
-  const remote = createRemoteBackend(opts, health);
+  if (reads) err(`[verikun] server reads: ${reads.path} (${reads.detail})`);
   return {
     backend: {
       ...remote,
@@ -2420,8 +2451,8 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       },
     },
     platform: health.platform,
-    device: health.serial ?? undefined,
-    remote: { url: server, version: health.version, reads: health.reads },
+    device: serial,
+    remote: { url: server, version: health.version, reads },
     moves,
   };
 }
@@ -2547,6 +2578,16 @@ async function runAiTest(
       abortedForBudget: true,
       failure: { where: 'compile', reason: `cost ceiling $${opts.maxCostUsd} reached during compile` },
     };
+  }
+
+  // Re-isolate the app BEFORE the run, on the device this process already holds.
+  // Deliberately after the compile: it costs no device time to wait, and a test that
+  // aborts at compile should not have disturbed the phone. A failure here throws
+  // (exit 3 for a broken device), which is what a caller reads as an environment
+  // abort — the same verdict `vk suite`'s own reset failure produces.
+  if (opts.resetApp) {
+    await backend.reset(opts.resetApp);
+    err(`[ai] app state reset (${opts.resetApp})`);
   }
 
   // One explicit run for the whole flow (so rollover can't split the test).
@@ -2691,6 +2732,11 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
       ok: result.ok,
       cached: result.cached,
       model: opts.model,
+      // Which device actually ran this. Against a POOLED `vk server` the client asks
+      // for a url, not a serial, and only the lease answers — so without this a
+      // parallel suite could not attribute a row to the phone that produced it.
+      platform,
+      ...(device ? { device } : {}),
       cost: result.costLine,
       costUsd: result.costUsd,
       modelRepairs: result.modelRepairs,
@@ -2741,12 +2787,396 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
 }
 
 // ---------------------------------------------------------------------------
+// suite lanes — one child `vk ai` process per test, one lane per device
+//
+// A lane is "a device plus the argv that reaches it". The parallel scheduler in
+// suite.ts owns WHEN a lane runs a file; everything below owns WHAT it runs.
+//
+// The unit of parallelism is a CHILD PROCESS, not a promise: exec.ts is spawnSync
+// throughout and the whole Driver interface is synchronous on top of it, so tests
+// awaited inside one process would still serialize on every adb/idb shell-out. A
+// child also gets crash isolation, its own `quiet` latch (output.ts's module global,
+// which nested save/restore around each test would corrupt), and its own device-
+// override restore — three of this feature's hazards solved by construction.
+// ---------------------------------------------------------------------------
+
+/** Enough of a lane to build its argv. Structural, so this half never needs suite.ts. */
+interface LaneTarget {
+  id: string;
+  device?: string;
+  server?: string;
+}
+
+/**
+ * Flags `vk suite` owns, which must never reach a lane's `vk ai` child.
+ *
+ * `device`/`server` are here because the LANE supplies them — forwarding the suite's
+ * would point every lane at one device, which is the bug this feature exists to fix.
+ * `ensure-device` is consumed once by the parent before any lane starts (booting
+ * per-test would be both pointless and, against a pooled server, a 403 per test).
+ */
+const SUITE_ONLY_FLAGS = new Set([
+  'devices', 'servers', 'concurrency', 'retries', 'name', 'app', 'max-suite-cost-usd',
+  'device', 'server', 'ensure-device', 'json',
+]);
+
+/**
+ * The argv for one lane's `vk ai` child.
+ *
+ * Every string flag is re-emitted in the INLINE `--name=value` form on purpose: it
+ * round-trips through args.ts regardless of what the value looks like, whereas the
+ * separated form silently becomes a boolean when the value begins with `-`
+ * (args.ts:105). Booleans re-emit bare, which parses back to `true` in every position.
+ * Exported for the unit suite.
+ */
+export function laneArgv(
+  file: string,
+  lane: LaneTarget,
+  flags: Flags,
+  opts: { resetApp?: string } = {},
+): string[] {
+  const argv = ['ai', file, '--json'];
+  if (lane.device) argv.push(`--device=${lane.device}`);
+  if (lane.server) argv.push(`--server=${lane.server}`);
+  if (opts.resetApp) argv.push(`--reset-app=${opts.resetApp}`);
+  for (const [name, value] of Object.entries(flags)) {
+    if (SUITE_ONLY_FLAGS.has(name)) continue;
+    if (value === false) continue; // args.ts never emits this; belt and braces
+    argv.push(value === true ? `--${name}` : `--${name}=${value}`);
+  }
+  return argv;
+}
+
+/**
+ * Environment for a lane child.
+ *
+ * Two overrides carry real weight. `VERIKUN_LANE` moves the child's ACTIVE run to
+ * `.verikun/run-<lane>/`, without which concurrent tests delete each other's in-flight
+ * state (run.ts's header explains the mechanism). `VERIKUN_NO_CLAIM` disables claims in
+ * the child because the PARENT holds them for the whole suite: `isMine` matches on
+ * session OR cwd (claims.ts:211), so siblings would see each other's claims as their
+ * own and coordinate nothing, while each child's exit would hand its device back
+ * mid-suite. Clearing `VERIKUN_SERVER` matters for a LOCAL lane — inherited, it would
+ * quietly send a run meant for an attached phone to a remote server instead.
+ */
+export function laneEnv(lane: LaneTarget, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const child: NodeJS.ProcessEnv = { ...env, VERIKUN_LANE: lane.id, VERIKUN_NO_CLAIM: '1' };
+  if (!lane.server) delete child.VERIKUN_SERVER;
+  if (!lane.device) delete child.VERIKUN_DEVICE;
+  return child;
+}
+
+/** Comma-separated flag value → trimmed, de-duplicated entries. */
+function csv(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return [...new Set(raw.split(',').map((s) => s.trim()).filter(Boolean))];
+}
+
+/** A short, stable label for a server lane: the host:port, not the whole URL. */
+function serverLabel(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * The device pool from `--devices` / `--servers`.
+ *
+ * Lane IDS are positional (`d1`, `d2`, …) rather than derived from the serial, because
+ * the id becomes a directory name AND the suffix of every run id the lane mints — a
+ * 40-character iOS UDID would make both unreadable. The LABEL carries the serial.
+ * Exported for the unit suite.
+ */
+export function lanesFromFlags(flags: Flags): Lane[] | undefined {
+  const devices = csv(flagStr(flags, 'devices'));
+  const servers = csv(flagStr(flags, 'servers'));
+  if (!devices.length && !servers.length) return undefined;
+  const lanes: Lane[] = [
+    ...devices.map((device) => ({ device, label: device })),
+    ...servers.map((server) => ({ server, label: serverLabel(server) })),
+  ].map((l, i) => ({ ...l, id: `d${i + 1}` }));
+  return lanes;
+}
+
+/**
+ * The last JSON object a child printed on stdout.
+ *
+ * `vk ai --json` writes exactly one document, and per-step `out()` is suppressed for
+ * the duration of the run — but "last object wins" costs nothing and keeps one stray
+ * line from turning a finished test into an unparseable one. Returns null when there
+ * is nothing to parse, which the caller reports with the child's stderr attached
+ * (the child's own diagnosis is far more useful than "bad JSON").
+ */
+export function lastJsonObject(stdout: string): Record<string, unknown> | null {
+  const end = stdout.lastIndexOf('}');
+  if (end < 0) return null;
+  // Walk candidate opening braces right-to-left. `json()` pretty-prints, so the
+  // document spans many lines and a line-wise parse would never see it whole.
+  let i = stdout.lastIndexOf('{', end);
+  while (i >= 0) {
+    try {
+      const parsed = JSON.parse(stdout.slice(i, end + 1)) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      /* not the document's start — keep walking left */
+    }
+    if (i === 0) break; // lastIndexOf(_, -1) searches from 0, which would loop forever
+    i = stdout.lastIndexOf('{', i - 1);
+  }
+  return null;
+}
+
+/** The most informative line a failed child left behind. */
+function lastLine(stderr: string): string {
+  const lines = stderr.split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] ?? '';
+}
+
+/**
+ * Turn a finished `vk ai` child into the `AiRunResult` the suite consumes.
+ *
+ * THE EXIT CODE IS THE VERDICT, not the JSON: `ok` is `code === 0` and nothing else, so
+ * a child that somehow printed a stale success document cannot report a pass. The JSON
+ * only supplies detail. `state` is left null here and filled from `<runDir>/run.json` by
+ * the caller — keeping this function pure enough to unit-test.
+ *
+ * Exit 3 is verikun's environment code, and 127 means the child never started at all,
+ * which is the same class of problem; both mark the result environment-flavoured so the
+ * suite probes the lane instead of blaming the app. Exported for the unit suite.
+ */
+export function laneResult(
+  code: number,
+  parsed: Record<string, unknown> | null,
+  detail: string,
+  lane: LaneTarget & { label?: string },
+): AiRunResult {
+  const str = (k: string): string | undefined => (typeof parsed?.[k] === 'string' ? (parsed[k] as string) : undefined);
+  const num = (k: string): number | undefined => (typeof parsed?.[k] === 'number' ? (parsed[k] as number) : undefined);
+  const yes = (k: string): boolean => parsed?.[k] === true;
+  const raw = parsed?.failure;
+  const failure =
+    raw && typeof raw === 'object' && typeof (raw as { reason?: unknown }).reason === 'string'
+      ? (raw as { where: string; reason: string })
+      : str('error')
+        ? { where: 'run', reason: str('error')! }
+        : code !== 0
+          ? { where: 'run', reason: detail || `the test process exited ${code}` }
+          : undefined;
+  return {
+    ok: code === 0,
+    cached: yes('cached'),
+    costUsd: num('costUsd') ?? 0,
+    costLine: str('cost') ?? '',
+    modelRepairs: num('modelRepairs') ?? 0,
+    improvements: Array.isArray(parsed?.improvements)
+      ? (parsed.improvements as unknown[]).filter((s): s is string => typeof s === 'string')
+      : [],
+    runDir: str('runDir') ?? '',
+    reportHtml: str('report') ?? '',
+    junitXml: str('junit') ?? '',
+    state: null,
+    // The child is the only one that can know this against a pooled server, where the
+    // parent handed out a URL and the lease chose the phone.
+    ...(str('device') ?? lane.device ? { device: str('device') ?? lane.device } : {}),
+    ...(failure ? { failure } : {}),
+    ...(yes('abortedForBudget') ? { abortedForBudget: true } : {}),
+    ...(yes('abortedForTimeout') ? { abortedForTimeout: true } : {}),
+    ...(yes('abortedForEnv') || code === 3 || code === 127 ? { abortedForEnv: true } : {}),
+  };
+}
+
+/** This verikun's own entry script, so a lane child is the SAME build as its parent —
+ *  derived from `__dirname` rather than argv[1], which depends on how we were invoked. */
+function vkEntry(): string {
+  const beside = join(__dirname, 'bin', 'verikun.js');
+  return existsSync(beside) ? beside : process.argv[1];
+}
+
+/** Run one test on one lane, as a child process. */
+async function runLaneTest(file: string, lane: Lane, flags: Flags, resetApp?: string): Promise<AiRunResult> {
+  const argv = laneArgv(file, lane, flags, resetApp ? { resetApp } : {});
+  const { code, stdout, stderr } = await spawnCollect(process.execPath, [vkEntry(), ...argv], {
+    env: laneEnv(lane),
+    // Prefix, or N tests' progress arrives interleaved and unattributable.
+    onStderrLine: (line) => err(`[${lane.label}] ${line}`),
+  });
+  const result = laneResult(code, lastJsonObject(stdout), lastLine(stderr), lane);
+  // The step tally lives in the archived run, not on the wire — reading it back keeps
+  // the JSON contract small and `toSuiteResult` identical to the in-process path.
+  if (result.runDir) {
+    try {
+      result.state = JSON.parse(readFileSync(join(result.runDir, 'run.json'), 'utf8')) as RunState;
+    } catch (e) {
+      err(`[${lane.label}] could not read the archived run state (${(e as Error).message})`);
+    }
+  }
+  return result;
+}
+
+/**
+ * Is this lane's device still drivable?
+ *
+ * A local lane gets a real hierarchy read on that exact device — spawned, because a
+ * `spawnSync` here would stall every other lane in the parent. A SERVER lane only gets
+ * a ping: `/v1/elements` would take a lease, and with every lane already holding one
+ * that returns 409 and would read as "broken" for a perfectly healthy pool. One dead
+ * device behind a live server is covered instead by the suite's consecutive-failure
+ * retirement (ENV_STREAK_LIMIT in suite.ts).
+ */
+async function lanePreflight(lane: Lane, flags: Flags, platform: Platform): Promise<void> {
+  if (lane.server) {
+    await pingServer(remoteOptsFrom(lane.server, flags));
+    return;
+  }
+  const { code, stderr } = await spawnCollect(
+    process.execPath,
+    [vkEntry(), 'ui', '--json', `--device=${lane.device}`, `--platform=${platform}`],
+    { env: { ...laneEnv(lane), VERIKUN_NO_RUN: '1' } },
+  );
+  if (code !== 0) {
+    throw new CliError(`device ${lane.label} is not answering (${lastLine(stderr) || `vk ui exited ${code}`})`, 3);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // suite — run a directory of natural-language tests as one gated suite
 // ---------------------------------------------------------------------------
 
+interface LanePool {
+  lanes: Lane[];
+  platform: Platform;
+  /** Only when the whole pool is ONE server, since the manifest field describes one. */
+  server?: { url: string; verikun: string; reads?: string };
+}
+
+/**
+ * Resolve the device pool, or `undefined` for today's serial suite.
+ *
+ * Every lane must share a platform. A pool is a set of INTERCHANGEABLE devices, so a
+ * suite dealt half onto Android and half onto iOS would compile two plans per test,
+ * double cold-cache spend, and report one `platform` for rows that ran on two. That is a
+ * matrix, not a pool, and it is expressed by running the suite once per platform.
+ */
+async function buildLanePool(flags: Flags, platform: Platform): Promise<LanePool | undefined> {
+  const lanes = lanesFromFlags(flags);
+  if (!lanes) {
+    // A plain `--server` at a POOLED server sizes itself: one URL, one secret, one CI
+    // line, and the fleet behind it is the operator's business. Capacity 1 (or an older
+    // server, which omits the field) stays exactly today's serial suite.
+    const url = serverFromFlags(flags);
+    if (!url) return undefined;
+    const health = await pingServer(remoteOptsFrom(url, flags));
+    const capacity = health.capacity ?? 1;
+    if (capacity <= 1) return undefined;
+    err(`[verikun] server ${url} pools ${capacity} devices — running the suite across all of them`);
+    return {
+      lanes: Array.from({ length: capacity }, (_, i) => ({
+        id: `d${i + 1}`,
+        // The DEVICE is unknown until each lane leases one, so the lane is numbered and
+        // every row records the serial the child came back with.
+        label: `${serverLabel(url)}#${i + 1}`,
+        server: url,
+      })),
+      platform: health.platform,
+      server: { url, verikun: health.version, ...(health.reads?.path ? { reads: health.reads.path } : {}) },
+    };
+  }
+  const urls = [...new Set(lanes.map((l) => l.server).filter((u): u is string => !!u))];
+  if (!urls.length) return { lanes, platform };
+
+  // Ping each server once, up front: it fixes the platform, proves reachability before
+  // any model spend, and is where a mixed-platform pool is refused.
+  const health = await Promise.all(urls.map(async (url) => ({ url, health: await pingServer(remoteOptsFrom(url, flags)) })));
+  const platforms = [...new Set(health.map((h) => h.health.platform))];
+  if (platforms.length > 1) {
+    throw new CliError(
+      `--servers mixes platforms (${health.map((h) => `${serverLabel(h.url)}=${h.health.platform}`).join(', ')}). ` +
+        'A pool must be interchangeable devices; run the suite once per platform instead.',
+      2,
+    );
+  }
+  if (lanes.some((l) => l.device) && platforms[0] !== platform) {
+    throw new CliError(
+      `--devices are ${platform} but --servers report ${platforms[0]}; a pool must be one platform.`,
+      2,
+    );
+  }
+  for (const { url, health: h } of health) {
+    err(`[verikun] server ${url}: ${h.platform} · device ${h.serial ?? '(none)'} · verikun ${h.version}`);
+  }
+  const only = urls.length === 1 && lanes.every((l) => l.server === urls[0]) ? health[0] : undefined;
+  return {
+    lanes,
+    platform: platforms[0],
+    ...(only ? { server: { url: only.url, verikun: only.health.version, reads: only.health.reads?.path } } : {}),
+  };
+}
+
+/**
+ * The parallel suite: one child `vk ai` per test, spread across the pool.
+ *
+ * Builds NO local driver — every device touch happens in a child, which is the whole
+ * point (see the lane header above). What the parent still owns is the device CLAIMS:
+ * `isMine` matches on session or cwd (claims.ts:211), so children would see each other's
+ * claims as their own and coordinate nothing, and each child's exit would hand its
+ * device back mid-suite. Holding them here for the suite's lifetime is both correct and
+ * simpler, and is why the children run with VERIKUN_NO_CLAIM.
+ */
+async function cmdSuiteParallel(
+  dirArg: string,
+  flags: Flags,
+  platform: Platform,
+  pool: { lanes: Lane[]; server?: { url: string; verikun: string; reads?: string } },
+): Promise<number> {
+  if (ensureDeviceTarget(flags) !== null && pool.lanes.some((l) => l.device)) {
+    throw new CliError(
+      '--ensure-device cannot be combined with --devices: its bare form boots "the one startable device", ' +
+        'which may well be another lane\'s emulator. Start the pool first with `vk devices start <name>`.',
+      2,
+    );
+  }
+  const app = flagStr(flags, 'app');
+  if (app) assertSafeAppId(app);
+  // Take every local device before the first test, so a pool that is already half-busy
+  // fails now rather than three tests in. Gated on claimsEnabled() like every other
+  // acquisition: VERIKUN_NO_CLAIM=1 must restore the pre-claims behaviour EXACTLY, and
+  // that equivalence is what makes the mechanism debuggable by bisection.
+  if (claimsEnabled()) {
+    for (const lane of pool.lanes) {
+      if (lane.device) assertClaimable(lane.device, platform);
+    }
+  }
+  try {
+    return await cmdSuite(dirArg, flags, {
+      platform,
+      lanes: pool.lanes,
+      ...(pool.server ? { server: pool.server } : {}),
+      runTest: (file, lane) => runLaneTest(file, lane!, flags, app),
+      preflight: (lane) => lanePreflight(lane!, flags, platform),
+      // `reset` is deliberately NOT wired: against a pooled server a reset issued from
+      // here would take its own lease and could land on a different device than the test
+      // that follows. `vk ai --reset-app` does it inside the test's own lease instead.
+    });
+  } finally {
+    // The PARENT holds every local lane's claim, so it is the one process that hands them
+    // back; the children run with VERIKUN_NO_CLAIM=1 and have none of their own. A prepped
+    // device needs nothing further here — prep leaves it a short display timeout, so it
+    // sleeps by itself once the lanes stop reading from it.
+    releaseOwnClaims();
+  }
+}
+
 async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<number> {
   const dirArg = positionals[0];
-  if (!dirArg) throw new CliError('Usage: verikun suite <dir> [--app <id>] [--server url] [--name n] [--retries n] [--json]', 2);
+  if (!dirArg) {
+    throw new CliError(
+      'Usage: verikun suite <dir> [--app <id>] [--server url] [--devices a,b] [--servers u1,u2] ' +
+        '[--concurrency n] [--name n] [--retries n] [--json]',
+      2,
+    );
+  }
   const opts = parseAiOptions(flags);
   setProcessScoped(true); // one process for the whole suite — see claims.ts's isLive
   // Pre-flight the provider BEFORE touching any device/server: every test needs it
@@ -2755,6 +3185,10 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
     throw new CliError(`${providerRequirement(opts.model)} — needed to compile/repair tests (model ${opts.model}).`, 3);
   }
   const reqPlatform = platformFromFlags(flags);
+
+  const pool = await buildLanePool(flags, reqPlatform);
+  if (pool) return cmdSuiteParallel(dirArg, flags, pool.platform, pool);
+
   const { backend, platform, device, remote } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
   const app = flagStr(flags, 'app');
   if (app) assertSafeAppId(app);
@@ -3153,7 +3587,8 @@ BATCH (script many commands in one process)
 
 AI (run a natural-language test — compile once, replay model-free, self-heal)
   ai <file> [--model m] [--max-cost-usd n] [--cost-override in/out] [--effort e]
-            [--package pkg] [--app-build id] [--show-plan] [--recompile] [--json]
+            [--package pkg] [--app-build id] [--reset-app id] [--show-plan]
+            [--recompile] [--json]
                                       Compile a plain-English test (<file>) into a
                                       deterministic plan, cached by NL + app build,
                                       then replay it with NO model calls on the happy
@@ -3169,6 +3604,11 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       Progress -> stderr; the report path ->
                                       stdout. --show-plan prints the compiled IR without
                                       running; --recompile ignores the cache.
+                                      --reset-app <id> clears (iOS: force-stops) that
+                                      app before the first step, on this run's own
+                                      device — which is what \`vk suite\` uses across a
+                                      pool, where a reset from outside the run could
+                                      land on a different device than the test.
                                       Models: claude-haiku-4-5 | claude-sonnet-4-6
                                       (default) | claude-opus-4-8 | claude-fable-5 |
                                       gpt-5.4-mini | gpt-5.4 | gpt-5.5 | gpt-4.1 |
@@ -3176,6 +3616,8 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
 
 SUITE (run a directory of natural-language tests as one gated suite)
   suite <dir> [--app <id>] [--name n] [--retries n] [--json]
+              [--devices a,b] [--servers u1,u2] [--concurrency n]
+              [--max-suite-cost-usd n]
                                       (+ all \`ai\` flags, incl. --server)
                                       Run every *.md in <dir> (lexicographic order —
                                       prefix 01-, 02- to sequence; README.md skipped)
@@ -3188,6 +3630,15 @@ SUITE (run a directory of natural-language tests as one gated suite)
                                       ./.verikun/suites/<id>/{index.json, index.html}
                                       linking each test's report. Exits 1 if any test
                                       failed — the CI gate.
+                                      PARALLEL: --devices/--servers spread the tests
+                                      across a pool, next-free-device-takes-the-next-
+                                      test, and file order no longer sequences them.
+                                      A \`vk server --devices\` pool is used
+                                      automatically by a plain --server. --concurrency
+                                      caps how many run at once; --max-suite-cost-usd
+                                      stops the suite once total model spend crosses
+                                      it (exit 1). One merged report either way, with
+                                      wall-clock reported apart from device time.
 
 SERVER (expose a locally-connected device to remote verikun clients)
   server [--bind addr] [--port n] [--auth-key k] [--allow-install]

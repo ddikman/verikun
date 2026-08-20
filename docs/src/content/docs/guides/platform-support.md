@@ -89,6 +89,8 @@ column. The three that bite in practice:
 <tr><td><code>batch</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>ai</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>suite</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--app</code> force-stops only</td><td>⚠️ <code>--app</code> force-stops only</td></tr>
+<tr><td><code>suite --devices</code> / <code>--servers</code> <em>(parallel)</em></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>server --devices</code> <em>(device pool)</em></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>run</code> <em>(start/status/archive/clear)</em></td><td>✅</td><td>✅</td><td>✅</td><td>⚠️ archive carries no device log</td></tr>
 <tr><th colspan="5">Environment</th></tr>
 <tr><td><code>devices</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
@@ -122,6 +124,11 @@ Notes on the rows that carry a caveat:
 - **`suite --app` does not reset app data on iOS.** It degrades to a force-stop. If your test
   depends on starting logged-out, that assumption does not hold there — see
   [Suites](/verikun/guides/suites/).
+- **A device pool is one platform.** `vk server --devices` serves one platform per server, and
+  `vk suite --servers a,b` refuses (exit `2`) when the servers report different ones. A pool is
+  a set of *interchangeable* devices; running one suite on Android and iOS is a matrix, which
+  you express by running it twice — see
+  [Suites](/verikun/guides/suites/#running-across-several-devices).
 - **`doctor --fix` is Android-only, and is an alias for `device prep`.** It therefore inherits
   prep's gate: on a **physical** device it refuses unless the serial was named with `--device`,
   because prep changes settings that outlive the run. iOS has no equivalent knob;

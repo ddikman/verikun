@@ -13,6 +13,11 @@ name: Device test suite
 #   export VERIKUN_SERVER_AUTH_KEY=<key>
 #   vk server --bind <tailnet-ip> --allow-install
 #
+# To spread the suite across several devices, attach them and add --devices:
+#   vk server --bind <tailnet-ip> --allow-install --devices all
+# Nothing below changes: the suite reads the server's capacity and sizes itself, each run
+# leases one device for its whole life, and `vk install` lands on all of them.
+#
 # Repo secrets this workflow expects:
 #   ANTHROPIC_API_KEY          the model key for compile/repair (vk ai)
 #   VERIKUN_SERVER             e.g. http://100.x.y.z:8391 (the server's address)
@@ -36,7 +41,7 @@ on:
   #   branches: [main]
 
 concurrency:
-  group: device-suite # one suite at a time — the server holds a single device lock
+  group: device-suite # one suite at a time — a parallel suite leases every device the server has
   cancel-in-progress: false
 
 jobs:
@@ -61,6 +66,17 @@ jobs:
           npm ci
           npm run build
           npm link
+
+      # The suite orders its tests longest-first from the PREVIOUS run's manifest, which is
+      # only worth anything if that manifest survives the runner. Optional — without it the
+      # first parallel run falls back to file order, which costs makespan, not correctness.
+      - name: Restore previous suite manifests (for longest-first ordering)
+        uses: actions/cache/restore@v6
+        with:
+          path: .verikun/suites
+          key: verikun-suites-${{ github.run_id }}
+          restore-keys: |
+            verikun-suites-
 
       # Without this, every test recompiles on every run: the plan cache lives in
       # ./.verikun/plans relative to the working directory, and a fresh runner has
@@ -120,6 +136,13 @@ jobs:
         with:
           path: .verikun/plans
           key: verikun-plans-${{ hashFiles('package-lock.json') }}-${{ github.run_id }}
+
+      - name: Save the suite manifests
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: .verikun/suites
+          key: verikun-suites-${{ github.run_id }}
 
       # The suite overview (index.json manifest + index.html) plus every test's
       # archived run (report.html, report.xml, screenshots). `always()` so the
