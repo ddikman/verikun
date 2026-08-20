@@ -32,6 +32,10 @@ Neither is needed with `--model codex-cli` or `--model cursor-cli`, which drive 
 already-logged-in CLI off your existing subscription. See
 [Models](/verikun/reference/ai-plans/#models).
 
+There is **no environment fallback for the spend ceiling** — `--max-cost-usd` and
+`--cost-override` are flag-only, and a run with neither set uses the \$3 default. See
+[Cost & budget](/verikun/reference/cost/#the-budget).
+
 ## Remote server
 
 | Variable | Controls |

@@ -106,8 +106,9 @@ The `3` for an environment abort is deliberate: it must not be confused with a r
 
 Retry interaction: a thrown **exit `2`** (usage) is the only non-retryable throw. Every other
 code, including `3`, is retried while attempts remain — an environment wobble is worth
-riding out. A **budget abort** is never retried, because each attempt gets its own ceiling
-and would simply re-abort having spent twice.
+riding out. A [**budget abort**](/verikun/reference/cost/#the-budget) is never retried,
+because each attempt gets its own ceiling and would simply re-abort having spent twice. It
+exits `1`, like any other failure; `abortedForBudget` in `--json` is what tells them apart.
 
 ## `vk server` — HTTP mapping
 

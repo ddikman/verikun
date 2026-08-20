@@ -182,7 +182,7 @@ so a platform gap can never be documented in one place and forgotten in another.
 | `agent/grammar.ts` | `GRAMMAR` + `REPAIR_GRAMMAR`, the cache-controlled stable prompt prefix |
 | `agent/cache.ts` | The plan cache, keyed and fingerprinted |
 | `agent/lint.ts` | Compile-fidelity lint — catches directives silently dropped from the plan |
-| `agent/cost.ts` | Token accounting, the price table, `providerFor(model)`, the budget abort |
+| `agent/cost.ts` | Token accounting, the price table, `providerFor(model)`, the budget abort — see [Cost & budget](/verikun/reference/cost/) |
 | `agent/provider.ts` | The `AgentProvider` seam |
 | `agent/claude.ts` | Anthropic Messages API over built-in `fetch`, no SDK |
 | `agent/openai.ts` | OpenAI Chat Completions; exports `toStrictSchema` |

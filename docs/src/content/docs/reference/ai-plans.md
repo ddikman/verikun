@@ -218,22 +218,22 @@ bills cache reads at a different multiplier from every other model here.
 
 | Control | Default | Effect |
 |---|---|---|
-| `--max-cost-usd <n>` | `3` | Abort the run when the estimate crosses this |
+| `--max-cost-usd <n>` | `3` | Abort the run when the estimate crosses this — **per test**, not per suite |
 | `--timeout <dur>` | `15m` | Abort on wall clock |
 | `--cost-override <in/out>` | — | Override the bundled per-1M price table |
 
-Each run reports `compile / repairs / replay=$0 / est $…`.
+Each run reports a line of this shape:
 
-:::caution
-The bundled per-1M price table **will drift** between releases — vendors change prices.
-`--cost-override <input/output>` is the escape hatch and is authoritative when supplied. The
-current table is in
-[`src/agent/cost.ts`](https://github.com/ddikman/verikun/blob/main/src/agent/cost.ts).
-:::
+```
+compile=$0.0184 · repairs=$0.0000 · replay=$0 · cache_read=12043 tok · est $0.0184
+```
 
-Note that `replay` is always `$0`. If your runs are not showing that, the plan is not being
-cached — see
+`replay` is always `$0` — running a plan calls no model. If `compile` is not `$0` on a
+repeat run, the plan is not being cached; see
 [Troubleshooting](/verikun/guides/troubleshooting/#the-run-costs-more-than-expected).
+
+For when a model is actually called, the estimate formula, the cache multipliers and how the
+ceiling behaves on a breach, see [Cost & budget](/verikun/reference/cost/).
 
 ## The plan cache
 

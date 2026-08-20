@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Docs site**: a `Cost & budget` reference page — when a model is called, the estimate formula,
+  and that `--max-cost-usd` is per test, not per suite. ([#94])
+
+### Fixed
+- **Docs site**: the `vk ai` cost line was printed in a format the CLI never emitted.
+
+[#94]: https://github.com/ddikman/verikun/issues/94
+
 ## [0.23.0] - 2026-08-17
 
 ### Added

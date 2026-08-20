@@ -1786,8 +1786,9 @@ function providerRequirement(model: string): string {
 }
 
 /** Route the model to its backend. HTTP providers read their own key; a CLI provider shells
- *  out to its logged-in binary. Unavailable → null (compile/repair off), the same graceful
- *  degradation as before: a cached plan can still replay for free without any provider.
+ *  out to its logged-in binary. Unavailable → null (compile/repair off). That is NOT a free
+ *  replay path: runAiTest turns a null provider into exit 3 even at a 100% cache hit, because
+ *  it must be able to repair a drifted step at runtime — only --show-plan degrades gracefully.
  *  CLI providers get no `model`, so the CLI picks its own default — the "I just have a
  *  subscription" path; --effort is likewise inapplicable to them. */
 function makeProvider(opts: AiOptions): AgentProvider | null {
