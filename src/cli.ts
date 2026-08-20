@@ -4,12 +4,12 @@ import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, NoWindowError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists } from './exec';
 import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
-import { adbTransport, severanceRisk, avdNameOf, listAvds } from './drivers/adb';
+import { adbTransport, severanceRisk, avdNameOf, listAvds, lockKindOf } from './drivers/adb';
 import {
   allLifecycles, assertActionable, chooseTarget, isRunning, lifecycleFor, restartTarget, targetLabel,
   LifecycleTarget, LifecycleVerb,
 } from './drivers/lifecycle';
-import { Bounds, Driver, DeviceInfo, Element, HierarchySource, Platform, Point, ToolProbe } from './types';
+import { Bounds, Driver, DeviceInfo, Element, HierarchySource, LockKind, Platform, Point, ToolProbe } from './types';
 import {
   SETTINGS,
   SETTING_KEYS,
@@ -22,12 +22,23 @@ import {
 import {
   claimsEnabled,
   describeClaim,
+  ownClaimedSerials,
   releaseClaim,
   releaseOwnClaims,
   setProcessScoped,
   summarize,
   touchClaim,
 } from './device/claims';
+import {
+  PREP_KNOBS,
+  assertPreppable,
+  clearPrep,
+  isPrepared,
+  mergeOriginals,
+  newPrepRecord,
+  readPrep,
+  writePrep,
+} from './device/prep';
 import {
   parseSelector,
   matchElements,
@@ -711,10 +722,37 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
     const c = claims ? summarize(serial) : undefined;
     return c && !c.mine ? c : undefined;
   };
+  // Blank lines separate doctor's three blocks — toolchain, device inventory, target detail.
+  // Without them the target's indented lines read as a continuation of the last device row.
+  out('');
   out(`devices: ${devices.length} attached, ${usable.length} usable`);
-  for (const d of devices) {
+  // Probe each device, not just the one an interaction command would land on: "is there a
+  // screen lock" and "is this prepared" are facts about a PHONE, and a host driving three of
+  // them cannot act on an answer that does not say which. The lock read is one `dumpsys` per
+  // device and the prep read is a local file, which is affordable in an explicit setup check.
+  const locks = new Map<string, LockKind>();
+  const rows = devices.map((d) => {
+    const facts: string[] = [];
+    if (d.state === 'device') {
+      facts.push(readPrep(d.serial) ? 'prepared' : 'not prepared');
+      const lock = lockKindOf(d.serial);
+      locks.set(d.serial, lock);
+      if (lock !== 'none' && lock !== 'unknown') facts.push(`screen lock: ${lock}`);
+    }
     const claim = claims ? summarize(d.serial) : undefined;
-    out(`  ${d.serial} ${d.state}${d.model ? ` (${d.model})` : ''}${claim ? `  [${claim.by}]` : ''}`);
+    return {
+      serial: d.serial,
+      what: `${d.state}${d.model ? ` (${d.model})` : ''}`,
+      facts: facts.join(' · '),
+      claim: claim ? `[${claim.by}]` : '',
+    };
+  });
+  // Pad each column to its widest cell so the per-device facts line up and can be scanned
+  // down; trimEnd so a device with no facts and no claim leaves no trailing whitespace.
+  const w = (pick: (r: (typeof rows)[number]) => string) => Math.max(...rows.map((r) => pick(r).length), 0);
+  const [wSerial, wWhat, wFacts] = [w((r) => r.serial), w((r) => r.what), w((r) => r.facts)];
+  for (const r of rows) {
+    out(`  ${r.serial.padEnd(wSerial)}  ${r.what.padEnd(wWhat)}  ${r.facts.padEnd(wFacts)}  ${r.claim}`.trimEnd());
   }
 
   let ok = true;
@@ -736,22 +774,65 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
   // the first FREE one (which is what auto-selection picks), not merely the first attached.
   const target = ctx.device || free[0]?.serial;
   if (target) {
-    try {
-      const serial = target;
-      const keys = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'];
-      const get = (k: string) => runText(adb, ['-s', serial, 'shell', 'settings', 'get', 'global', k]).stdout.trim();
-      const vals = keys.map(get);
-      const off = vals.every((v) => v === '0' || v === '0.0');
-      out(`animations: ${vals.join('/')} ${off ? '(off, good)' : '(ON — flaky dumps; run `verikun doctor --fix`)'}`);
-      if (flagBool(ctx.flags, 'fix') && !off) {
-        for (const k of keys) runText(adb, ['-s', serial, 'shell', 'settings', 'put', 'global', k, '0']);
-        out('animations: disabled (good)');
-      }
-    } catch {
-      err('animations: could not read device settings');
+    reportTargetStatus(target, adb, locks.get(target) ?? 'unknown');
+    // `--fix` is now an alias for `device prep`, so it inherits prep's gate: on a physical
+    // device it refuses unless the serial was named. That refusal is the point — the old
+    // `--fix` wrote permanently to whichever phone happened to be unclaimed, with no undo.
+    if (flagBool(ctx.flags, 'fix')) {
+      const prepFlags: Flags = flagBool(ctx.flags, 'no-sleep-when-idle') ? { 'no-sleep-when-idle': true } : {};
+      return devicePrep({ ...ctx, flags: prepFlags });
     }
   }
   return ok ? 0 : 3;
+}
+
+/**
+ * The extra detail for the ONE device an interaction command would land on. Every line names
+ * that serial, because the listing above may have shown several and an advisory you cannot
+ * attribute to a phone is not actionable.
+ *
+ * Reads NOTHING through `ctx.driver`, deliberately — resolving a driver claims the device, and
+ * doctor surveys the host without taking anything (see the note at the device listing above).
+ * The prep record is a plain file read; the animation probe goes through `adb -s <serial>`
+ * directly. `lock` is passed in rather than re-probed, so the listing's read is the only one.
+ */
+function reportTargetStatus(serial: string, adb: string, lock: LockKind): void {
+  out('');
+  out(`target: ${serial} — the device an interaction command would use`);
+
+  const rec = readPrep(serial);
+  const when = rec?.preparedAt ? ` (${rec.preparedAt.slice(0, 10)})` : '';
+  out(
+    rec
+      ? `  prepared${when} — undo with \`verikun device prep --revert --device ${serial}\``
+      : `  not prepared — run \`verikun device prep --device ${serial}\``,
+  );
+
+  // Animations are still called out by name rather than folded into "not prepared": they are
+  // the single most common cause of a flaky dump, and a device can be prepped and then drift.
+  try {
+    const vals = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'].map(
+      (k) => runText(adb, ['-s', serial, 'shell', 'settings', 'get', 'global', k]).stdout.trim(),
+    );
+    const off = vals.every((v) => Number(v) === 0);
+    out(`  animations: ${vals.join('/')} ${off ? '(off, good)' : '(ON — flaky dumps; run `verikun device prep`)'}`);
+  } catch {
+    err(`  animations: could not read settings on ${serial}`);
+  }
+
+  // Advisory, never a failure: a screen lock is a property of someone's phone, not a broken
+  // machine. It is worth saying because of what a slept device actually does — the read
+  // SUCCEEDS and returns the keyguard, so selectors miss for a reason unrelated to the app.
+  if (lock !== 'none' && lock !== 'unknown') {
+    // Indented to sit with the target's other lines, but it still NAMES the serial: this goes
+    // to stderr (it is a diagnostic, not data), so under `vk doctor > out.txt` it appears on
+    // its own with no `target:` header above it to say which phone it means.
+    err(
+      `  screen lock on ${serial} (${lock}) — while it is up, a read returns the lock screen ` +
+        'rather than the app.\n' +
+        '    Remove it on a test device (Settings > Security). verikun never asks for a PIN.',
+    );
+  }
 }
 
 function cmdUi(ctx: Ctx): number {
@@ -1229,7 +1310,8 @@ function cmdClear(ctx: Ctx): number {
 //    `device reset` can undo it even from a later process.
 
 const DEVICE_USAGE =
-  'Usage: verikun device set <key>=<value> [<key>=<value> ...] | device get [key] | device reset [key ...] | device caps | device release [serial]\n' +
+  'Usage: verikun device set <key>=<value> [<key>=<value> ...] | device get [key] | device reset [key ...] | ' +
+  'device prep [--revert] [--dry-run] | device caps | device release [serial]\n' +
   `Keys: ${SETTING_KEYS.join(', ')}`;
 
 function cmdDevice(ctx: Ctx): number {
@@ -1243,6 +1325,8 @@ function cmdDevice(ctx: Ctx): number {
       return deviceGet(ctx, rest);
     case 'reset':
       return deviceReset(ctx, rest);
+    case 'prep':
+      return devicePrep(ctx);
     case 'caps':
       return deviceCaps(ctx);
     case 'release':
@@ -1388,6 +1472,138 @@ function deviceReset(ctx: Ctx, args: string[]): number {
   return 0;
 }
 
+/**
+ * `vk device prep` — establish the test-device knob set, stickily.
+ *
+ * The whole point is that this OUTLIVES the run, so unlike `deviceSet` the snapshot does not
+ * go into the run file (which `ai`/`suite`/`batch` auto-restore from a `finally`) but into the
+ * host-global prep store. See device/prep.ts for why the two stores exist.
+ *
+ * Unsupported and no-op knobs are SKIPPED with a note rather than failing the command, which
+ * is the difference between prep and `device set`: `set` was told which key to change and must
+ * refuse if it cannot, while prep means "establish what this platform can" — so on iOS, where
+ * every knob is a noop or unsupported, it honestly reports doing nothing instead of erroring.
+ */
+function devicePrep(ctx: Ctx): number {
+  const asJson = flagBool(ctx.flags, 'json');
+  const dryRun = flagBool(ctx.flags, 'dry-run');
+  const serial = ctx.driver.resolvedSerial();
+  if (flagBool(ctx.flags, 'revert')) return devicePrepRevert(ctx, serial, dryRun, asJson);
+
+  // Partition by what this platform can actually do, so the gate below counts real writes.
+  const skipped: Array<{ key: SettingKey; reason: string }> = [];
+  const applicable: Array<{ key: SettingKey; target: string; current: string | null; why: string }> = [];
+  for (const knob of PREP_KNOBS) {
+    const spec = SETTINGS[knob.key];
+    const support = spec.support[ctx.platform];
+    if (support === 'unsupported') {
+      skipped.push({ key: knob.key, reason: spec.manual[ctx.platform] ?? `not supported on ${ctx.platform}` });
+      continue;
+    }
+    if (support === 'noop') {
+      skipped.push({ key: knob.key, reason: spec.note[ctx.platform] ?? 'already satisfied on this platform' });
+      continue;
+    }
+    // parse() so the target compares equal to a readback (`max` -> the millisecond string).
+    applicable.push({
+      key: knob.key,
+      target: spec.parse(knob.value),
+      current: ctx.driver.getDeviceSetting(knob.key),
+      why: knob.why,
+    });
+  }
+
+  const changes = applicable.filter((k) => k.current !== k.target);
+  // `--dry-run` is deliberately NOT gated: it writes nothing, and refusing it would mean you
+  // could not find out what prep would do to a phone without first asserting it is a test one.
+  if (dryRun) {
+    if (asJson) {
+      json({ serial, prepared: isPrepared(serial), dryRun: true, changes, skipped });
+    } else {
+      out(`device prep ${serial} (dry run — nothing written)`);
+      for (const k of applicable) {
+        const state = k.current === k.target ? 'already' : `${showValue(k.current)} -> ${k.target}`;
+        out(`  ${k.key.padEnd(15)} ${state}`);
+        if (k.current !== k.target) out(`  ${' '.repeat(15)} ${k.why}`);
+      }
+      for (const s of skipped) out(`  ${s.key.padEnd(15)} skipped: ${s.reason.replace(/\n/g, ' ')}`);
+    }
+    return 0;
+  }
+
+  // The gate, immediately before the first write. `!!ctx.device` is true for --device AND
+  // VERIKUN_DEVICE: both are a deliberate act naming one phone, which is the property asked for.
+  const kind = ctx.driver.listDevices().find((d) => d.serial === serial)?.kind ?? 'physical';
+  assertPreppable(kind, serial, !!ctx.device, applicable.length);
+
+  const original: Partial<Record<SettingKey, string>> = {};
+  for (const k of applicable) {
+    // Snapshot even a knob already at target: `--revert` has to put back what the device
+    // held before prep, and "it was already off" is exactly as much a fact as a change.
+    if (k.current !== null) original[k.key] = k.current;
+    if (k.current !== k.target) ctx.driver.setDeviceSetting(k.key, k.target);
+  }
+
+  // Earliest wins across re-preps, or `--revert` would restore the device to prepped.
+  const prior = readPrep(serial);
+  const sleepWhenIdle = !flagBool(ctx.flags, 'no-sleep-when-idle');
+  writePrep(
+    newPrepRecord(serial, ctx.platform, mergeOriginals(prior?.original ?? {}, original), sleepWhenIdle),
+  );
+
+  const applied = Object.fromEntries(applicable.map((k) => [k.key, k.target]));
+  ctx.record?.note({ message: `device prep ${serial} (${changes.length} changed)` });
+  if (asJson) {
+    json({ serial, applied, changed: changes.map((c) => c.key), skipped, sleepWhenIdle });
+  } else {
+    out(`device prep ${serial}: ${changes.length ? changes.map((c) => `${c.key}=${c.target}`).join(' ') : 'already prepared'}`);
+    for (const s of skipped) err(`note: ${s.key} skipped — ${s.reason.replace(/\n/g, ' ')}`);
+    if (sleepWhenIdle) err('note: this device will be put to sleep when a run using it finishes');
+    err(`undo with: verikun device prep --revert --device ${serial}`);
+  }
+  return 0;
+}
+
+/** Put a prepared device back the way it was found, and forget it. */
+function devicePrepRevert(ctx: Ctx, serial: string, dryRun: boolean, asJson: boolean): number {
+  const rec = readPrep(serial);
+  if (!rec) {
+    if (asJson) json({ serial, prepared: false, restored: {} });
+    else out(`device prep --revert ${serial}: not prepared, nothing to restore`);
+    return 0;
+  }
+  const entries = Object.entries(rec.original) as Array<[SettingKey, string]>;
+  if (dryRun) {
+    if (asJson) json({ serial, prepared: true, dryRun: true, wouldRestore: rec.original });
+    else {
+      out(`device prep --revert ${serial} (dry run — nothing written)`);
+      for (const [key, value] of entries) out(`  ${key.padEnd(15)} ${showValue(ctx.driver.getDeviceSetting(key))} -> ${value}`);
+    }
+    return 0;
+  }
+
+  const restored: Record<string, string> = {};
+  const failed: string[] = [];
+  for (const [key, value] of entries) {
+    try {
+      ctx.driver.setDeviceSetting(key, value);
+      restored[key] = value;
+    } catch (e) {
+      // Best-effort, like `device reset`: one stubborn knob must not strand the rest.
+      failed.push(`${key} (${e instanceof Error ? e.message.split('\n')[0] : String(e)})`);
+    }
+  }
+  // Forget the device even if a knob refused. Keeping the record would leave `vk doctor`
+  // reporting it as prepped forever, and the values that DID go back are already back.
+  clearPrep(serial);
+
+  ctx.record?.note({ message: `device prep --revert ${serial}` });
+  if (failed.length) err(`warning: could not restore ${failed.join(', ')}`);
+  if (asJson) json({ serial, restored, ...(failed.length ? { failed } : {}) });
+  else out(`device prep --revert ${serial}: ${Object.entries(restored).map(([k, v]) => `${k}=${v}`).join(' ') || 'nothing to restore'}`);
+  return 0;
+}
+
 function deviceCaps(ctx: Ctx): number {
   const rows = SETTING_KEYS.map((key) => {
     const spec = SETTINGS[key];
@@ -1432,6 +1648,34 @@ function requireSettingKey(v: string): SettingKey {
  * same code. (Remote is a known gap: the overrides live in the *server's* run file, so
  * a locally-empty snapshot means this correctly skips — see the issue's Out of scope.)
  */
+/**
+ * Park prepared devices when the flow that used them ends — #97's "in sleep mode when they're
+ * not [in use]".
+ *
+ * Three properties worth keeping:
+ *
+ *   * It can only ever touch a device you explicitly PREPPED, and only if that prep did not
+ *     pass `--no-sleep-when-idle`. A borrowed phone that was never prepped is never slept.
+ *   * It goes through the driver rather than the command dispatcher, so it does not appear as
+ *     a `key sleep` testcase in the report. Parking is host hygiene, not a test step.
+ *   * `ownClaimedSerials()` is empty in `--server` mode (the local process never resolves a
+ *     device), so the remote path degrades to doing nothing on its own, with no branch here.
+ *     Managing a remote device's power is `--allow-device-control`'s job.
+ *
+ * Must run BEFORE `releaseOwnClaims()`, which is what it reads its serials from.
+ */
+function parkPreparedDevices(platform: Platform): void {
+  for (const serial of ownClaimedSerials()) {
+    if (!readPrep(serial)?.sleepWhenIdle) continue;
+    try {
+      err(`[verikun] parking prepared device ${serial} (sleep)`);
+      getDriver(platform, serial).pressKey('sleep');
+    } catch {
+      /* teardown must never throw — the device may be exactly why we are unwinding */
+    }
+  }
+}
+
 async function restoreDeviceOverrides(backend: ExecBackend): Promise<void> {
   if (!Recorder.hasDeviceOverrides()) return;
   try {
@@ -1704,6 +1948,7 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
         /* the device may be exactly why we are unwinding — never mask the real error */
       }
     }
+    parkPreparedDevices(platformFromFlags(batchFlags));
     releaseOwnClaims();
   }
 }
@@ -2382,6 +2627,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     // otherwise an unattended run leaves the phone offline or in dark mode.
     await restoreDeviceOverrides(backend);
     await backend.close?.(); // frees a remote server's device lock for the next command
+    parkPreparedDevices(platform); // a prepped device goes back to sleep between runs
     releaseOwnClaims(); // and the host-level claim, so the next job can have the device
   }
 
@@ -2466,6 +2712,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
   } finally {
     await restoreDeviceOverrides(backend);
     await backend.close?.();
+    parkPreparedDevices(platform);
     releaseOwnClaims();
   }
 }
@@ -2821,6 +3068,13 @@ DEVICE STATE (change the device the app runs on, then put it back)
   device reset [key ...]              Restore what this run changed. batch/ai/suite also
                                       do this automatically when the flow ends OR fails,
                                       so a dead test can't leave the phone offline.
+  device prep [--dry-run] [--json]    Prepare a TEST device once, stickily: animations off,
+                                      display kept awake, Do Not Disturb on, battery idle off.
+                                      Survives the run (unlike \`device set\`), so it is undone
+                                      only by \`--revert\`. A PHYSICAL device must be named with
+                                      --device — prep must never land on a personal phone.
+                                      --no-sleep-when-idle keeps the screen on after a run.
+  device prep --revert [--dry-run]    Put a prepared device back the way it was found
   device caps [--json]                What this platform supports, and the manual
                                       equivalent where it doesn't
                                       Refuses \`airplane=on\` over wireless adb (it would cut

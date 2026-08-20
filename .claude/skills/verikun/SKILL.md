@@ -93,6 +93,8 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
 - `vk swipe up|down|left|right [--on <selector>] [--distance f] [--duration ms]`
 - `vk swipe --from x,y --to x,y [--duration ms]`
 - `vk key <name|code>`  ·  `vk back`  ·  `vk home`  ·  `vk enter`
+  Named keys include `sleep` and `wakeup`. `power` is a **toggle**, so use `sleep`/`wakeup`
+  when you mean a direction.
 - `vk screenshot [--out path] [--more] [--max px] [--full]` — saves a PNG (default
   `./.verikun/screen.png`) and prints the path; then read that file to *see* the
   screen. It's **downscaled to a 700px longest edge by default** to save tokens
@@ -118,11 +120,15 @@ banner, the retry path, dark theme, a layout that breaks at accessibility text s
 
   | key | values | Android | iOS simulator |
   |---|---|---|---|
+  | `animations` | `on\|off` | yes | **no** — nothing disables UIKit animation |
   | `airplane` | `on\|off` | yes | **no** — a simulator has no radio |
   | `dark` | `on\|off` | yes | yes |
   | `font-scale` | `0.5`–`3.0`, `default` | yes | yes (nearest Dynamic Type category) |
   | `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` | yes | **no** |
   | `stay-awake` | `on\|off` | yes | no-op (simulators don't sleep) |
+  | `screen-timeout` | `30s` / `10m` / ms / `max` | yes | no-op (simulators don't sleep) |
+  | `dnd` | `on\|off` | yes | **no** — Focus is not scriptable |
+  | `doze` | `on\|off` | yes | no-op (no Doze equivalent) |
 
   Set several at once: `vk device set dark=on font-scale=1.3`. Each change is **verified by
   reading it back**, so success means it actually landed — these device commands silently
@@ -133,6 +139,14 @@ banner, the retry path, dark theme, a layout that breaks at accessibility text s
   from the snapshot taken before each change. `batch`, `ai` and `suite` reset automatically
   even when the flow *fails* — but a bare `vk device set` from a shell stays applied until
   you reset it, so don't leave someone's phone in airplane mode.
+
+- `vk device prep [--dry-run] [--revert]` — set a **test** device up once, stickily:
+  `animations=off stay-awake=on screen-timeout=max dnd=on doze=off`.
+
+  Unlike `device set`, prep **survives the run** and is undone only by `--revert`. A physical
+  device must be named (`--device <serial>`) — that requirement is deliberate, so prep can
+  never land on a personal phone that happened to be plugged in. Do not run it on a device
+  the user did not point you at. `vk doctor` reports whether a device is prepared.
 
   Two traps:
   - **`airplane=off` brings the radio back, not the internet.** Follow it with
@@ -515,8 +529,13 @@ owns the redaction and the review-first flow.
 
 ## Gotchas
 
-- **Disable animations once** for reliable dumps: `vk doctor --fix`. Live
-  animations can make `vk ui` flaky (it already retries 3×).
+- **Prepare the device once** for reliable dumps: `vk device prep` (a physical device
+  needs `--device <serial>`). Live animations can make `vk ui` flaky (it already retries 3×).
+- **A slept device returns the LOCK SCREEN, not an error.** The dump succeeds and hands
+  back `com.android.systemui` — so selectors miss for a reason unrelated to the app.
+  verikun detects this, wakes the device and clears a *swipe* lock automatically; on a
+  PIN/pattern/password it exits **3** naming the lock rather than returning that dump.
+  Tell the user to remove the lock in Settings > Security — verikun never asks for a PIN.
 - **Ambiguous selector → exit 2**, never a random tap. `vk` prints the candidate
   matches; add `--index N` or use a more specific selector.
 - **Indexes are per-snapshot.** `vk tap 3` taps `[3]` from the *latest* dump;
@@ -554,13 +573,15 @@ owns the redaction and the review-first flow.
   use `xcrun simctl`. Run `vk doctor --ios` to check the toolchain. Caveats: `clear`
   is unsupported (no per-app reset), `current` is `(unknown)`, device logs are
   simulator-only, and `device set` is partial — `dark`/`font-scale` work on a simulator
-  while `airplane`/`rotation` do not exist there at all (`vk device caps --ios`). iOS
+  while `animations`/`airplane`/`rotation`/`dnd` do not exist there at all, and
+  `stay-awake`/`screen-timeout`/`doze` are no-ops (`vk device caps --ios`). That makes
+  `vk device prep` effectively Android-only: on iOS it applies nothing and says so. iOS
   accessibility ids are often unset, so prefer `text:`/`desc:` selectors there.
 
 ## Worked example — verify a login flow
 
 ```sh
-vk doctor --fix                              # deterministic UI
+vk doctor                                    # is the device set up? (read-only)
 vk launch com.example.app
 vk text @email_input "user@example.com"      # field lookup auto-waits up to 5s
 vk text @password_input "hunter2" --enter

@@ -133,6 +133,12 @@ let processScoped = false;
  */
 const acquired = new Set<string>();
 
+/** Which devices this process took. Read by the prep teardown, which has to act on them
+ *  BEFORE `releaseOwnClaims` empties this — see `parkPreparedDevices` in cli.ts. */
+export function ownClaimedSerials(): string[] {
+  return [...acquired];
+}
+
 /** Give back every device this process claimed. Best-effort; teardown must never throw. */
 export function releaseOwnClaims(o: ClaimOpts = {}): string[] {
   const released: string[] = [];
@@ -183,9 +189,13 @@ export function claimsDir(o: ClaimOpts = {}): string {
  * two serials that sanitize alike (`192.168.1.5:5555` vs `192.168.1.5_5555`) can never
  * collide onto one file and silently share a claim.
  */
-function fileFor(serial: string): string {
+export function deviceFileStem(serial: string): string {
   const safe = serial.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 48);
-  return `${safe}-${createHash('sha1').update(serial).digest('hex').slice(0, 8)}.json`;
+  return `${safe}-${createHash('sha1').update(serial).digest('hex').slice(0, 8)}`;
+}
+
+function fileFor(serial: string): string {
+  return `${deviceFileStem(serial)}.json`;
 }
 
 function pathFor(serial: string, o: ClaimOpts): string {

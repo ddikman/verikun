@@ -677,9 +677,13 @@ export class IdbDriver implements Driver {
           const scale = contentSizeToFontScale(this.simctlUi('content_size'));
           return scale === null ? null : canonicalFontScale(scale);
         }
+        case 'animations':
         case 'airplane':
         case 'rotation':
         case 'stay-awake':
+        case 'screen-timeout':
+        case 'dnd':
+        case 'doze':
           return null;
       }
     } catch {
@@ -722,6 +726,33 @@ export class IdbDriver implements Driver {
           'Neither `simctl ui` (appearance/content_size/increase_contrast only) nor `idb ui` ' +
             'exposes orientation. Rotate the Simulator window by hand (Cmd+Left / Cmd+Right).',
         );
+      case 'screen-timeout':
+        // Same honest no-op as stay-awake, and for the same reason.
+        this.assertSimulator(key);
+        err('note: screen-timeout is a no-op on iOS — simulators do not sleep');
+        return;
+      case 'doze':
+        this.assertSimulator(key);
+        err('note: doze is a no-op on iOS — there is no Doze equivalent to turn off');
+        return;
+      case 'dnd':
+        return this.unsupportedSetting(
+          key,
+          '`simctl ui` exposes only appearance/content_size/increase_contrast, and neither it nor ' +
+            '`idb` can reach Focus. Turn it on inside the simulator: Settings > Focus > Do Not Disturb.',
+        );
+      case 'animations':
+        return this.unsupportedSetting(
+          key,
+          'Neither `simctl` nor `idb` can disable UIKit animation. The Simulator menu offers only ' +
+            'Debug > Slow Animations, which is the opposite of what a test wants — rely on selector ' +
+            'auto-wait, which polls until the screen settles.',
+        );
     }
   }
+
+  // NOTE: `screenState()` and `dismissKeyguard()` are deliberately NOT implemented here.
+  // They are optional on `Driver` (like `screenshotRaw?()`), and a simulator neither sleeps
+  // nor has a keyguard — synthesizing an "awake, unlocked" answer would be a claim we cannot
+  // back on a physical device, where idb offers no way to ask either question.
 }

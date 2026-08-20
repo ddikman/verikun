@@ -6,11 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-20
+
 ### Added
+- **`vk device prep`**: prepare a test device once — animations off, display awake, DND on, doze off.
+- **`vk device prep --revert`**: restore what prep changed, from a host-global snapshot that outlives the run.
+- **`vk device prep --dry-run`**: show each knob's current and target value without writing.
+- **`vk device set animations|screen-timeout|dnd|doze`**: four new keys, each verified by readback.
+- **`vk key sleep` / `vk key wakeup`**: directional screen keys; `power` remains a toggle.
+- **`vk doctor`**: reports whether the device is prepared and whether it has a screen lock.
 - **Docs site**: a `Cost & budget` reference page — when a model is called, the estimate formula,
   and that `--max-cost-usd` is per test, not per suite. ([#94])
 
+### Changed
+- **`vk doctor --fix`**: now an alias for `device prep`, so a physical device must be named with `--device`.
+- **`vk doctor`**: read-only without `--fix`; it no longer writes animation scales directly.
+- **`vk batch|ai|suite`**: put a prepped device to sleep on teardown; `--no-sleep-when-idle` opts out.
+
 ### Fixed
+- **UI reads**: a locked device returned the lock screen as a successful dump; now woken, unlocked if
+  the lock is a swipe, else exit `3` naming it.
 - **Docs site**: the `vk ai` cost line was printed in a format the CLI never emitted.
 
 [#94]: https://github.com/ddikman/verikun/issues/94

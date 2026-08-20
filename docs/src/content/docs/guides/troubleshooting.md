@@ -98,8 +98,10 @@ all.
 
 ### `vk ui` reads a screen mid-transition
 
-**Disable animations once**: `vk doctor --fix`. Live animations are the main cause of flaky
-dumps. verikun already retries a dump 3 times, but a running animation defeats that.
+**Prepare the device once**: `vk device prep` (a physical device needs `--device <serial>`).
+Live animations are the main cause of flaky dumps — verikun already retries a dump 3 times, but
+a running animation defeats that — and prep turns them off along with the other knobs that make
+reads trustworthy. See [Device state](/verikun/reference/device-state/#preparing-a-test-device).
 
 ### Why a test run takes as long as it does
 
@@ -230,10 +232,51 @@ VERIKUN_NO_CLAIM=1 vk tap @x               # or opt out of coordination entirely
 A claim from a crashed job clears on its own. Full detail:
 [Device claims](/verikun/reference/device-claims/).
 
-### The emulator's display went to sleep
+### The display went to sleep
 
-A sleeping display hangs `uiautomator` dumps. Wake it first. This is worth knowing before
-you conclude the app is wedged.
+The failure here is not the one you would expect. A slept device does **not** reliably fail the
+read — measured on a Pixel 3a (API 32), a `Dozing` device served a perfectly well-formed
+hierarchy of `com.android.systemui`. The dump *succeeds*, and hands back the **lock screen**
+instead of the app.
+
+That is a false green, and it is worse than an error: every selector then misses for a reason
+that has nothing to do with your app.
+
+So before every hierarchy read verikun asks whether the display is actually on
+(`dumpsys power`'s `mWakefulness`). If it is not, it wakes the device and tries
+`wm dismiss-keyguard` first, then reads.
+
+**Why a round trip rather than inspecting the hierarchy.** The obvious cheap trick — notice
+that everything on screen belongs to `com.android.systemui` — does not generalise. A Motorola
+on API 29 serves its own **vendor always-on display** while dozing (`@clock`, `@date`,
+`@battery_progress`, in a `com.motorola.*` package), which no package heuristic can tell from
+an app. Whether the display is on is the only signal that holds for every device. Measured cost:
+about **85 ms** per read.
+
+A second check still runs on the hierarchy afterwards, for a device that is awake but behind
+the keyguard: if every package-qualified id belongs to the system *and* `dumpsys trust` reports
+the device locked, verikun retries and then exits **`3`** naming the lock. (`android:` framework
+ids are *neutral* there — the lock screen inflates framework notification layouts, so they prove
+nothing either way.)
+
+A **swipe** lock is cleared automatically. A **PIN, pattern or password** is not: clearing one
+needs the credential, and verikun never asks for or stores a device PIN. Remove the lock on a
+test device — *Settings > Security* — and the recovery works from then on.
+
+`vk doctor` also lists, per device, whether it is prepared and what kind of lock it has. That
+advisory needs the `CredentialType` field of `dumpsys lock_settings`, which is present on
+API 32 and API 35 but **absent on API 29** — so on an older device doctor stays quiet about the
+lock rather than guessing. The read-time protection above is unaffected: it keys off
+`dumpsys trust`, which works there.
+
+The durable fix is to stop the display sleeping at all:
+
+```sh
+vk device prep --device <serial>    # stay-awake=on, screen-timeout=max, and more
+```
+
+To wake a device by hand: `vk key wakeup` (`vk key sleep` is the other direction; `vk key power`
+is a toggle and cannot express either).
 
 ### `vk log` is empty
 
