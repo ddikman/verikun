@@ -6,7 +6,10 @@ import { test, before, after } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { buildServer, parseDeviceControl, parseFailover, ServerConfig, ServerLifecycle } from '../src/server';
+import { buildServer, parseDeviceControl, parseDevicePool, parseFailover, ServerConfig, ServerLifecycle } from '../src/server';
+import type { DeviceHandle, DevicePool } from '../src/server-pool';
+import { executeForServer } from '../src/cli';
+import { describeError } from '../src/rpc';
 import { setOutputQuiet } from '../src/output';
 import type {
   DeviceOpResponse, DeviceListResponse, ExecResponse, HealthResponse, InstallResponse, LogsResponse, RpcErrorBody,
@@ -51,26 +54,101 @@ const madeDrivers: string[] = [];
 /** Throwaway $HOME for the host-global claim store — failover claims for real. */
 const claimHome = mkdtempSync(join(tmpdir(), 'vk-server-claims-'));
 
+/**
+ * An in-memory stand-in for the worker pool.
+ *
+ * Each device delegates to a `makeDriver(fakes[serial])`, so a test gives a device a
+ * distinguishable answer exactly as it did through the old `makeDriver` seam — and
+ * `madeDrivers` still records every serial the pool brought up, which is what the
+ * rebind and failover assertions read.
+ */
+function fakePool(serials: string[], fakes: Record<string, Partial<Driver>>): DevicePool {
+  const live = new Map<string, DeviceHandle>();
+  const handleFor = (serial: string): DeviceHandle => {
+    const driver = makeDriver({ resolvedSerial: () => serial, ...(fakes[serial] ?? {}) });
+    return {
+      serial,
+      // The real thing, minus the thread: `executeForServer` is exactly what a worker
+      // runs, so every command path — selector resolution, the errors failover
+      // classifies — behaves here as it does in production.
+      exec: async (req) => {
+        const r = await executeForServer(req.command, req.positionals, req.flags, driver, 'android');
+        return {
+          code: r.code,
+          ...(r.error ? { error: describeError(r.error) } : {}),
+          ...(r.step ? { step: r.step } : {}),
+          ...(r.artifacts ? { artifacts: r.artifacts } : {}),
+          ...(r.logStart ? { logStart: r.logStart } : {}),
+        };
+      },
+      elements: async () => driver.getElements(),
+      logs: async (opts) => driver.getLogs(opts),
+      install: async (path) => driver.install(path),
+      reads: async () => driver.hierarchySource?.() ?? null,
+      preflight: async () => driver.preflight(),
+      dispose: async () => undefined,
+    };
+  };
+  for (const s of serials) live.set(s, handleFor(s));
+  return {
+    serials: () => [...live.keys()],
+    get: (serial) => live.get(serial),
+    async replace(failed, next) {
+      let arrived: string | null = null;
+      if (next) {
+        madeDrivers.push(next);
+        try {
+          live.set(next, handleFor(next));
+          await live.get(next)!.preflight(); // a real worker refuses to start on a bad probe
+          arrived = next;
+        } catch {
+          live.delete(next);
+        }
+      }
+      live.delete(failed);
+      return arrived;
+    },
+    async rebind(serial) {
+      live.clear();
+      if (serial === null) return;
+      madeDrivers.push(serial);
+      live.set(serial, handleFor(serial));
+    },
+    async disposeAll() {
+      live.clear();
+    },
+  };
+}
+
+/** Harness-only knobs, translated into a pool before buildServer sees the config. */
+type StartOpts = Partial<Omit<ServerConfig, 'pool'>> & {
+  /** null = a server that came up with no device. */
+  serial?: string | null;
+  /** Behaviour for the STARTING device — the old `driver:` key, unchanged at call sites. */
+  driver?: Partial<Driver>;
+  /** More than one device: a pool. */
+  serials?: string[];
+};
+
+const DEFAULT_SERIAL = 'emulator-5554';
+
 /** Boot a server on an ephemeral port for one test and point `base` at it. */
 async function start(
-  config: Partial<ServerConfig> = {},
-  /** Per-serial Driver overrides for drivers the rebind seam builds. Lets a test give
+  opts: StartOpts = {},
+  /** Per-serial Driver overrides for devices the pool brings up later. Lets a test give
    *  each device a distinguishable answer and assert WHICH one a handler read. */
   fakes: Record<string, Partial<Driver>> = {},
 ): Promise<void> {
   if (server) server.close();
   madeDrivers.length = 0;
+  const { serial, driver, serials, ...config } = opts;
+  const starting = serials ?? (serial === null ? [] : [serial ?? DEFAULT_SERIAL]);
   server = buildServer({
     platform: 'android',
-    driver: makeDriver(),
-    serial: 'emulator-5554',
     authKey: KEY,
     allowInstall: false,
-    makeDriver: (_p, device) => {
-      madeDrivers.push(device);
-      return makeDriver({ resolvedSerial: () => device, ...(fakes[device] ?? {}) });
-    },
     claimOpts: { home: claimHome },
+    pool: fakePool(starting, { ...(driver ? { [starting[0] ?? DEFAULT_SERIAL]: driver } : {}), ...fakes }),
     ...config,
   });
   // listen() is async: address() stays null until 'listening' fires.
@@ -745,4 +823,181 @@ test('devices list: an allowlist discloses those names, never the whole host', a
   const r = (await (await call('/v1/devices')).json()) as DeviceListResponse;
   assert.deepEqual(r.devices.map((d) => d.name), ['Pixel_6']);
   assert.ok(!r.devices.some((d) => d.name === 'Secret_AVD'), 'other AVDs on the host stay private');
+});
+
+// --- the device pool: capacity, leases, and how failover reaches one ---------
+
+test('parseDevicePool: all / all-android / all-ios and explicit serial lists', () => {
+  assert.equal(parseDevicePool({}), undefined);
+  assert.deepEqual(parseDevicePool({ devices: 'all' }), { all: true, serials: [] });
+  assert.deepEqual(parseDevicePool({ devices: 'all-ios' }), { all: true, serials: [], platform: 'ios' });
+  assert.deepEqual(parseDevicePool({ devices: 'ALL-Android' }), { all: true, serials: [], platform: 'android' });
+  assert.deepEqual(parseDevicePool({ devices: 'a, b ,a' }), { all: false, serials: ['a', 'b'] });
+});
+
+test('parseDevicePool: "all" plus named serials is a usage error, not a silent winner', () => {
+  for (const bad of ['all,emulator-5554', 'all-ios,udid-1']) {
+    assert.throws(
+      () => parseDevicePool({ devices: bad }),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2,
+    );
+  }
+});
+
+test('parseDevicePool: a valueless or empty --devices is a usage error', () => {
+  for (const bad of [true, '', ' , ']) {
+    assert.throws(
+      () => parseDevicePool({ devices: bad as string | true }),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2,
+    );
+  }
+});
+
+test('health: one device still reports its serial; a pool reports capacity and members', async () => {
+  await start();
+  const one = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(one.serial, 'emulator-5554', 'existing clients read this field');
+  assert.equal(one.capacity, 1);
+
+  await start({ serials: ['a', 'b', 'c'] });
+  const many = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(many.capacity, 3);
+  assert.deepEqual(many.devices, ['a', 'b', 'c']);
+  assert.equal(many.serial, null, 'a pool has no single answer');
+  assert.equal(many.deviceState, 'ready');
+});
+
+test('lease: a run token gets one device, and the SAME one on every later call', async () => {
+  await start({ serials: ['a', 'b'] });
+  const first = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  const again = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  assert.equal(again.serial, first.serial, 'affinity: a repair must land on the device the run started on');
+});
+
+test('lease: a second run token gets a DIFFERENT device from the pool', async () => {
+  await start({ serials: ['a', 'b'] });
+  const a = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  const b = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-B' })).json()) as { serial: string };
+  assert.notEqual(a.serial, b.serial);
+});
+
+test('lease: an exhausted pool is 409, and releasing frees the device immediately', async () => {
+  await start({ serials: ['a', 'b'] });
+  for (const token of ['run-A', 'run-B']) {
+    assert.equal((await call('/v1/lease', { method: 'POST', body: '{}', token })).status, 200);
+  }
+  const busy = await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-C' });
+  assert.equal(busy.status, 409);
+  assert.match(((await busy.json()) as { error: string }).error, /all 2 devices are leased/);
+  await call('/v1/release', { method: 'POST', body: '{}', token: 'run-A' });
+  assert.equal((await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-C' })).status, 200);
+});
+
+test('logs: served from the LEASED device, not one captured at startup', async () => {
+  await start({ serials: ['a', 'b'] }, { a: { getLogs: () => 'FROM-A' }, b: { getLogs: () => 'FROM-B' } });
+  const leased = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  const r = (await (await call('/v1/logs', { method: 'POST', body: '{}', token: 'run-A' })).json()) as LogsResponse;
+  assert.equal(r.logs, leased.serial === 'a' ? 'FROM-A' : 'FROM-B');
+});
+
+test('device control: a pooled server refuses mutations rather than guessing a device', async () => {
+  const { lc } = fakeLifecycle();
+  await start({ serials: ['a', 'b'], deviceControl: { allowedTargets: [] }, lifecycle: lc });
+  const res = await call('/v1/devices/restart', { method: 'POST', body: '{}' });
+  assert.equal(res.status, 403);
+  assert.match(((await res.json()) as { error: string }).error, /pools 2 devices/);
+  assert.equal((await call('/v1/devices')).status, 200, 'the read-only listing stays available');
+});
+
+test('install: reaches EVERY device, or the later lanes would run the previous build', async () => {
+  const installed: string[] = [];
+  const seen = (serial: string) => ({ install: () => void installed.push(serial) });
+  await start(
+    { serials: ['a', 'b', 'c'], allowInstall: true },
+    { a: seen('a'), b: seen('b'), c: seen('c') },
+  );
+  const res = await install();
+  assert.equal(res.status, 200);
+  assert.deepEqual(installed.sort(), ['a', 'b', 'c']);
+  assert.deepEqual(((await res.json()) as { devices: string[] }).devices.sort(), ['a', 'b', 'c']);
+});
+
+test('install: refused while another run holds a device', async () => {
+  await start({ serials: ['a', 'b'], allowInstall: true });
+  await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' });
+  assert.equal((await install('run-B')).status, 409);
+});
+
+test('failover on a pool: the failed device leaves, a healthy one takes its place', async () => {
+  // The pool's version of #99: one bad device must not shrink a fleet while a healthy
+  // spare sits idle — and the OTHER lease keeps serving throughout.
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b', 'spare') });
+  await start({ serials: ['a', 'b'], failover: { allowedTargets: [] }, lifecycle: lc }, { a: deadDevice() });
+  const mine = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  const other = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-B' })).json()) as { serial: string };
+  assert.notEqual(mine.serial, other.serial);
+  const dead = mine.serial === 'a' ? 'run-A' : 'run-B';
+
+  const r = await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: dead,
+  });
+  const body = (await r.json()) as ExecResponse;
+  assert.equal(body.code, 3, "the step still fails with the OLD device's error");
+  assert.equal(body.deviceChanged?.to, 'spare');
+
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.deepEqual(health.devices!.sort(), ['b', 'spare'], 'a left, spare joined — capacity held');
+  assert.equal(health.capacity, 2);
+  assert.equal(health.quarantined?.[0]?.serial, 'a');
+});
+
+test('failover on a pool: the lease follows the move rather than drawing a third device', async () => {
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'spare') });
+  await start({ serials: ['a'], failover: { allowedTargets: [] }, lifecycle: lc }, { a: deadDevice() });
+  await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' });
+  await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: 'run-A',
+  });
+  // The holder lands on the device the server actually announced — and has not lost its
+  // place in the queue to a racing job just because its device moved.
+  const after = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  assert.equal(after.serial, 'spare');
+  assert.equal((await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-B' })).status, 409);
+});
+
+test('failover on a pool: with nothing healthier the pool SHRINKS rather than keep a bad device', async () => {
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start({ serials: ['a', 'b'], failover: { allowedTargets: [] }, lifecycle: lc }, { a: deadDevice() });
+  const mine = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  const token = mine.serial === 'a' ? 'run-A' : 'run-B';
+  if (mine.serial !== 'a') await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-B' });
+  await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token,
+  });
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.deepEqual(health.devices, ['b'], 'a pool of two where one is broken is a coin flip per lease');
+  assert.equal(health.capacity, 1);
+});
+
+test('failover: the LAST device is never shed, so its own error survives', async () => {
+  // Shedding it would answer 503 "no device attached" from then on, replacing the real
+  // diagnosis (a full disk, say) with a message that names nothing.
+  const { lc } = fakeLifecycle({ list: () => attached('emulator-5554') });
+  await start({ failover: { allowedTargets: [] }, lifecycle: lc, driver: deadDevice() });
+  const r = await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+  });
+  const body = (await r.json()) as ExecResponse;
+  assert.equal(body.code, 3);
+  assert.match(body.error!.message, /not found/);
+  assert.equal(body.deviceChanged, undefined, 'nowhere to go, so nothing moved');
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(health.serial, 'emulator-5554', 'still serving, still answering with its own error');
 });

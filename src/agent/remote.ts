@@ -25,6 +25,7 @@ import {
   DeviceOpResponse,
   HealthResponse,
   InstallResponse,
+  LeaseResponse,
   LogsResponse,
   RpcErrorBody,
   rebuildError,
@@ -195,7 +196,20 @@ function decodeArtifacts(encoded: Record<string, string> | undefined): Record<st
   return out;
 }
 
-export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): ExecBackend {
+/** An ExecBackend that also knows which device the server gave this run. */
+export interface RemoteBackend extends ExecBackend {
+  /**
+   * Claim (or re-confirm) this run's device.
+   *
+   * The transport's run token IS the lease key, so this needs no argument and is
+   * idempotent — and, crucially, it must be called on the BACKEND's transport rather
+   * than a fresh one: `pingServer` mints its own token, so a lease taken there would
+   * belong to nobody. Returns null against a server that predates pooling.
+   */
+  lease(): Promise<LeaseResponse | null>;
+}
+
+export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): RemoteBackend {
   const t = new RemoteTransport(opts);
 
   const execRaw = async (req: ExecRequest, record: boolean): Promise<{ code: number; error?: Error }> => {
@@ -208,6 +222,13 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): E
 
   return {
     exec: (command, positionals, flags) => execRaw({ command, positionals, flags }, true),
+
+    async lease(): Promise<LeaseResponse | null> {
+      // Feature-detect on a FIELD, never on the version: `capacity` and /v1/lease landed
+      // together, and a client cannot otherwise tell "old server" from "new server".
+      if (health.capacity === undefined) return null;
+      return t.postJson<LeaseResponse>('/v1/lease', {}, HEALTH_TIMEOUT_MS);
+    },
 
     async getElements(): Promise<Element[]> {
       const res = await t.postJson<ElementsResponse>('/v1/elements', {}, ELEMENTS_TIMEOUT_MS);

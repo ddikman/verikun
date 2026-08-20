@@ -96,8 +96,8 @@ Change the *device* the app runs on, then put it back. Full detail:
 
 | Command | Description |
 |---|---|
-| `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--server url] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile to a deterministic plan once, replay model-free, self-heal failures via the model. Needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` per model, or no key with `--model codex-cli` / `cursor-cli`. See [Natural-language tests](/verikun/guides/natural-language-tests/). |
-| `suite <dir> [--app <id>] [--name n] [--retries n] [--server url] [--json]` <br/>(+ all `ai` flags) | Run every `*.md` in `<dir>` as one sequential suite with an overview report and a non-zero exit on failure — the CI gate. See [Suites](/verikun/guides/suites/). |
+| `ai <file> [--model m] [--max-cost-usd n] [--timeout dur] [--cost-override in/out] [--effort e] [--package pkg] [--app-build id] [--reset-app id] [--server url] [--show-plan] [--recompile] [--json]` | Run a plain-English test: compile to a deterministic plan once, replay model-free, self-heal failures via the model. Needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` per model, or no key with `--model codex-cli` / `cursor-cli`. See [Natural-language tests](/verikun/guides/natural-language-tests/). |
+| `suite <dir> [--app <id>] [--name n] [--retries n] [--server url] [--json]` <br/>`[--devices a,b] [--servers u1,u2] [--concurrency n] [--max-suite-cost-usd n]` <br/>(+ all `ai` flags) | Run every `*.md` in `<dir>` as one suite with an overview report and a non-zero exit on failure — the CI gate. `--devices`/`--servers` spread the tests across a pool (next free device takes the next test), and a plain `--server` sizes itself from a pooled server's capacity. See [Suites](/verikun/guides/suites/). |
 
 ### `ai` flags
 
@@ -111,14 +111,27 @@ Change the *device* the app runs on, then put it back. Full detail:
 | `--package <pkg>` | inferred | App id, used as part of the plan-cache key |
 | `--app-build <id>` | — | Build identity; a change invalidates the cached plan |
 | `--server <url>` | `VERIKUN_SERVER` | Run device I/O against a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) |
+| `--reset-app <id>` | — | Clear (iOS: force-stop) that app before the first step, on this run's own device |
 | `--show-plan` | — | Print the compiled IR and exit without running |
 | `--recompile` | — | Ignore the cache |
+
+### `suite` flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--app <id>` | — | Reset this app's data between tests (iOS: force-stop) |
+| `--retries <n>` | `0` | Re-run a failed test up to N times; a later pass recovers the suite with a warning |
+| `--devices <a,b>` | — | Run across these local devices, next free device takes the next test |
+| `--servers <u1,u2>` | — | Same, across several [`vk server`](/verikun/guides/remote-devices-and-ci/) hosts. A plain `--server` at a pooled server needs neither |
+| `--concurrency <n>` | pool size | Cap how many devices run at once |
+| `--max-suite-cost-usd <n>` | — | Stop the suite once **total** model spend crosses this (exit `1`). Off by default; the per-test [`--max-cost-usd`](/verikun/reference/cost/#the-budget) still applies |
+| `--name <n>` | directory name | Suite name in the manifest and the overview page |
 
 ## Remote
 
 | Command | Description |
 |---|---|
-| `server [--bind addr] [--port n] [--auth-key k] [--allow-install] [--allow-device-control[=names]] [--allow-failover[=serials]\|--no-failover] [--allow-unsafe-anonymous]` | Expose this machine's connected device to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
+| `server [--bind addr] [--port n] [--auth-key k] [--devices all\|all-android\|all-ios\|a,b] [--allow-install] [--allow-device-control[=names]] [--allow-failover[=serials]\|--no-failover] [--allow-unsafe-anonymous]` | Expose this machine's connected device(s) to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. `--devices` serves a whole pool from one address, leasing one device per run; a device that fails is quarantined and replaced. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
 
 Clients pass `--server <url>` (or `VERIKUN_SERVER`) plus `--auth-key` (or
 `VERIKUN_SERVER_AUTH_KEY`) to `ai`, `suite` and `install`. **The server's device and platform

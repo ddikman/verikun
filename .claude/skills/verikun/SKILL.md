@@ -397,7 +397,8 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   (`--max-cost-usd`) or the wall-clock passes **15m** (`--timeout`), so a runaway
   compile/repair loop can't spend or hang without limit. The ceiling is **per test, not per
   suite** — `vk suite` gives each `*.md` its own fresh budget, so 20 tests at the default can
-  reach $60; there is no suite-wide cap, so lower the per-test figure instead. A model is only
+  reach $60; lower the per-test figure, or set `vk suite --max-suite-cost-usd <n>` for an
+  aggregate cap (off by default; stops the suite at exit `1`). A model is only
   ever called to **compile** (once, on a cache miss) or to **repair** (≤3 per failing step);
   replay is always $0, and every non-`ai` command is $0 always. Full mechanism, the estimate
   formula and the cache multipliers: <https://ddikman.github.io/verikun/reference/cost/>.
@@ -437,6 +438,28 @@ vk suite tests/ --app com.example.app        # reset app data between tests
   are **not** counted as failures. So `3` = fix the machine and rerun; `1` = a real
   regression to investigate.
 
+### Across several devices
+
+Suite time is the **sum** of its tests on one device. Given a pool, the suite becomes a
+work queue instead — every device takes the next test as it frees up:
+
+```sh
+vk suite tests/ --app com.example.app --devices emulator-5554,emulator-5556
+vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # a pooled server
+vk suite tests/ --app com.example.app --servers http://a:8391,http://b:8391
+```
+
+- A `vk server --devices all` holds several devices behind one URL; a plain `--server`
+  suite reads its capacity and sizes itself. Nothing else about the command changes.
+- **File order stops sequencing tests** — they must be independent. Ordering becomes
+  longest-first, learned from the previous run's `index.json`.
+- Each row records **which device ran it**, and the manifest splits
+  `totals.wallClockMs` (how long the gate took) from `totals.durationMs` (device-seconds).
+- `--concurrency N` caps how many run at once — more devices on one host can thrash it.
+  `--max-suite-cost-usd N` stops the suite once total model spend crosses it (exit `1`).
+- A device that breaks retires; its tests move to the others. Exit `3` only when all are gone.
+- `--ensure-device` is refused with `--devices` — start the pool with `vk devices start`.
+
 ## Drive a remote device (--server)
 
 If the device is attached to another machine running `vk server`, point
@@ -450,10 +473,16 @@ vk install ./app-debug.apk --server "$VERIKUN_SERVER"   # server needs --allow-i
 vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
 ```
 
-A wrong URL/key fails fast with exit 3; `409` means another run holds the
-device; `503` means the server has no device attached — boot one (below). To
-expose a device from THIS machine: `vk server --allow-install`
+A wrong URL/key fails fast with exit 3; `409` means every device is already
+leased by another run; `503` means the server has no device attached — boot one
+(below). To expose a device from THIS machine: `vk server --allow-install`
 (add `--bind <addr>` to leave loopback; auth key auto-generates if unset).
+
+`vk server --devices all` (or `all-android` / `all-ios` / a serial list) serves a **pool**
+from one address. Each run leases one device for its whole life, so a run's steps and
+repairs always land on the same phone. `vk install --server` then installs on every device;
+`vk devices start|restart|stop --server` is refused (`403`) — a pool has no single device
+to act on.
 
 **If you see `[verikun] server moved device: A → B` on stderr**, the server left a
 device that failed and is now on another one. What that means depends on the line:
@@ -466,7 +495,9 @@ device that failed and is now on another one. What that means depends on the lin
   flow again from the top if you want it on B.
 
 The server rules the bad device out until it is power-cycled;
-`vk devices --server <url>` shows why in its `NOTE` column.
+`vk devices --server <url>` shows why in its `NOTE` column. On a pool the replacement
+joins the pool, so capacity holds — and the last device is never shed, so its own error
+keeps reaching you rather than a bare "no device attached".
 
 ## The device is missing or wedged
 

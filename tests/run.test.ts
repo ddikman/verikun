@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   isRecordable,
   stepName,
@@ -9,6 +12,9 @@ import {
   wantsArchiveLogs,
   archiveLogWindow,
   inferRunAppId,
+  laneId,
+  runId,
+  uniqueDir,
 } from '../src/run';
 
 // --- isRecordable ---------------------------------------------------------
@@ -181,4 +187,67 @@ test('inferRunAppId: prefers state.appId, else the latest lifecycle step', () =>
     'com.second',
   );
   assert.equal(inferRunAppId({ steps: [] }), undefined);
+});
+
+// --- lanes ------------------------------------------------------------------
+
+test('laneId: sanitises, because the value becomes a directory name and a run id', () => {
+  assert.equal(laneId({} as NodeJS.ProcessEnv), '');
+  assert.equal(laneId({ VERIKUN_LANE: 'l2' } as NodeJS.ProcessEnv), 'l2');
+  assert.equal(laneId({ VERIKUN_LANE: 'emulator-5554' } as NodeJS.ProcessEnv), 'emulator-5554');
+  // Separators are dropped, so what survives is always ONE path component — the
+  // remaining dots cannot traverse because the lane is a suffix (`run-....etc`).
+  assert.equal(laneId({ VERIKUN_LANE: '../../etc' } as NodeJS.ProcessEnv), '....etc');
+  assert.equal(laneId({ VERIKUN_LANE: 'a/b' } as NodeJS.ProcessEnv), 'ab');
+  // A value that sanitises away entirely reads as "no lane" — the pre-lane behaviour.
+  assert.equal(laneId({ VERIKUN_LANE: '///' } as NodeJS.ProcessEnv), '');
+  assert.equal(laneId({ VERIKUN_LANE: 'x'.repeat(80) } as NodeJS.ProcessEnv).length, 32);
+});
+
+test('runId: a lane suffix makes concurrent same-second ids distinct', () => {
+  const prev = process.env.VERIKUN_LANE;
+  try {
+    delete process.env.VERIKUN_LANE;
+    const bare = runId();
+    assert.match(bare, /^\d{8}-\d{6}$/);
+    process.env.VERIKUN_LANE = 'l3';
+    assert.match(runId(), /^\d{8}-\d{6}-l3$/);
+  } finally {
+    if (prev === undefined) delete process.env.VERIKUN_LANE;
+    else process.env.VERIKUN_LANE = prev;
+  }
+});
+
+test('uniqueDir: claims the directory by creating it, and advances on collision', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vk-unique-'));
+  try {
+    const base = join(root, 'runs', '20260820-141530');
+    // Creates missing parents, and returns the base CREATED (not merely free).
+    const first = uniqueDir(base);
+    assert.equal(first, base);
+    assert.ok(existsSync(first));
+    // A second claim cannot take the same path, even though the first is empty —
+    // that is the check-then-act race this replaced.
+    assert.equal(uniqueDir(base), `${base}-2`);
+    assert.equal(uniqueDir(base), `${base}-3`);
+    assert.deepEqual(readdirSync(join(root, 'runs')).sort(), [
+      '20260820-141530',
+      '20260820-141530-2',
+      '20260820-141530-3',
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('uniqueDir: skips a NON-empty pre-existing directory rather than adopting it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vk-unique-'));
+  try {
+    const base = join(root, 'r');
+    mkdirSync(base, { recursive: true });
+    writeFileSync(join(base, 'report.html'), 'an earlier run');
+    assert.equal(uniqueDir(base), `${base}-2`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

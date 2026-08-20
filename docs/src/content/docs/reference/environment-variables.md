@@ -58,6 +58,7 @@ refuses to start.
 | `VERIKUN_RUN_IDLE_MIN` | `30` | Minutes of idleness before an **implicit** run auto-archives and rolls over. `0` disables. |
 | `VERIKUN_SESSION` | — | Session identity for rollover; a change closes and archives the active run |
 | `TERM_SESSION_ID` | — | Fallback session identity when `VERIKUN_SESSION` is unset |
+| `VERIKUN_LANE` | — | Moves the active run to `./.verikun/run-<lane>/` and suffixes run ids with it. Set by a parallel [`vk suite`](/verikun/guides/suites/) on each of its child processes; you rarely set it yourself |
 
 See [Automatic rollover](/verikun/reference/reports-and-test-runs/#automatic-rollover).
 
