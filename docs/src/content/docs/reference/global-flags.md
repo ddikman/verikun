@@ -33,11 +33,15 @@ one attached device auto-resolves and more than one exits `2` rather than guessi
 
 ## `--json` covers errors too
 
-When `--json` is set, a failure emits `{error, exitCode}` as JSON rather than plain text on
-stderr. The exit code is unchanged.
+When `--json` is set, a failure emits `{error, exitCode, errorKind}` as JSON rather than plain
+text on stderr. The exit code is unchanged.
 
 This means an agent or script can set `--json` once and parse both outcomes the same way,
 without branching on whether the command succeeded.
+
+`errorKind` names the error's class — `SelectorNotFoundError`, `AmbiguousSelectorError`,
+`NoWindowError`, `CliError`, `Error` — so a caller can tell "the app has not drawn yet" from
+"the device is gone" without matching on message text. Both share exit `3`.
 
 ## `--` and text starting with a dash
 

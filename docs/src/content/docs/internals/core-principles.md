@@ -32,15 +32,21 @@ confirmation line out of it.
 
 ## `--json` everywhere, including errors
 
-When `--json` is set, the catch in `run()` emits `{error, exitCode}` as JSON. New commands
-should honour `--json` for their success output too.
+When `--json` is set, the catch in `run()` emits `{error, exitCode, errorKind}` as JSON.
+New commands should honour `--json` for their success output too.
 
 The point is that a caller sets `--json` once and parses both outcomes the same way.
+`errorKind` carries the error's **class** — `SelectorNotFoundError`,
+`AmbiguousSelectorError`, `NoWindowError`, `CliError`, `Error` — so a caller can tell
+"the app has not drawn yet" from "the device is gone" without matching on message text,
+which is the same job `rpc.ts`'s codec does across the HTTP boundary.
 
 ## No host shell, ever
 
-`exec.ts` runs everything via `spawnSync` with an **args array** — no `shell: true` — so
-host-side injection is impossible.
+`exec.ts` runs everything with an **args array** — no `shell: true` — so host-side
+injection is impossible. Almost all of it is `spawnSync`; the two exceptions are
+`spawnDetached` (the emulator must outlive the CLI) and `spawnCollect` (a parallel suite
+must not block on its lane children), and both take the same args array.
 
 *Device-side* shell escaping (for `adb shell input text …`) is the driver's job: see
 `escapeText()` in `drivers/adb.ts`. The allowlist is: backslash-escape **all** ASCII

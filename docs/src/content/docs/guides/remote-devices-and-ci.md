@@ -41,6 +41,40 @@ vk server --allow-install                    # 127.0.0.1:8391 by default
 vk server --bind 100.64.0.7 --allow-install  # expose on a tailnet IP
 ```
 
+### Serving several devices from one address
+
+```sh
+vk server --devices all --bind 100.64.0.7 --allow-install          # every usable device
+vk server --devices all-ios --bind 100.64.0.7                      # only the simulators
+vk server --devices emulator-5554,emulator-5556 --bind 100.64.0.7  # a named pair
+```
+
+`all-android` / `all-ios` both select the devices **and** pin the platform, so a host with
+emulators *and* simulators attached never has to be read as two flags. A bare `all` means
+"every usable device of this server's platform"; a named serial that is not attached is a
+startup error rather than a silently smaller pool.
+
+When a host has both kinds attached, `all` takes the **virtual** ones and says so — a
+simulator and a plugged-in iPhone are not interchangeable (log capture is
+[unsupported on the phone](/verikun/guides/platform-support/)), and `all` has no business
+enlisting somebody's handset while an emulator is running. Name the serial to pool a
+physical device deliberately.
+
+`vk suite --devices` takes the same spelling, resolved against the machine the suite runs
+on. It is a usage error to combine it with `--server`: those serials are local, so the
+suite would quietly test the wrong machine.
+
+A pooled server keeps one URL and one secret. Each run token **leases** one device for its
+whole run — compile, every step, every repair — so a client needs no device id and cannot end
+up half-way through a flow on a different phone. A parallel
+[`vk suite --server`](/verikun/guides/suites/#running-across-several-devices) reads the pool's
+capacity from `/v1/health` and sizes itself to match, so the CI line does not change.
+
+Two things behave differently on a pool: `vk install --server` installs on **every** device
+(otherwise later lanes would run the previous build), and `/v1/devices/{start,restart,stop}`
+answer `403` — there is no single device for them to act on, and guessing would let one job
+power-cycle a phone another is mid-test on. Run one server per device if you need that.
+
 From anywhere that can reach it:
 
 ```sh
@@ -143,13 +177,19 @@ Enabling device control also lets that client **erase** the device (`--wipe`). T
 honest cost of the flag; leave it off if you do not want it.
 :::
 
-### One run at a time
+### One run per device
 
-A run-token holds the device lock. A second concurrent caller gets **`409`**.
+A run token **leases** a device. A caller that arrives when every device is already leased
+gets **`409`**.
 
-The lock is released when the command finishes, so `vk install` then `vk suite` chain
-seamlessly. An idle lock (5 minutes silent) is taken over, so a crashed CI job cannot wedge
-the device permanently.
+The lease is released when the command finishes, so `vk install` then `vk suite` chain
+seamlessly. A lease that has been silent for **5 minutes** may be taken over — but only by a
+run that actually needs a device, so a crashed CI job cannot wedge a device permanently while
+a merely slow one (a cold compile, a model repair) keeps its own phone. A run that *does* lose
+its device is told so with a `409` naming it, never handed a different one: its earlier steps
+ran somewhere else, and continuing elsewhere would report one run that executed on two.
+
+A pooled server therefore serves as many concurrent runs as it has devices — and no more.
 
 ### Bind is loopback by default
 
@@ -180,13 +220,16 @@ on:
         default: ''
 
 concurrency:
-  group: device-suite      # one suite at a time — the server holds a single device lock
+  group: device-suite      # one suite at a time — the server's devices are all leased by it
   cancel-in-progress: false
 ```
 
-The `concurrency` group is **load-bearing**. The server permits one run at a time; a second
-job would get `409` rather than queueing. `cancel-in-progress: false` means a queued run
-waits instead of killing the one holding the device.
+The `concurrency` group is **load-bearing**. A second job would get `409` rather than
+queueing, because a parallel suite leases every device the server has. `cancel-in-progress:
+false` means a queued run waits instead of killing the one holding the devices.
+
+If you want two jobs to share a host, give each its own server (`--devices` naming disjoint
+serials, on different ports) rather than relaxing this group.
 
 Start with `workflow_dispatch` while you prove the setup, then add `pull_request` once the
 device server is reliably reachable from PR builds.
@@ -408,6 +451,25 @@ Failed to install '…apk': adb: device offline
 [failover] clear one with `vk devices restart <name> --server <url>`, or fix it and restart the server
 ```
 
+### Failover on a pool
+
+With [`--devices`](#serving-several-devices-from-one-address) the same machinery keeps the pool
+at **full capacity** rather than moving a single binding: the failed device is quarantined and
+dropped, and a healthy unclaimed one joins in its place. The other devices keep serving
+throughout — a lease on a different phone never notices.
+
+Two rules make it safe to reason about:
+
+- **The lease follows the move.** The run whose device failed lands on the replacement the
+  server just announced, not on some third device its next request happens to draw — and it
+  does not lose its place in the queue to a racing job. The failing *step* is still never
+  replayed; it keeps the old device's error, and the client seals that run and opens a fresh
+  one for the new device, so no report spans two.
+- **The last device is never shed.** A pool of three that loses one becomes a pool of two;
+  a server down to its final device stays on it, because answering `503 no device attached`
+  from then on would replace the real diagnosis — a full disk, say — with a message that names
+  nothing.
+
 ### What was ruled out, and how to clear it
 
 A quarantine lasts as long as the server process. There is no timer, on purpose: a device that
@@ -439,7 +501,7 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 
 | Symptom | Cause |
 |---|---|
-| `409` from the server | Another run holds the device lock. Check your `concurrency` group; an idle lock is taken over after 5 minutes. |
+| `409` from the server | Another run holds the device. Check your `concurrency` group; a lease silent for 5 minutes is taken over when someone else needs it. A `409` saying the run "cannot continue on another device" means yours was the one taken over — rerun it. |
 | `401` | The auth key does not match. Both sides must use the same `VERIKUN_SERVER_AUTH_KEY`. |
 | Exit `3`, "server unreachable" | Network path, not verikun. Check the tailnet is up on the runner. |
 | Installs rejected | The server was started without `--allow-install`. |

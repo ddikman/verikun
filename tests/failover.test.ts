@@ -10,6 +10,7 @@ import {
   classifyFailure,
   classifyInstallFailure,
   failoverCandidates,
+  isUsableState,
 } from '../src/device/failover';
 import { CliError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError, probeFailure } from '../src/errors';
 import type { DeviceInfo } from '../src/types';
@@ -220,4 +221,42 @@ test('candidates: an empty allowlist means "no restriction", not "nothing allowe
   // failover for everyone who did not pass a list.
   const devices = [dev('a'), dev('b')];
   assert.equal(failoverCandidates(devices, { exclude: [], allow: [] }).length, 2);
+});
+
+
+test('isUsableState: `connected` is matched loosely, but never as a substring', () => {
+  // devicectl's State column is free text, so the physical-iPhone arm has to be loose.
+  assert.equal(isUsableState('device'), true); // adb
+  assert.equal(isUsableState('booted'), true); // simctl
+  assert.equal(isUsableState('connected'), true); // devicectl
+  assert.equal(isUsableState('available (connected)'), true);
+  // An unanchored /connected/i matches these too — which would pool, and fail over ONTO,
+  // a phone that is not there.
+  assert.equal(isUsableState('disconnected'), false);
+  assert.equal(isUsableState('not connected'), false);
+  assert.equal(isUsableState('offline'), false);
+  assert.equal(isUsableState('unauthorized'), false);
+  assert.equal(isUsableState('shutdown'), false);
+});
+
+test('failoverCandidates: without an allowlist, a physical device is a last resort', () => {
+  // Failover is ON by default on an unpinned server. A wedged emulator must not make it
+  // start driving the developer's phone — the same judgement `--devices all` makes.
+  const attached = [
+    { serial: 'emulator-5556', state: 'device', platform: 'android' as const, kind: 'emulator' as const },
+    { serial: 'R58R42SGVNR', state: 'device', platform: 'android' as const, kind: 'physical' as const },
+  ];
+  assert.deepEqual(
+    failoverCandidates(attached, { exclude: [] }).map((d) => d.serial),
+    ['emulator-5556'],
+  );
+  // …but it IS reachable when nothing virtual remains, and when the operator named it.
+  assert.deepEqual(
+    failoverCandidates(attached, { exclude: ['emulator-5556'] }).map((d) => d.serial),
+    ['R58R42SGVNR'],
+  );
+  assert.deepEqual(
+    failoverCandidates(attached, { exclude: [], allow: ['R58R42SGVNR'] }).map((d) => d.serial),
+    ['R58R42SGVNR'],
+  );
 });

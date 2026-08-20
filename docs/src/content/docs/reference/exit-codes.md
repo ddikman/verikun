@@ -115,6 +115,14 @@ riding out. A [**budget abort**](/verikun/reference/cost/#the-budget) is never r
 because each attempt gets its own ceiling and would simply re-abort having spent twice. It
 exits `1`, like any other failure; `abortedForBudget` in `--json` is what tells them apart.
 
+`--max-suite-cost-usd` stops the suite at **`1`**, not `3`: the box is fine, the run just did
+not finish — the same verdict `vk ai --max-cost-usd` already produces. `index.json`'s
+`aborted.kind` says which of the two happened.
+
+Across a [pool](/verikun/guides/suites/#running-across-several-devices), a broken device
+retires its lane and its tests move to the others; `3` arrives only once **every** device is
+gone.
+
 ## `vk server` — HTTP mapping
 
 The server preserves exit codes across the wire, so a remote selector miss stays a heal
@@ -126,7 +134,7 @@ trigger rather than becoming a terminal failure.
 | `404` | `2` |
 | `413` | `2` |
 | `401` | `3` (auth failure, client-side) |
-| `409` | device lock held by another run |
+| `409` | every device is leased by another run |
 | `500` | `3` |
 
 Response bodies carry `{ error, exitCode }`. `SelectorNotFoundError` and

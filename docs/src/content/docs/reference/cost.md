@@ -131,8 +131,14 @@ ceiling. `--timeout <dur>`, default **15m**, is the second bound.
 a 20-test suite has an effective ceiling of **\$60**, not \$3. `--retries` compounds it further —
 each attempt gets a fresh budget too.
 
-There is no suite-wide cap. If you need one, bound the per-test figure and multiply out: 20 tests
-at `--max-cost-usd 0.25` tops out at \$5 — times `1 + --retries` if retries are enabled.
+Two ways to bound the total. Lower the per-test figure and multiply out — 20 tests at
+`--max-cost-usd 0.25` tops out at \$5, times `1 + --retries` — or set
+**`vk suite --max-suite-cost-usd <n>`**, which sums what each test actually spent and stops the
+suite once the total crosses it. That one is off by default and exits `1`, not `3`: the box is
+fine, the run just did not finish.
+
+The aggregate cap bounds the *total*, not each test — a suite can still overshoot it by up to one
+test's ceiling, because the check happens after a test finishes rather than mid-run.
 :::
 
 ### When it is checked
