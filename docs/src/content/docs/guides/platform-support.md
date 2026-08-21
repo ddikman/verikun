@@ -227,9 +227,18 @@ first tap rather than half-way through a half-modified device.
 <tr><td>Failure screenshot + hierarchy</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td>Failure screenshot over <code>--server</code></td><td>❌ hierarchy only</td><td>❌ hierarchy only</td><td>❌ hierarchy only</td><td>❌ hierarchy only</td></tr>
 <tr><td>Device claims (auto-pick a free device)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>vk server</code> failover — unreachable device</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>vk server</code> failover — device cannot serve an install</td><td>✅</td><td>✅</td><td>❌ probe only</td><td>❌ probe only</td></tr>
 </tbody>
 </table>
 
+- **Failover reads the install output, and that output is platform-specific.** A device that
+  has gone *unreachable* is detected the same way everywhere (the server re-probes it), so that
+  row is four ✅. But telling "this device cannot take the build" from "this build is broken"
+  means reading `adb`'s `INSTALL_FAILED_*` vocabulary, which only Android has: `idb install`
+  reports failures in an entirely different shape that verikun has not measured. So on iOS a
+  full simulator will **not** trigger a move — the install simply fails, as it did before. See
+  [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
 - **Device claims are host-side, so they behave identically everywhere.** They coordinate
   which *job* drives which device, and never touch the device itself — the four ✅ above are
   literal, not approximate. The one asymmetry is remote: over `--server` the claim is held by

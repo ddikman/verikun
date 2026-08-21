@@ -8,7 +8,7 @@
 - **Puppeteer for native mobile** — a thin wrapper over native Android and iOS automation runners with zero runtime dependencies.
 - **Natural-language tests** — `vk ai <file>`: runs plain-English tests, compiled once and replayed model-free (~$0), calling a model only to self-heal a drifted step. [What that costs](https://ddikman.github.io/verikun/reference/cost/), and how the `--max-cost-usd` ceiling bounds it.
 - **Self-improving** — the agent runner will provide prescriptive improvements to existing scripts to help stabilise flakiness for future runs.
-- **CI-ready** — `vk suite` runs a folder of tests as one gated pass/fail run; `vk server` exposes a real device over an authenticated tunnel so a disposable CI runner (no phone attached) can still drive it.
+- **CI-ready** — `vk suite` runs a folder of tests as one gated pass/fail run; `vk server` exposes a real device over an authenticated tunnel so a disposable CI runner (no phone attached) can still drive it, and moves to another attached device if that one goes bad.
 
 ```
 $ vk ui

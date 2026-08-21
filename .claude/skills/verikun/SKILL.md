@@ -452,6 +452,19 @@ device; `503` means the server has no device attached — boot one (below). To
 expose a device from THIS machine: `vk server --allow-install`
 (add `--bind <addr>` to leave loopback; auth key auto-generates if unset).
 
+**If you see `[verikun] server moved device: A → B` on stderr**, the server left a
+device that failed and is now on another one. What that means depends on the line:
+
+- `— retried there` (installs only): the build DID land, on **B**. Anything you go on
+  to do with an explicit serial must name B, not A.
+- `— this step failed on the old device; the next runs on the new one`: your step
+  failed on **A**. Do NOT re-run it expecting a different answer for the same reason —
+  the failure was real on A, and B has none of the state your flow built up. Start the
+  flow again from the top if you want it on B.
+
+The server rules the bad device out until it is power-cycled;
+`vk devices --server <url>` shows why in its `NOTE` column.
+
 ## The device is missing or wedged
 
 ```sh

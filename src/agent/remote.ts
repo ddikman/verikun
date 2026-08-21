@@ -19,10 +19,12 @@ import {
   ExecRequest,
   ExecResponse,
   ElementsResponse,
+  DeviceChange,
   DeviceListResponse,
   DeviceOpRequest,
   DeviceOpResponse,
   HealthResponse,
+  InstallResponse,
   LogsResponse,
   RpcErrorBody,
   rebuildError,
@@ -35,6 +37,16 @@ export interface RemoteOpts {
   /** Receives each exec'd step + its artifact buffers for splicing into the local run.
    *  `logStart` is the server's device-clock marker (optional on older servers). */
   onStep?: (step: RunStep, artifacts: Record<string, Buffer>, logStart?: string) => void;
+  /**
+   * The server moved itself onto a different device. Mirrors `onStep`: the transport
+   * reports, the caller decides what it means (a log line, and re-pointing the run
+   * context so later spliced steps are attributed to the device that ran them).
+   *
+   * Fires from THREE places, because a move is reported on success bodies AND on error
+   * bodies — `/v1/elements` and an install that exhausted the pool both fail, and the
+   * client still needs to know the ground shifted.
+   */
+  onDeviceChange?: (change: DeviceChange) => void;
 }
 
 // Per-call ceilings. exec is generous: a single leaf may legitimately block for its
@@ -109,7 +121,13 @@ class RemoteTransport {
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) throw describeStatus(res.status, await readBody<RpcErrorBody>(res), url);
+    if (!res.ok) {
+      const body = await readBody<RpcErrorBody>(res);
+      // Before throwing: a failing request may still have moved the device, and that is
+      // exactly the case a caller must not miss (an exhausted install, a dead-device read).
+      if (body?.deviceChanged) this.opts.onDeviceChange?.(body.deviceChanged);
+      throw describeStatus(res.status, body, url);
+    }
     const parsed = await readBody<T>(res);
     if (parsed === null) throw new CliError(`verikun server at ${url} returned a non-JSON response`, 3);
     return parsed;
@@ -183,6 +201,8 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): E
   const execRaw = async (req: ExecRequest, record: boolean): Promise<{ code: number; error?: Error }> => {
     const res = await t.postJson<ExecResponse>('/v1/exec', req, EXEC_TIMEOUT_MS);
     if (record && res.step) opts.onStep?.(res.step, decodeArtifacts(res.artifacts), res.logStart);
+    // A failing step is a 200, so this is the ordinary path for a mid-run device death.
+    if (res.deviceChanged) opts.onDeviceChange?.(res.deviceChanged);
     return { code: res.code, error: res.error ? rebuildError(res.error) : undefined };
   };
 
@@ -213,11 +233,14 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): E
         throw new CliError(`install: cannot read '${appPath}' (${(e as Error).message})`, 2);
       }
       const sha256 = createHash('sha256').update(buf).digest('hex');
-      await t.request<{ ok: boolean }>('POST', '/v1/install', buf, INSTALL_TIMEOUT_MS, {
+      const res = await t.request<InstallResponse>('POST', '/v1/install', buf, INSTALL_TIMEOUT_MS, {
         'content-type': 'application/octet-stream',
         'x-verikun-ext': ext,
         'x-verikun-sha256': sha256,
       });
+      // Install is the one operation the server replays elsewhere, so a move here means
+      // the build DID land — on a different device than the one we started with.
+      if (res.deviceChanged) opts.onDeviceChange?.(res.deviceChanged);
     },
 
     async reset(appId: string): Promise<void> {

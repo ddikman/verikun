@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { describeError, rebuildError } from '../src/rpc';
+import type { ExecResponse, RpcErrorBody } from '../src/rpc';
 import { CliError, SelectorNotFoundError, AmbiguousSelectorError, isEnvError, envError } from '../src/errors';
 import { makeEl } from './helpers';
 
@@ -62,4 +63,20 @@ test('rpc codec: a non-CliError throw maps to a plain Error (exit 3 semantics)',
   assert.ok(!(rebuilt instanceof CliError));
   assert.equal(rebuilt.name, 'TypeError');
   assert.equal(rebuilt.message, 'boom');
+});
+
+test('rpc wire: deviceChanged is optional everywhere — old servers simply omit it', () => {
+  // The standing rule (rpc.ts): feature-detect on the FIELD, never on `version`. An
+  // older server and a newer one that did not move device send the same thing, and both
+  // must read as "nothing moved" rather than as a protocol error.
+  const oldServer: ExecResponse = { code: 0 };
+  assert.equal(oldServer.deviceChanged, undefined);
+  const oldError: RpcErrorBody = { error: 'boom', exitCode: 3 };
+  assert.equal(oldError.deviceChanged, undefined);
+
+  const moved: ExecResponse = {
+    code: 3,
+    deviceChanged: { from: 'emulator-5554', to: 'emulator-5556', reason: 'the device is offline', retried: false },
+  };
+  assert.equal(moved.deviceChanged?.retried, false, 'exec never replays, so this is always false');
 });

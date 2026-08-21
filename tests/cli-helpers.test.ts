@@ -14,6 +14,7 @@ import {
   assertSafeAppId,
   stateFromFlags,
   terminalFailure,
+  retryAfterDeviceMove,
 } from '../src/cli';
 import { resolve } from 'node:path';
 import { parseSelector } from '../src/ui/selector';
@@ -334,4 +335,64 @@ test('terminalFailure: a non-ok result with no detail at all still records somet
   const t = terminalFailure({ ok: false }, AI_OPTS);
   assert.equal(t?.kind, 'fail');
   assert.equal(t?.where, 'run');
+});
+
+// --- retryAfterDeviceMove (the --server connect probe's one retry) ----------
+
+test('retryAfterDeviceMove: a read that works is not re-run', async () => {
+  let calls = 0;
+  const got = await retryAfterDeviceMove(
+    () => {
+      calls++;
+      return 'ok';
+    },
+    () => true,
+  );
+  assert.equal(got, 'ok');
+  assert.equal(calls, 1, 'a healthy read must never be doubled');
+});
+
+test('retryAfterDeviceMove: a failure with NO device move propagates on the first try', async () => {
+  // The fail-fast property of the connect probe. Retrying every failure would double the
+  // wait on a device that is simply broken, for no chance of a different answer.
+  let calls = 0;
+  await assert.rejects(
+    retryAfterDeviceMove(
+      () => {
+        calls++;
+        throw new CliError('device is wedged', 3);
+      },
+      () => false,
+    ),
+    (e: unknown) => e instanceof CliError && e.exitCode === 3,
+  );
+  assert.equal(calls, 1);
+});
+
+test('retryAfterDeviceMove: a failure AFTER a device move re-asks the new device once', async () => {
+  let calls = 0;
+  const got = await retryAfterDeviceMove(
+    () => {
+      calls++;
+      if (calls === 1) throw new CliError("device 'emulator-5554' not found", 3);
+      return 'the new device answered';
+    },
+    () => true,
+  );
+  assert.equal(got, 'the new device answered');
+  assert.equal(calls, 2);
+});
+
+test('retryAfterDeviceMove: it re-asks exactly ONCE, never in a loop', async () => {
+  let calls = 0;
+  await assert.rejects(
+    retryAfterDeviceMove(
+      () => {
+        calls++;
+        throw new CliError('still broken', 3);
+      },
+      () => true,
+    ),
+  );
+  assert.equal(calls, 2, 'a pool that keeps moving must not spin the connect probe');
 });

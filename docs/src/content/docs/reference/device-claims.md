@@ -159,3 +159,10 @@ process, on the host where the devices actually are — a client cannot see the 
 and does not need to. The server also has its own per-run device lock, which is a separate,
 finer-grained mechanism for two clients sharing one server; claims sit beneath it, keeping
 other jobs *on that host* off the server's device.
+
+When a server [fails over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails)
+to another device, the claim moves with the binding — and in that order: it claims the new
+device, probes it, commits, and only then hands the old one back. Releasing first would leave
+the server bound to a device it no longer holds, and a racing job on the same host would take
+it mid-request. A candidate another job already holds is simply skipped, not quarantined: busy
+is not broken.

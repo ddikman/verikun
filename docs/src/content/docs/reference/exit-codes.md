@@ -15,6 +15,11 @@ parsing prose, so they are stable and deliberate.
 | `2` | usage error, or **ambiguous selector** (the caller must refine) |
 | `3` | environment error — `adb`/`idb`/`simctl` missing, no usable device, dump failed |
 
+Over [`--server`](/verikun/guides/remote-devices-and-ci/), a server that failed over does not
+change these. An install that succeeded on another device is still `0`; one that exhausted the
+pool is still `3`, carrying the **first** device's error. A step that failed on a device the
+server has since moved off keeps that device's exit code — it is never re-run elsewhere.
+
 **stdout is data; stderr is diagnostics.** Healed-match notes, "tapped …" confirmations and
 warnings all go to stderr so stdout stays parseable.
 

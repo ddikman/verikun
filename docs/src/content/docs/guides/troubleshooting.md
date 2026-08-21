@@ -356,6 +356,10 @@ vk assert @content --wait 10s     # not an immediate tap
 | Exit `3`, unreachable | Network path | Not verikun. Check the tailnet or route is up on the client. |
 | Install rejected | Server lacks `--allow-install` | Restart the server with the flag; a read-only server refuses builds by design. |
 | Device overrides stranded after a crash | Known gap: under `--server` the snapshot lives in the **server's** run file | `vk device reset` from the device box. |
+| `Requested internal only, but not enough space` | The device's disk is full. Note it carries no `INSTALL_FAILED_*` code, which is why it is classified by *not* being a build failure | With failover on, the server moves to another attached device by itself. Otherwise free space on the device, or `vk devices restart` it. |
+| `[failover] no working device remains` | Every attached device has been ruled out; the error above it is the **first** device's | The listed reasons say what to fix. A successful `vk devices restart <name> --server <url>` clears that device's quarantine. |
+| The suite ran on a device you did not expect | The server failed over off a bad device | `[verikun] server moved device:` on the client says which and why; `curl "$VERIKUN_SERVER/v1/health" \| jq .quarantined` says what was ruled out. Pin with `--device` to forbid it. |
+| A `--server` step failed with an error about a device that is no longer bound | Expected: a step is never replayed elsewhere, so it fails carrying the old device's error | Re-run the flow from the top; the new device has none of the state it had built up. |
 
 ## iOS and idb
 
