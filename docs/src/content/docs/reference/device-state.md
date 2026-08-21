@@ -117,8 +117,8 @@ It establishes five knobs, each because it prevents a failure verikun actually h
 | knob | why |
 |---|---|
 | `animations=off` | a live animation makes `uiautomator dump` return a stale or empty screen |
-| `stay-awake=on` | a sleeping display **hangs** the dump rather than failing it |
-| `screen-timeout=max` | the same, for a device that is not plugged in |
+| `stay-awake=off` | it overrides the display timeout while charging, so a tethered device would never sleep |
+| `screen-timeout=1m` | the stock 15–30s blanks the display between two commands of one flow |
 | `dnd=on` | a heads-up notification lands on top of the app and steals the next tap |
 | `doze=off` | battery idle suspends the background work a test is waiting on |
 
@@ -142,12 +142,27 @@ never does, since an agent would simply always pass it. An emulator is auto-sele
 [`devices start|stop|restart`](/verikun/reference/commands/), which likewise refuses to
 power-cycle a physical device.
 
-### Asleep between runs
+### The device parks itself
 
-A prepped device is put to sleep when `batch`, `ai` or `suite` finishes with it — #97's "in
-sleep mode when they're not in use". Only a device you explicitly prepped is ever slept, and
-`vk device prep --no-sleep-when-idle` opts out. A slept display is recovered automatically on
-the next read (see below).
+A prepped device's display goes dark on its own about a minute after the last command, and
+comes back when the next one needs it. Nothing switches it off explicitly.
+
+The two display knobs are one decision, and it is worth knowing why they move together.
+`stay-awake=on` is `stay_on_while_plugged_in`, which keeps the screen lit **while charging** —
+and a device on USB adb always is. So leaving it on makes `screen-timeout` inert, which is why
+prep used to mean *never sleeps*, and why teardown then had to switch the display off by hand.
+That blanked the screen between every two commands of a burst, which is what
+[#101](https://github.com/ddikman/verikun/issues/101) asked to stop.
+
+A longer gap than a minute is not a failure: every path that touches the screen — a hierarchy
+read, a screenshot, a tap, a keypress — probes `mWakefulness` first and wakes the device
+(clearing a swipe keyguard) before it acts. Without that, `screencap` would return the ambient
+frame into your report and an injected tap would do nothing at all while exiting `0`.
+
+`vk device prep --no-sleep-when-idle` selects the other policy — `stay-awake=on`,
+`screen-timeout=max`, i.e. the display never turns off. That is the answer for a device with a
+PIN or pattern lock, since verikun can only clear a **swipe** lock on its own; prep says so at
+the time if it finds one.
 
 ### Screen locks: warned about, never removed
 

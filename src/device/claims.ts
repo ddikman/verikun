@@ -133,12 +133,6 @@ let processScoped = false;
  */
 const acquired = new Set<string>();
 
-/** Which devices this process took. Read by the prep teardown, which has to act on them
- *  BEFORE `releaseOwnClaims` empties this — see `parkPreparedDevices` in cli.ts. */
-export function ownClaimedSerials(): string[] {
-  return [...acquired];
-}
-
 /** Give back every device this process claimed. Best-effort; teardown must never throw. */
 export function releaseOwnClaims(o: ClaimOpts = {}): string[] {
   const released: string[] = [];

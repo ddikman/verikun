@@ -267,6 +267,17 @@ const VERIFY_INTERVAL_MS = 200;
  *  the unlock/wake animation, short enough that it is noise next to the dump it precedes. */
 const WAKE_SETTLE_MS = 600;
 
+/** How long an "it is awake" answer stays good for. Exists so ONE command does not probe
+ *  twice — `vk tap text:X` reads the hierarchy and then taps what it resolved — and is
+ *  deliberately far shorter than any display timeout that could sleep the device in between
+ *  (`device prep` sets a minute). A long `wait` or `vk ai` run therefore keeps re-probing. */
+const AWAKE_FRESH_MS = 2000;
+
+/** Keys that MOVE the screen's power state. They must never wake the device first: `sleep`
+ *  would be undone, and `wakeup` is what the wake path itself sends — the exclusion is what
+ *  stops that recursing. */
+const SCREEN_POWER_KEYS = new Set(['sleep', 'wakeup', 'power']);
+
 /** The three `global` scales behind the `animations` setting. All must be zero for it to
  *  read `off` — one live scale is enough to make a dump flaky. */
 const ANIMATION_SCALES = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'];
@@ -561,6 +572,8 @@ export class AdbDriver implements Driver {
   private lastRotation?: number;
   /** undefined = not built yet, null = opted out. See companionOrNull(). */
   private companion?: Companion | null;
+  /** Until when `ensureAwake` may skip its probe. See AWAKE_FRESH_MS. */
+  private awakeUntil = 0;
 
   constructor(serial?: string) {
     this.requested = serial;
@@ -654,10 +667,7 @@ export class AdbDriver implements Driver {
     // `com.motorola.*`), which no package heuristic can tell from an app. The display being
     // off is the only signal that generalises — if it is off, the app is not on screen,
     // whoever drew what is there.
-    if (this.readWakefulness() === false) {
-      err('note: the display is off — waking the device before reading the screen');
-      this.wakeAndUnlock();
-    }
+    this.ensureAwake('reading the screen');
 
     const els = this.captureElements(opts);
     // Second net, for a device that is awake but still behind the keyguard.
@@ -679,10 +689,11 @@ export class AdbDriver implements Driver {
       `${what}, so this read would return the keyguard rather than the app — which would look ` +
         'like a successful read of the wrong screen.\n' +
         (reason === 'locked'
-          ? 'Remove the screen lock on your test device (Settings > Security), then `verikun device ' +
-            'prep` to stop the display sleeping in the first place.\n' +
-            'verikun never asks for or stores a device PIN, so it cannot unlock this for you.'
-          : 'Keep the display awake with `verikun device prep`, or wake it with `verikun key wakeup`.'),
+          ? 'Remove the screen lock on your test device (Settings > Security) — verikun clears a ' +
+            'swipe lock by itself, and never asks for or stores a device PIN.\n' +
+            'To keep the display lit instead: `verikun device prep --no-sleep-when-idle`.'
+          : 'Wake it with `verikun key wakeup`, or keep the display lit with `verikun device ' +
+            'prep --no-sleep-when-idle`.'),
       3,
     );
   }
@@ -819,9 +830,11 @@ export class AdbDriver implements Driver {
         );
       }
       if (attempt === 0) {
-        // A sleeping display is the other documented cause of a failed read, so it is checked
-        // here, lazily, where it costs nothing until something has already gone wrong.
-        this.wakeIfAsleep();
+        // A sleeping display is the other documented cause of a failed read. `ensureAwake` ran
+        // before the dump, so reaching here means its answer went stale during a slow read (or
+        // the device could not answer at all) — clear the window and ask again for real.
+        this.awakeUntil = 0;
+        this.ensureAwake('retrying the read');
         // A companion holds the device's ONE UiAutomation connection and SIGKILLs anything
         // else that wants it — including this dump. It outlives the process that started it,
         // so a later command that never opted in would fail for as long as it lives. Ask it
@@ -832,13 +845,14 @@ export class AdbDriver implements Driver {
     }
     throw new CliError(
       `Failed to capture UI hierarchy after 3 attempts. ${lastErr}\n` +
-        'Tip: prepare the device once with `verikun device prep` (disables animations, keeps the ' +
-        'display awake) and ensure the screen is idle.',
+        'Tip: prepare the device once with `verikun device prep` (disables animations, gives the ' +
+        'display a sane timeout) and ensure the screen is idle.',
       3,
     );
   }
 
   screenshot(): Buffer {
+    this.ensureAwake('taking a screenshot');
     const r = runBinary(ADB, this.withSerial(['exec-out', 'screencap', '-p']));
     if (r.stdout.length < 8 || r.stdout[0] !== 0x89 || r.stdout[1] !== 0x50) {
       throw new CliError(`screencap did not return a PNG. ${r.stderr}`.trim(), 3);
@@ -856,6 +870,7 @@ export class AdbDriver implements Driver {
    * path. Getting a wrong-but-plausible image would be far worse than being slow.
    */
   screenshotRaw(): RawImage | null {
+    this.ensureAwake('taking a screenshot');
     const r = runBinary(ADB, this.withSerial(['exec-out', 'screencap']));
     const buf = r.stdout;
     if (buf.length < RAW_HEADER_SIZES[0]) return null;
@@ -886,10 +901,12 @@ export class AdbDriver implements Driver {
   }
 
   tap(x: number, y: number): void {
+    this.ensureAwake('tapping');
     this.shell(['input', 'tap', String(Math.round(x)), String(Math.round(y))]);
   }
 
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): void {
+    this.ensureAwake('swiping');
     this.shell([
       'input',
       'swipe',
@@ -903,6 +920,7 @@ export class AdbDriver implements Driver {
 
   inputText(text: string): void {
     if (!text) return;
+    this.ensureAwake('typing');
     this.shell(['input', 'text', escapeText(text)]);
   }
 
@@ -914,6 +932,7 @@ export class AdbDriver implements Driver {
         2,
       );
     }
+    if (!SCREEN_POWER_KEYS.has(name.toLowerCase())) this.ensureAwake(`sending ${name}`);
     this.shell(['input', 'keyevent', String(code)]);
   }
 
@@ -1359,6 +1378,30 @@ export class AdbDriver implements Driver {
     }
   }
 
+  /**
+   * Wake a sleeping display before doing something that would otherwise "succeed" against it.
+   *
+   * Every path that touches the screen needs this, not just the hierarchy read: `screencap` on
+   * a dozing device returns the ambient/lock frame into the report, and an injected tap does
+   * NOTHING AT ALL while exiting 0 (measured on a Pixel 3a: `input tap` leaves
+   * `mWakefulness=Dozing` untouched). A false green is the one failure a testing tool may not
+   * have, which is why this sits on the action path even though the probe is not free.
+   *
+   * `null` from the probe means "could not tell" and does nothing — the same posture as the
+   * dump path: pressing wakeup at random is not a fix.
+   */
+  private ensureAwake(what: string): void {
+    if (Date.now() < this.awakeUntil) return;
+    // Set the window BEFORE waking: wakeAndUnlock presses `wakeup` through pressKey, which
+    // asks this method again. SCREEN_POWER_KEYS already excludes that key; this is the belt
+    // to its braces, and it costs nothing.
+    this.awakeUntil = Date.now() + AWAKE_FRESH_MS;
+    if (this.readWakefulness() !== false) return;
+    err(`note: the display is off — waking the device before ${what}`);
+    this.wakeAndUnlock();
+    this.awakeUntil = Date.now() + AWAKE_FRESH_MS;
+  }
+
   /** Wake the display and clear a non-secure keyguard, then let the screen settle. Never
    *  throws — deciding whether the result is good enough is `getElements`' job. */
   private wakeAndUnlock(): void {
@@ -1379,22 +1422,4 @@ export class AdbDriver implements Driver {
     }
   }
 
-  /**
-   * Wake a sleeping display before retrying a dump that already failed.
-   *
-   * Best-effort and never throws: refusing is `getElements`' job, which owns the ONE decision
-   * about whether we are looking at the app or the keyguard. This only handles the narrower
-   * case where the stock dump genuinely could not read a sleeping screen at all.
-   *
-   * Called lazily, after the first attempt has failed, so the happy path pays nothing — an
-   * extra `dumpsys power` on every read would tax every command in the CLI to help the rare one.
-   */
-  private wakeIfAsleep(): void {
-    // `null` means the probe could not tell. Do nothing — the dump may well be failing for an
-    // unrelated reason, and pressing wakeup at random is not a fix.
-    if (this.screenState().awake !== false) return;
-    err('note: the display was asleep — waking it before retrying the read');
-    this.pressKey('wakeup');
-    sleepSync(WAKE_SETTLE_MS);
-  }
 }

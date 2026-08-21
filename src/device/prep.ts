@@ -40,22 +40,63 @@ export interface PrepKnob {
 }
 
 /**
+ * How long a prepped device's display stays on with nothing driving it.
+ *
+ * Long enough to span the gap between two commands of the same flow — an agent's turn, a model
+ * repair round-trip — and short enough that a phone nobody is using goes dark. A LONGER gap is
+ * not a failure: `getElements()` probes wakefulness before every read and wakes the device
+ * (clearing a swipe keyguard on the way), which is what makes sleeping safe to allow at all.
+ */
+export const PREP_SCREEN_TIMEOUT = '1m';
+
+/** Knobs every prep applies, whatever the display policy is. */
+const CORE_KNOBS: readonly PrepKnob[] = [
+  { key: 'animations', value: 'off', why: 'a live animation makes `uiautomator dump` return a stale or empty screen' },
+  { key: 'dnd', value: 'on', why: 'a heads-up notification lands on top of the app and steals the next tap' },
+  { key: 'doze', value: 'off', why: 'battery idle suspends the background work a test is waiting on' },
+];
+
+/**
+ * The default display policy: the device parks ITSELF once nobody is driving it.
+ *
+ * Both knobs move together, and that is the whole point. `stay-awake=on` is
+ * `stay_on_while_plugged_in`, which keeps the screen up while CHARGING — and a device on USB
+ * adb is always charging — so leaving it on makes `screen-timeout` inert and "never sleeps" the
+ * real policy. That is what verikun used to do, and it is why teardown had to switch the display
+ * off by hand, blanking the screen between every two commands of a burst (#101).
+ */
+const SLEEPY_DISPLAY: readonly PrepKnob[] = [
+  {
+    key: 'stay-awake',
+    value: 'off',
+    why: 'it overrides the display timeout while charging, so a tethered device would never sleep',
+  },
+  {
+    key: 'screen-timeout',
+    value: PREP_SCREEN_TIMEOUT,
+    why: "the stock 15-30s blanks the display between two commands of one flow; a longer gap is woken on the next read",
+  },
+];
+
+/** `--no-sleep-when-idle`: the display never turns off, which is the older prep behaviour. */
+const AWAKE_DISPLAY: readonly PrepKnob[] = [
+  { key: 'stay-awake', value: 'on', why: 'asked for explicitly — the display must stay lit while the device is charging' },
+  { key: 'screen-timeout', value: 'max', why: 'the same, for a device that is not plugged in' },
+];
+
+/**
  * The prep set.
  *
  * Every entry has to name a failure `vk` actually has. This is not "sensible defaults for a
  * phone" — it is the shortest list that makes a hierarchy read trustworthy, and anything that
  * merely feels tidy belongs in the user's own `device set` call instead.
+ *
+ * The two display sets cover the SAME keys, so `--revert` restores the same surface whichever
+ * policy was applied — including on a device prepped one way and then the other.
  */
-export const PREP_KNOBS: readonly PrepKnob[] = [
-  { key: 'animations', value: 'off', why: 'a live animation makes `uiautomator dump` return a stale or empty screen' },
-  // Measured: a slept device does NOT fail the read — it serves the lock screen as a
-  // successful dump. Keeping the display up is what stops that, and it is why these two
-  // knobs are in the set rather than being left to the recovery path in getElements().
-  { key: 'stay-awake', value: 'on', why: 'a slept display reads back as the LOCK SCREEN, not as an error' },
-  { key: 'screen-timeout', value: 'max', why: 'the same, for a device that is not plugged in' },
-  { key: 'dnd', value: 'on', why: 'a heads-up notification lands on top of the app and steals the next tap' },
-  { key: 'doze', value: 'off', why: 'battery idle suspends the background work a test is waiting on' },
-];
+export function prepKnobs(sleepWhenIdle: boolean): readonly PrepKnob[] {
+  return [...CORE_KNOBS, ...(sleepWhenIdle ? SLEEPY_DISPLAY : AWAKE_DISPLAY)];
+}
 
 /** What one prepared device's record holds. */
 export interface PrepRecord {
@@ -67,7 +108,10 @@ export interface PrepRecord {
    * device had before the FIRST prep, not the one the first prep established.
    */
   original: Partial<Record<SettingKey, string>>;
-  /** Park the display when a run that used this device tears down. */
+  /**
+   * Which display policy prep applied: `true` (the default) means the device sleeps by itself
+   * after `PREP_SCREEN_TIMEOUT`, `false` (`--no-sleep-when-idle`) means it never turns off.
+   */
   sleepWhenIdle: boolean;
   /** ISO — when this device was first prepared. */
   preparedAt: string;

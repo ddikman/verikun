@@ -141,7 +141,10 @@ banner, the retry path, dark theme, a layout that breaks at accessibility text s
   you reset it, so don't leave someone's phone in airplane mode.
 
 - `vk device prep [--dry-run] [--revert]` — set a **test** device up once, stickily:
-  `animations=off stay-awake=on screen-timeout=max dnd=on doze=off`.
+  `animations=off stay-awake=off screen-timeout=1m dnd=on doze=off`. The display then sleeps by
+  itself a minute after the last command and is woken by the next one; `--no-sleep-when-idle`
+  keeps it lit for good (`stay-awake=on screen-timeout=max`), which is what a device with a
+  PIN/pattern lock needs, since verikun can only clear a *swipe* lock.
 
   Unlike `device set`, prep **survives the run** and is undone only by `--revert`. A physical
   device must be named (`--device <serial>`) — that requirement is deliberate, so prep can
@@ -549,6 +552,8 @@ owns the redaction and the review-first flow.
   verikun detects this, wakes the device and clears a *swipe* lock automatically; on a
   PIN/pattern/password it exits **3** naming the lock rather than returning that dump.
   Tell the user to remove the lock in Settings > Security — verikun never asks for a PIN.
+  Taps, swipes, typing and screenshots wake it the same way: a prepped display sleeps after a
+  minute idle, and an injected tap on a sleeping screen would otherwise do nothing and exit `0`.
 - **Ambiguous selector → exit 2**, never a random tap. `vk` prints the candidate
   matches; add `--index N` or use a more specific selector.
 - **Indexes are per-snapshot.** `vk tap 3` taps `[3]` from the *latest* dump;

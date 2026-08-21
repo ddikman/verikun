@@ -246,6 +246,13 @@ So before every hierarchy read verikun asks whether the display is actually on
 (`dumpsys power`'s `mWakefulness`). If it is not, it wakes the device and tries
 `wm dismiss-keyguard` first, then reads.
 
+The same check guards every other path that touches the screen — a screenshot, a tap, a swipe,
+typing, a keypress — because those fail *silently* rather than falsely: `screencap` on a dozing
+device returns the ambient frame into your report, and an injected `input tap` does nothing at
+all while exiting `0` (measured on a Pixel 3a: the tap leaves `mWakefulness=Dozing` untouched).
+One answer is cached for two seconds, so a command that reads and then acts on what it found
+probes once, while a long `wait` or `vk ai` run keeps re-checking.
+
 **Why a round trip rather than inspecting the hierarchy.** The obvious cheap trick — notice
 that everything on screen belongs to `com.android.systemui` — does not generalise. A Motorola
 on API 29 serves its own **vendor always-on display** while dozing (`@clock`, `@date`,
@@ -269,10 +276,14 @@ API 32 and API 35 but **absent on API 29** — so on an older device doctor stay
 lock rather than guessing. The read-time protection above is unaffected: it keys off
 `dumpsys trust`, which works there.
 
-The durable fix is to stop the display sleeping at all:
+A prepared device gives the display a **1-minute** timeout, which is long enough to span the
+gap between two commands of one flow. If you would rather it never slept at all — the right
+answer on a device with a PIN or pattern lock, which verikun cannot clear — ask for the other
+policy:
 
 ```sh
-vk device prep --device <serial>    # stay-awake=on, screen-timeout=max, and more
+vk device prep --device <serial>                          # screen-timeout=1m, and more
+vk device prep --no-sleep-when-idle --device <serial>     # stay-awake=on, screen-timeout=max
 ```
 
 To wake a device by hand: `vk key wakeup` (`vk key sleep` is the other direction; `vk key power`
