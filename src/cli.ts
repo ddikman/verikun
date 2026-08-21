@@ -80,7 +80,7 @@ import { AgentProvider } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
 import { Plan } from './agent/ir';
-import { ExecBackend, HealthResponse } from './rpc';
+import { DeviceChange, ExecBackend, HealthResponse } from './rpc';
 import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
 import { cmdSuite, AiRunResult } from './suite';
 import { sleep, DEFAULT_BOOT_TIMEOUT_MS, DEFAULT_STOP_TIMEOUT_MS } from './wait';
@@ -2120,6 +2120,29 @@ async function obtainPlan(
 // owns the device: its /v1/health platform+serial supersede the client's
 // --platform/--device, and no local driver is ever built.
 
+/**
+ * Run a remote read; if it failed AND the server reported it moved device, ask once more.
+ *
+ * This is the ONE place a failed remote read is re-asked, and the narrowness is the point.
+ * It is only ever wired to `preflight` — the connect probe at `vk ai`/`vk suite` startup and
+ * the suite's between-tests health check — where nothing has run yet on either device. A
+ * mid-flow read is never retried: the new device has none of the state the flow built up, so
+ * its screen would answer a different question than the one being asked.
+ *
+ * Gating on the move (rather than retrying every failure) also keeps the connect probe's
+ * fail-fast property: a device that is simply broken still fails on the first try.
+ *
+ * Exported solely so the unit suite can reach it.
+ */
+export async function retryAfterDeviceMove<T>(read: () => T | Promise<T>, moved: () => boolean): Promise<T> {
+  try {
+    return await read();
+  } catch (e) {
+    if (!moved()) throw e;
+    return read();
+  }
+}
+
 interface ResolvedBackend {
   backend: ExecBackend;
   platform: Platform;
@@ -2127,6 +2150,10 @@ interface ResolvedBackend {
   /** Set when the backend is a remote `vk server`. `reads` is absent against a pre-0.21.1
    *  server, which did not report its hierarchy read path. */
   remote?: { url: string; version: string; reads?: HierarchySource };
+  /** Devices the SERVER moved itself onto during this command, oldest first. Live — the
+   *  transport pushes as it goes — so a caller reads it AFTER the work, not before.
+   *  Always empty for a local backend, which has one device by construction. */
+  moves: DeviceChange[];
 }
 
 /** The `--server` URL, or VERIKUN_SERVER. Exported-shape helper so `resolveBackend`
@@ -2315,10 +2342,15 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       },
       platform,
       device,
+      moves: [],
     };
   }
 
   let runCtx: { platform: string; device?: string } = { platform, device };
+  const moves: DeviceChange[] = [];
+  /** Set by the last move; the preflight below reads it to decide whether re-asking is
+   *  warranted, then clears it. */
+  let movedDuringCall: DeviceChange | undefined;
   const opts: RemoteOpts = {
     url: server,
     authKey: flagStr(flags, 'auth-key') || process.env.VERIKUN_SERVER_AUTH_KEY || undefined,
@@ -2327,6 +2359,21 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     // so archive-time / vk log scoping works without a local driver.
     onStep: (step, artifacts, logStart) =>
       Recorder.appendForeignStep(step, artifacts, { ...runCtx, logStart }),
+    onDeviceChange: (c) => {
+      moves.push(c);
+      movedDuringCall = c;
+      // Re-point the run context, so steps after the move are attributed to the device
+      // that actually ran them. This makes `rolloverReason` seal the device-A run and
+      // open a fresh one for B — intended: since a step is never replayed, no single run
+      // can contain steps from two devices, and a report that claimed otherwise would lie.
+      runCtx = { ...runCtx, device: c.to };
+      err(
+        `[verikun] server moved device: ${c.from} → ${c.to} (${c.reason})` +
+          (c.retried
+            ? ' — retried there'
+            : ' — this step failed on the old device; the next runs on the new one'),
+      );
+    },
   };
   let health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
   // `--ensure-device` boots BEFORE runCtx is fixed: resolveBackend bakes the serial
@@ -2334,7 +2381,16 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   // attribute every spliced step to a device that didn't exist yet.
   health = await ensureRemoteDevice(health, opts, server, flags);
   runCtx = { platform: health.platform, device: health.serial ?? undefined };
-  err(`[verikun] server ${server}: ${health.platform} · device ${health.serial ?? '(none)'} · verikun ${health.version}`);
+  err(
+    `[verikun] server ${server}: ${health.platform} · device ${health.serial ?? '(none)'} · verikun ${health.version}` +
+      (health.failoverEnabled ? ' · failover: on' : ''),
+  );
+  // A pool the server has already ruled out explains a lot of otherwise-baffling
+  // behaviour ("why is it on THAT phone?"), so say it once, up front.
+  if (health.quarantined?.length) {
+    err(`[verikun] server has ruled out ${health.quarantined.length} device(s):`);
+    for (const q of health.quarantined) err(`[verikun]   ${q.serial}  ${q.reason}`);
+  }
   // Say the read path once, here. Reads execute server-side, so this is the only end of the
   // connection that knows it — and without it a companion that had silently stood down was
   // indistinguishable from one that never engaged, for a whole suite (issue #77). An older
@@ -2351,7 +2407,11 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       // healthy and keep grinding. One dump is the cheap call that actually proves it.
       preflight: async () => {
         await pingServer(opts);
-        await remote.getElements();
+        movedDuringCall = undefined;
+        await retryAfterDeviceMove(
+          () => remote.getElements(),
+          () => movedDuringCall !== undefined,
+        );
       },
       // Hierarchy only: the server exposes no screenshot route, so a remote run's
       // engine failure archives without a picture. Honest degrade over a protocol
@@ -2367,6 +2427,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     platform: health.platform,
     device: health.serial ?? undefined,
     remote: { url: server, version: health.version, reads: health.reads },
+    moves,
   };
 }
 
@@ -2666,15 +2727,22 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
   const path = resolve(process.cwd(), appPath);
   if (!existsSync(path)) throw new CliError(`install: '${appPath}' does not exist`, 2);
   const platform = platformFromFlags(flags);
-  const { backend, remote } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
+  const { backend, remote, moves } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
   err(`[verikun] installing ${appPath}${remote ? ` via ${remote.url}` : ''}…`);
   try {
     await backend.install(path);
   } finally {
     await backend.close?.();
   }
-  if (flagBool(flags, 'json')) json({ installed: appPath, ...(remote ? { server: remote.url } : {}) });
-  else out(`installed ${appPath}`);
+  // Where it LANDED, not just that it landed: after a failover that is a different
+  // device than the one the run started against, and a caller acting on the old serial
+  // (`adb -s … shell am start`) would be driving a phone without the build.
+  const moved = moves.length ? moves[moves.length - 1] : undefined;
+  if (flagBool(flags, 'json')) {
+    json({ installed: appPath, ...(remote ? { server: remote.url } : {}), ...(moved ? { deviceChanged: moved } : {}) });
+  } else {
+    out(`installed ${appPath}${moved ? ` on ${moved.to}` : ''}`);
+  }
   return 0;
 }
 
@@ -3130,7 +3198,7 @@ SUITE (run a directory of natural-language tests as one gated suite)
 
 SERVER (expose a locally-connected device to remote verikun clients)
   server [--bind addr] [--port n] [--auth-key k] [--allow-install]
-         [--allow-device-control[=names]]
+         [--allow-device-control[=names]] [--allow-failover[=serials]|--no-failover]
          [--allow-unsafe-anonymous]  Serve THIS machine's device over HTTP+JSON for
                                       \`vk ai/suite/install --server <url>\`. Only
                                       verikun's validated action grammar is runnable
@@ -3148,6 +3216,12 @@ SERVER (expose a locally-connected device to remote verikun clients)
   the flag the server also starts even when no device is attached, so a client can
   boot one: \`vk devices start|stop|restart [name] --server <url>\`, or add
   --ensure-device[=name] to ai/suite/install to boot once before the first step.
+  Failover is ON by default: if the bound device cannot serve a request, the server
+  moves to another attached, healthy, unclaimed one and rules the bad one out until it
+  is power-cycled. An install is retried there; a mid-run step is NOT — it fails on the
+  device it ran on, and the next request lands on the healthy one. Passing --device
+  pins the binding and turns this off; --allow-failover[=serials] turns it back on (and
+  bounds where it may go), --no-failover / VERIKUN_NO_FAILOVER disables it outright.
 
 ENVIRONMENT
   devices [--all] [--json]            List attached devices/simulators, and which job is

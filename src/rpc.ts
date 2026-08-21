@@ -30,9 +30,38 @@ export interface ErrorDescriptor {
   candidates?: Element[];
 }
 
+/**
+ * The server moved itself off the device it was bound to, mid-request.
+ *
+ * OPTIONAL twice over — absent from every older server AND absent when nothing moved —
+ * so a client MUST feature-detect on the FIELD, never on `version` (the standing rule
+ * on HealthResponse.deviceControlEnabled below: "old server" and "new server, nothing
+ * moved" are indistinguishable and need the same answer).
+ */
+export interface DeviceChange {
+  /** The device that failed. */
+  from: string;
+  /** The device the server is now bound to. */
+  to: string;
+  /** One line: "the device is out of space (INSTALL_FAILED_INSUFFICIENT_STORAGE)". */
+  reason: string;
+  /**
+   * Was the failed operation REPLAYED on `to`?
+   *
+   * true only for `install`, which is stateless. false everywhere else, and that is the
+   * load-bearing half: a `vk ai` step twelve deep presupposes the eleven before it ran
+   * on `from`, so replaying it on `to` would either pass meaninglessly (a false green)
+   * or wake the repair model against the wrong screen. The step still fails; it is the
+   * NEXT one that benefits from the move.
+   */
+  retried: boolean;
+}
+
 export interface ExecResponse {
   code: number;
   error?: ErrorDescriptor;
+  /** Set when this request moved the server's device. `retried` is always false here. */
+  deviceChanged?: DeviceChange;
   /** The step the server's ephemeral recorder produced (selector, tier, resolved
    *  element, failure evidence refs) — spliced into the caller's run verbatim. */
   step?: RunStep;
@@ -45,6 +74,15 @@ export interface ExecResponse {
 
 export interface ElementsResponse {
   elements: Element[];
+}
+
+/** Body of a successful POST /v1/install. */
+export interface InstallResponse {
+  ok: true;
+  bytes: number;
+  sha256: string;
+  /** Set when the first device failed and the build went on to another. `retried: true`. */
+  deviceChanged?: DeviceChange;
 }
 
 export interface LogsRequest {
@@ -86,6 +124,15 @@ export interface HealthResponse {
   deviceNamingEnabled?: boolean;
   /** Derived from `serial` wherever health is built, so the two can never disagree. */
   deviceState?: 'ready' | 'none';
+  /** Whether this server may move off a device that fails. ABSENT on older servers;
+   *  feature-detect on the field, as with deviceControlEnabled above. */
+  failoverEnabled?: boolean;
+  /**
+   * Devices this server has ruled out this session, and why. Omitted when empty, so a
+   * CI job can assert on its absence. Unauthenticated like the rest of /v1/health,
+   * which is what makes "is the pool healthy?" answerable without a run token.
+   */
+  quarantined?: Array<{ serial: string; reason: string }>;
 }
 
 /** Body of POST /v1/devices/{start,restart,stop}. An empty body is the only form a
@@ -121,6 +168,12 @@ export interface DeviceListResponse {
 export interface RpcErrorBody {
   error: string;
   exitCode?: number;
+  /**
+   * The server moved device while failing this request. Lives on the ERROR body because
+   * that is where it matters most: `/v1/elements` and an install that exhausted the pool
+   * both fail, and the client still needs to know the ground shifted under it.
+   */
+  deviceChanged?: DeviceChange;
 }
 
 // --- error codec ------------------------------------------------------------

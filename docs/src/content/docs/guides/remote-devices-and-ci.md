@@ -331,7 +331,98 @@ is a no-op and says so, even if you named a different one.
 There is deliberately **no** automatic mid-run restart. The most common exit `3` is a failed
 `uiautomator dump` on a busy screen, so rebooting for it would punish a transient with a
 two-minute detour — and a reboot destroys the app session, so the retried step would either
-pass meaninglessly or cascade into confusing failures.
+pass meaninglessly or cascade into confusing failures. Failover, below, is a *lateral* move
+under the same rule: it never reboots, and it never replays a step.
+
+## When the bound device fails
+
+A pool that cannot route around one bad member has the availability of its worst member. So
+when the device a server is bound to cannot serve a request, the server moves to another
+attached device and rules the bad one out.
+
+```
+[server] install: FAILED on emulator-5554 — the device is out of space (INSTALL_FAILED_INSUFFICIENT_STORAGE)
+[server] failover: emulator-5554 quarantined (the device is out of space)
+[server] failover: 2 candidate(s) — emulator-5556, 032AY1UNR2
+[server] failover: emulator-5556 probe ok — moving
+[server] device: android · emulator-5556
+[server] install: retrying on emulator-5556… done on emulator-5556 (after 1 move)
+```
+
+### It is on by default, unless you pinned the device
+
+|  | Failover |
+|---|---|
+| `vk server` (no `--device`) | **on** — the server already auto-selected a free device; moving to another free one is that same decision made again |
+| `vk server --device X` | **off** — you named the device, and a pin means what it says |
+| `--allow-failover` | on even for a pinned server; any attached, running, unclaimed device |
+| `--allow-failover=<a,b>` | as above, bounded to those serials or AVD/simulator names |
+| `--no-failover`, `VERIKUN_NO_FAILOVER=1` | off outright |
+
+A candidate must already be **running**: failover never boots anything. Booting is
+`vk devices start --server`'s job, it takes minutes inside a held device lock, and letting a
+client cause a boot it is not allowed to *name* would be an escalation. Failover is lateral,
+never upward.
+
+### An install is retried. A step is not.
+
+This is the important half, and the asymmetry is deliberate.
+
+`install` is idempotent, carries no app session, and its uploaded bytes are still on the
+server's disk — so it is replayed on the new device and your job simply succeeds.
+
+A **step** is not. Step 12 of a flow presupposes steps 1–11 ran *on that device*; the new
+device's app is wherever an earlier run left it. Replaying there would either find something
+matching and go **green** — a false green that ships a regression — or wake the repair model
+against the wrong screen. So the step fails, honestly, carrying **the old device's error**:
+
+```
+[verikun] server moved device: emulator-5554 → 032AY1UNR2 (the device is not attached) — this step failed on the old device; the next runs on the new one
+```
+
+The run that hit the bad device still fails. It is the **next** one that lands somewhere
+healthy — the next `vk suite` test, or the next `--retries` attempt, with no intervention.
+
+### Deciding whose fault a failure was
+
+Reachability is not the signal: a phone with a full disk answers `adb get-state` perfectly
+happily. So an install failure is read the other way round — verikun enumerates the failures
+that are provably about the **build** (`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`,
+`_TEST_ONLY`, a `.apk` the server cannot read), and treats **everything else** as the device's
+fault, including wordings nobody has seen before. A broken build fails identically on every
+device, so retrying it elsewhere only burns minutes; anything else might genuinely work next
+door.
+
+For a step, the default is the opposite — exit `3` there is dominated by transient device
+noise, so verikun re-probes the device twice a second apart and only moves if it is genuinely
+gone. That is the same distinction `--retries` draws: a flaky device is the test rerun's
+problem, not failover's.
+
+At most **two** moves per request, and on exhaustion the client is given the **first** device's
+error, never the last — so the real cause stays the headline:
+
+```
+Failed to install '…apk': adb: device offline
+[failover] no working device remains; ruled out:
+  emulator-5554  the device is offline
+[failover] clear one with `vk devices restart <name> --server <url>`, or fix it and restart the server
+```
+
+### What was ruled out, and how to clear it
+
+A quarantine lasts as long as the server process. There is no timer, on purpose: a device that
+ran out of disk ten minutes ago is still out of disk, and silently re-trying it would burn
+another full install on a schedule nobody can see. A successful
+`vk devices restart|start|stop` for that device clears it — power-cycling *is* the fix, and
+doing one is the assertion that it worked.
+
+```sh
+curl -s "$VERIKUN_SERVER/v1/health" | jq '{serial, failoverEnabled, quarantined}'
+vk devices --server "$VERIKUN_SERVER"     # a NOTE column shows why each was ruled out
+```
+
+Failover makes a full disk *survivable*; it does not stop it happening. A long-lived CI device
+accumulates builds and app data from every job pointed at it, so budget for cleaning it up.
 
 ## Running the server as a long-lived service
 
@@ -352,6 +443,8 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 | `401` | The auth key does not match. Both sides must use the same `VERIKUN_SERVER_AUTH_KEY`. |
 | Exit `3`, "server unreachable" | Network path, not verikun. Check the tailnet is up on the runner. |
 | Installs rejected | The server was started without `--allow-install`. |
+| `not enough space` / `INSTALL_FAILED_INSUFFICIENT_STORAGE` | The device's disk is full. With failover on the server moves to another attached device by itself; if it reports `no working device remains`, free space on the named device or `vk devices restart` it. |
+| The suite ran on a device you did not expect | The server failed over. `[verikun] server moved device:` on the client, and `/v1/health`'s `quarantined`, say which device was ruled out and why. |
 | Steps take ~2.4s each on Android | The server is on the stock read path. `curl "$VERIKUN_SERVER/v1/health" \| jq .reads` says which, and why — most often `VERIKUN_COMPANION` is set in the **server's** environment, or the [companion](/verikun/guides/companion/) declined on that device. |
 
 More in [Troubleshooting](/verikun/guides/troubleshooting/).

@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-21
+
+### Added
+- **`vk server`**: moves to another attached healthy device when the bound one fails; only a pinned `--device` disables it. ([#99])
+- **`vk server --allow-failover[=serials]`**: re-enable failover on a pinned server, and bound where it may go.
+- **`vk server --no-failover`** / **`VERIKUN_NO_FAILOVER`**: disable failover outright.
+- **`/v1/health`**: adds `failoverEnabled` and `quarantined`, so a client can see which devices the server ruled out.
+- **`vk install --server`**: reports the device the build landed on when it differs from the one bound.
+
+### Changed
+- **`vk install --server`**: a device-attributable install failure retries on another healthy device.
+- **`/v1/exec`**, **`/v1/elements`**: report `deviceChanged` when the server moved device; the failing step is never replayed.
+
+### Fixed
+- **`/v1/logs`**: served the startup device's logs after a rebind instead of the bound device's.
+- **`/v1/health`**: reported the startup device's read path after a rebind.
+
+[#99]: https://github.com/ddikman/verikun/issues/99
+
 ## [0.24.0] - 2026-08-20
 
 ### Added

@@ -151,6 +151,49 @@ accusing your own job.
 including the old exit-2-on-multiple-devices. Preserve that equivalence: it is what makes the
 mechanism debuggable by bisection.
 
+## Only the server may repoint the server
+
+`vk server` binds a device at startup, and no `/v1/exec` request can change it. Two things
+can, and they are different in kind:
+
+**A client, via `/v1/devices/*`** — gated on `--allow-device-control`, allowlisted by name,
+and able to `--wipe`. That is a *privilege granted to a caller*, so it is opt-in.
+
+**The server itself, by failing over** — never at a client's request, never to a device
+outside the operator's set, never to one that is not already running, and never when
+`--device` pinned the binding. That is not a privilege granted to anyone, which is why it is
+on by default: a server started *without* `--device` already auto-selected a free device via
+`selectAndClaim`, so moving to another free, healthy, unclaimed one is that same decision made
+again. A server started *with* `--device` had its binding chosen by a human.
+
+Three invariants hold the safety:
+
+**A step is never replayed on the new device.** Only `install` is retried, because it is
+idempotent and carries no app session. Everything else rebinds and returns the **original**
+device's error, so the failing run fails honestly and the *next* one lands healthy. Replaying
+step 12 of a flow on a device that never ran steps 1–11 would either find something matching
+and go green — a false green, the failure mode `REPAIR_DECISION_JSON_SCHEMA`'s `give_up`
+branch also exists to prevent — or wake the repair model against the wrong screen. For the
+same reason `/v1/elements` never answers with the new device's hierarchy: it is the engine's
+guard input and repair context, and a screen from somewhere else is worse than an error.
+
+**The install classifier enumerates the FILE, not the device.** `install X onto Y` has two
+operands, so a failure is about one or the other. The file-attributable set
+(`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`, `_TEST_ONLY`, an unreadable upload) is
+small, closed and decade-stable; the device-attributable set is open-ended and OEM-specific —
+the failure that prompted this carried no `INSTALL_FAILED_*` code at all, just a raw
+`java.io.IOException: Requested internal only, but not enough space`. So the enumerable side is
+the one enumerated and everything else moves, including wordings nobody has seen. The named
+device-state strings are a fast path and documentation, never the gate: deleting one changes
+the reason text, never the decision. `tests/failover.test.ts` pins that by feeding the
+classifier gibberish and asserting it still moves.
+
+**On exhaustion the client gets the FIRST device's error, not the last.** That inversion is
+what makes move-by-default safe — a wrong move costs time, never the diagnosis. A step keeps
+the opposite default (stay unless a re-probe confirms the device is dead), because there exit
+3 is dominated by transient device noise and moving on it would rotate the pool on ordinary
+flake.
+
 ## The plan cache fingerprint
 
 Each cache entry records a **compiler fingerprint** = verikun's version + `GRAMMAR` +

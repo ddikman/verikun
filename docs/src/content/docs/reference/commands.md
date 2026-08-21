@@ -118,7 +118,7 @@ Change the *device* the app runs on, then put it back. Full detail:
 
 | Command | Description |
 |---|---|
-| `server [--bind addr] [--port n] [--auth-key k] [--allow-install] [--allow-device-control[=names]] [--allow-unsafe-anonymous]` | Expose this machine's connected device to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
+| `server [--bind addr] [--port n] [--auth-key k] [--allow-install] [--allow-device-control[=names]] [--allow-failover[=serials]\|--no-failover] [--allow-unsafe-anonymous]` | Expose this machine's connected device to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
 
 Clients pass `--server <url>` (or `VERIKUN_SERVER`) plus `--auth-key` (or
 `VERIKUN_SERVER_AUTH_KEY`) to `ai`, `suite` and `install`. **The server's device and platform
@@ -128,6 +128,17 @@ apply** — no flag on an `exec` request can repoint them.
 `restart`/`stop` the server's *own* device, and `--allow-device-control=<names>` additionally
 lets it `start` one of those operator-declared targets. The device lifecycle commands below all
 accept `--server <url>` to act on a remote server's device.
+
+The **server itself** may also change its binding, by moving off a device that fails —
+never at a client's request. See
+[When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
+
+| Flag | Effect |
+|---|---|
+| *(none)* | Failover is **on** when the server auto-selected its device, and **off** when `--device` (or `VERIKUN_DEVICE` / `ANDROID_SERIAL`) pinned it. |
+| `--allow-failover` | Turn it on even for a pinned server; it may move to any attached, running, unclaimed device. |
+| `--allow-failover=<a,b>` | As above, but bounded to those serials or AVD/simulator names. |
+| `--no-failover` | Off outright. Same as `VERIKUN_NO_FAILOVER=1`, which wins over every flag. |
 
 ## Environment
 
