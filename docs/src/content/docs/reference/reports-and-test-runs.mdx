@@ -22,6 +22,7 @@ of the page.
 ./.verikun/run/            active run (run.json + artifacts/)   — auto-created on first action
 ./.verikun/runs/<id>/      archived runs (report.xml, report.html, run.json, artifacts/)
 ./.verikun/suites/<id>/    suite overviews (index.json, index.html)
+./.verikun/run-<lane>/     active run of one lane of a PARALLEL suite (VERIKUN_LANE)
 ```
 
 Because each `vk` call is its own process, run state is **persisted to disk and reloaded per
@@ -178,13 +179,21 @@ upload plugins.
 | `tests[]` | Per-test: pass/fail, step count, cost, duration, run id |
 | `tests[].modelRepairs` | How many steps the model repaired. `0` on a clean replay — gate on it to [fail a build that needed healing](/verikun/guides/self-healing-in-ci/#if-you-want-the-strict-gate-anyway) |
 | `tests[].flaky` / `.attempts` | Present when `--retries` recovered the test |
+| `tests[].device` | Which device ran this test. Set on a [parallel suite](/verikun/guides/suites/), where the assignment is dynamic — and where, against a pooled server, only the lease ever knew the answer |
+| `concurrency` | How many devices ran the suite at once. Absent (or `1`) for a serial suite |
 | `totals` | Suite-level counts |
-| `warnings[]` | Recovered flakes and environment retries |
-| `aborted` | `{reason, notRun}` when the suite stopped early |
+| `totals.durationMs` | **Device time** — the sum of every test's duration. Equal to elapsed time serially; across N devices it is what the gate cost in device-seconds |
+| `totals.wallClockMs` | Elapsed time, `startedAt` → `finishedAt` — how long you actually waited |
+| `warnings[]` | Recovered flakes, environment retries, and devices retired mid-suite |
+| `aborted` | `{reason, notRun, kind}` when the suite stopped early. `kind` is `environment` (exit `3`) or `budget` (exit `1`, from `--max-suite-cost-usd`) |
 
 On an abort, the not-run tests get **no rows and no place in `totals`**, so
 `passed + failed === tests` still holds and nothing downstream mistakes a skipped test for a
 regression.
+
+`concurrency`, `wallClockMs`, `tests[].device` and `aborted.kind` are all additive, so
+`schemaVersion` stays `1`. A manifest written before they existed simply omits them — treat a
+missing `concurrency` as `1`, where `durationMs` and elapsed time were the same number.
 
 ## Disabling recording
 

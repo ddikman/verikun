@@ -15,6 +15,11 @@ import {
   stateFromFlags,
   terminalFailure,
   retryAfterDeviceMove,
+  laneArgv,
+  laneEnv,
+  lastJsonObject,
+  lanesFromFlags,
+  laneResult,
 } from '../src/cli';
 import { resolve } from 'node:path';
 import { parseSelector } from '../src/ui/selector';
@@ -395,4 +400,143 @@ test('retryAfterDeviceMove: it re-asks exactly ONCE, never in a loop', async () 
     ),
   );
   assert.equal(calls, 2, 'a pool that keeps moving must not spin the connect probe');
+});
+
+// --- suite lanes ------------------------------------------------------------
+
+test('laneArgv: the lane supplies the device; the suite\'s own flags never leak', () => {
+  const argv = laneArgv('tests/01-login.md', { id: 'l1', device: 'emulator-5554' }, {
+    devices: 'emulator-5554,emulator-5556',
+    concurrency: '2',
+    retries: '1',
+    name: 'nightly',
+    app: 'com.example',
+    'max-suite-cost-usd': '5',
+    json: true,
+    model: 'sonnet',
+    'max-cost-usd': '0.5',
+  });
+  assert.deepEqual(argv, [
+    'ai', 'tests/01-login.md', '--json',
+    '--device=emulator-5554',
+    '--model=sonnet',
+    '--max-cost-usd=0.5',
+  ]);
+});
+
+test('laneArgv: --device from the suite is dropped, not merged', () => {
+  // Forwarding it would point every lane at one device — the exact bug being fixed.
+  const argv = laneArgv('t.md', { id: 'l2', device: 'emulator-5556' }, { device: 'emulator-5554' });
+  assert.ok(argv.includes('--device=emulator-5556'));
+  assert.ok(!argv.includes('--device=emulator-5554'));
+});
+
+test('laneArgv: a server lane carries --server and the reset app', () => {
+  const argv = laneArgv('t.md', { id: 'l1', server: 'http://host:8391' }, { 'auth-key': 'k' }, { resetApp: 'com.example' });
+  assert.deepEqual(argv, ['ai', 't.md', '--json', '--server=http://host:8391', '--reset-app=com.example', '--auth-key=k']);
+});
+
+test('laneArgv: values are inline, so a value starting with "-" survives the round trip', () => {
+  // The separated form would re-parse as a boolean plus a stray positional (args.ts).
+  const argv = laneArgv('t.md', { id: 'l1' }, { 'cost-override': 'in=3,out=15', recompile: true });
+  assert.ok(argv.includes('--cost-override=in=3,out=15'));
+  assert.ok(argv.includes('--recompile'), 'a boolean flag re-emits bare');
+});
+
+test('laneEnv: a lane child gets its own run dir and leaves claims to the parent', () => {
+  const env = laneEnv({ id: 'l3', device: 'emulator-5554' }, { PATH: '/bin' } as NodeJS.ProcessEnv);
+  assert.equal(env.VERIKUN_LANE, 'l3');
+  assert.equal(env.VERIKUN_NO_CLAIM, '1');
+  assert.equal(env.PATH, '/bin');
+});
+
+test('laneEnv: an inherited VERIKUN_SERVER cannot hijack a local lane', () => {
+  const local = laneEnv({ id: 'l1', device: 'emulator-5554' }, { VERIKUN_SERVER: 'http://host:8391' } as NodeJS.ProcessEnv);
+  assert.equal(local.VERIKUN_SERVER, undefined);
+  // …and a remote lane keeps it (the flag wins anyway, but the env must not contradict).
+  const remote = laneEnv({ id: 'l1', server: 'http://a:8391' }, { VERIKUN_SERVER: 'http://b:8391' } as NodeJS.ProcessEnv);
+  assert.equal(remote.VERIKUN_SERVER, 'http://b:8391');
+});
+
+test('laneEnv: an inherited VERIKUN_DEVICE cannot override a server lane\'s lease', () => {
+  const remote = laneEnv({ id: 'l1', server: 'http://a:8391' }, { VERIKUN_DEVICE: 'emulator-5554' } as NodeJS.ProcessEnv);
+  assert.equal(remote.VERIKUN_DEVICE, undefined);
+});
+
+test('lastJsonObject: reads the pretty-printed result even after stray output', () => {
+  const stdout = 'a stray line\n' + JSON.stringify({ ok: true, device: 'emulator-5554' }, null, 2) + '\n';
+  assert.deepEqual(lastJsonObject(stdout), { ok: true, device: 'emulator-5554' });
+});
+
+test('lastJsonObject: nested objects parse whole, and the LAST document wins', () => {
+  assert.deepEqual(lastJsonObject('{"a":{"b":1}}'), { a: { b: 1 } });
+  assert.deepEqual(lastJsonObject('{"first":1}\n{"second":2}'), { second: 2 });
+});
+
+test('lastJsonObject: unparseable output is null, never a throw or a hang', () => {
+  assert.equal(lastJsonObject(''), null);
+  assert.equal(lastJsonObject('no json here'), null);
+  assert.equal(lastJsonObject('{not json}'), null);
+  assert.equal(lastJsonObject('[1,2]'), null, 'an array is not a result object');
+});
+
+test('lanesFromFlags: comma-separated devices and servers become one pool', () => {
+  assert.equal(lanesFromFlags({}), undefined, 'no pool flags = today\'s serial suite');
+  assert.deepEqual(lanesFromFlags({ devices: 'emulator-5554, emulator-5556' }), [
+    { id: 'd1', label: 'emulator-5554', device: 'emulator-5554' },
+    { id: 'd2', label: 'emulator-5556', device: 'emulator-5556' },
+  ]);
+  assert.deepEqual(lanesFromFlags({ servers: 'http://a:8391,http://b:8391' }), [
+    { id: 'd1', label: 'a:8391', server: 'http://a:8391' },
+    { id: 'd2', label: 'b:8391', server: 'http://b:8391' },
+  ]);
+});
+
+test('lanesFromFlags: duplicates and blanks are dropped, ids stay short', () => {
+  // The id becomes a directory name AND a run-id suffix, so a 40-char UDID would make
+  // both unreadable — the label carries the serial instead.
+  const lanes = lanesFromFlags({ devices: '00008120-001A2B3C4D5E6F00,,00008120-001A2B3C4D5E6F00, other' })!;
+  assert.deepEqual(lanes.map((l) => l.id), ['d1', 'd2']);
+  assert.equal(lanes[0].label, '00008120-001A2B3C4D5E6F00');
+});
+
+test('laneResult: the EXIT CODE is the verdict, the JSON only adds detail', () => {
+  const green = laneResult(0, { ok: true, costUsd: 0.02, cost: 'est $0.02', runDir: '/r/1', device: 'emu-1' }, '', { id: 'd1' });
+  assert.equal(green.ok, true);
+  assert.equal(green.costUsd, 0.02);
+  assert.equal(green.device, 'emu-1');
+  assert.equal(green.failure, undefined);
+  // A stale success document cannot turn a failed process green.
+  assert.equal(laneResult(1, { ok: true }, 'assert failed', { id: 'd1' }).ok, false);
+});
+
+test('laneResult: exit 3 and a failed spawn both read as an environment problem', () => {
+  assert.equal(laneResult(3, { ok: false, abortedForEnv: true }, '', { id: 'd1' }).abortedForEnv, true);
+  // 127: the child never started. Same class of problem — the suite should probe the
+  // lane, not blame the app.
+  const missing = laneResult(127, null, "'node' was not found on PATH", { id: 'd1' });
+  assert.equal(missing.abortedForEnv, true);
+  assert.match(missing.failure?.reason ?? '', /not found on PATH/);
+});
+
+test('laneResult: a thrown child (mapError shape) still becomes a failed row', () => {
+  const r = laneResult(2, { error: "suite: 'x' is not a directory", exitCode: 2 }, '', { id: 'd1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForEnv, undefined, 'a usage error is not the environment');
+  assert.equal(r.failure?.reason, "suite: 'x' is not a directory");
+});
+
+test('laneResult: unparseable output falls back to the child\'s last stderr line', () => {
+  const r = laneResult(1, null, 'Fatal: something went sideways', { id: 'd1', device: 'emu-1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.failure?.reason, 'Fatal: something went sideways');
+  assert.equal(r.device, 'emu-1', 'the lane still attributes the row');
+  assert.equal(r.state, null, 'state is read from the archived run, not the wire');
+});
+
+test('laneResult: budget and timeout aborts survive the process boundary', () => {
+  const budget = laneResult(1, { ok: false, abortedForBudget: true }, '', { id: 'd1' });
+  assert.equal(budget.abortedForBudget, true);
+  const timeout = laneResult(1, { ok: false, abortedForTimeout: true }, '', { id: 'd1' });
+  assert.equal(timeout.abortedForTimeout, true);
 });

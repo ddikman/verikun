@@ -281,6 +281,14 @@ export interface SuiteTestResult {
   /** Display name (file basename without extension). */
   name: string;
   ok: boolean;
+  /**
+   * Which device ran this test. Only meaningful (and only set) when the suite ran
+   * across a pool: serially every row shares `SuiteRun.device`, but in parallel the
+   * assignment is dynamic — and against a pooled `vk server` the client asked for a
+   * URL, so the LEASE is the only thing that ever knew the answer. Without it "is
+   * this device bad, or is this test bad?" stays unanswerable.
+   */
+  device?: string;
   durationMs: number;
   /** Model spend for this test (compile + repairs); 0 on a full cache-hit replay. */
   costUsd: number;
@@ -321,16 +329,29 @@ export interface SuiteRun {
    * schemaVersion stays 1.
    */
   server?: { url: string; verikun: string; reads?: string };
+  /**
+   * How many devices ran this suite at once. `1` is the serial suite (and every suite
+   * produced before parallelism existed, where the field is simply absent). Additive;
+   * schemaVersion stays 1.
+   */
+  concurrency?: number;
   totals: SuiteTotals;
   tests: SuiteTestResult[];
   /**
-   * Set only when the suite STOPPED EARLY because the device environment broke
-   * mid-run (exit 3 — tool gone, device unplugged, server unreachable) and a re-probe
-   * confirmed it. The `notRun` files have NO rows in `tests`, and `totals` counts only
-   * what actually ran — deliberately, so `passed + failed === tests` still holds and a
-   * dashboard never reports a not-run test as a regression.
+   * Set only when the suite STOPPED EARLY: either the device environment broke mid-run
+   * (exit 3 — tool gone, device unplugged, server unreachable) and a re-probe confirmed
+   * it, or a `--max-suite-cost-usd` ceiling was crossed. The `notRun` files have NO rows
+   * in `tests`, and `totals` counts only what actually ran — deliberately, so
+   * `passed + failed === tests` still holds and a dashboard never reports a not-run test
+   * as a regression.
+   *
+   * `kind` decides the exit code, so the two cases cannot page the same person: an
+   * environment abort is exit 3 ("the runner is broken"), a budget abort is exit 1
+   * (the run did not pass), mirroring what `vk ai` already returns for `--max-cost-usd`.
+   * ABSENT on suites written before the field existed; treat that as `'environment'`,
+   * which is what they all were.
    */
-  aborted?: { reason: string; notRun: string[] };
+  aborted?: { reason: string; notRun: string[]; kind?: 'environment' | 'budget' };
   /**
    * Soft signals that did not fail the suite — today: tests that passed only after a
    * retry (flake recovered). Additive; schemaVersion stays 1.
@@ -344,11 +365,24 @@ export interface SuiteTotals {
   failed: number;
   steps: number;
   costUsd: number;
+  /**
+   * DEVICE TIME: the sum of every test's duration. Serially this equals the elapsed
+   * time, which is why it was printed as though it were — but across N devices it
+   * becomes "how many device-seconds did the gate cost", a genuinely different number.
+   * Read `wallClockMs` for "how long did I wait".
+   */
   durationMs: number;
+  /**
+   * Elapsed time from the suite's `startedAt` to its `finishedAt` — the number an
+   * operator actually watches. Derivable from the two timestamps, which were already
+   * recorded; nothing computed it. ABSENT on suites written before the field existed,
+   * where `durationMs` was the same number anyway.
+   */
+  wallClockMs?: number;
 }
 
 /** Tally a suite's tests into its totals (pure; used by suite.ts and tests). */
-export function suiteTotals(tests: SuiteTestResult[]): SuiteTotals {
+export function suiteTotals(tests: SuiteTestResult[], wallClockMs?: number): SuiteTotals {
   const round = (n: number) => Number(n.toFixed(4));
   return {
     tests: tests.length,
@@ -357,6 +391,7 @@ export function suiteTotals(tests: SuiteTestResult[]): SuiteTotals {
     steps: tests.reduce((a, t) => a + t.steps, 0),
     costUsd: round(tests.reduce((a, t) => a + t.costUsd, 0)),
     durationMs: tests.reduce((a, t) => a + t.durationMs, 0),
+    ...(wallClockMs === undefined ? {} : { wallClockMs: Math.max(0, Math.round(wallClockMs)) }),
   };
 }
 
@@ -369,6 +404,7 @@ const SUITE_STYLE = `
   table.tests th, table.tests td { text-align:left; padding:10px 12px; border-top:1px solid var(--line); font-size:13px; }
   table.tests th { background:#eaeef2; color:var(--muted); border-top:none; font-size:12px; letter-spacing:.03em; text-transform:uppercase; }
   table.tests td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  table.tests td.dev { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--muted); white-space:nowrap; }
   table.tests a { color:inherit; }
   .fail-reason { color:var(--fail); font-size:12px; margin-top:2px; }
   .flake-note { color:var(--err); font-size:12px; margin-top:2px; }
@@ -393,7 +429,7 @@ function suiteAttemptLinks(attempts: SuiteAttempt[], linkBase: string): string {
   return `<div class="attempts">prior failed: ${links}</div>`;
 }
 
-function suiteTestRow(t: SuiteTestResult, linkBase: string): string {
+function suiteTestRow(t: SuiteTestResult, linkBase: string, showDevice: boolean): string {
   // A test that errored before its run started (id '') has no report to link.
   const label = t.id
     ? `<a href="${htmlEsc(`${linkBase}runs/${encodeURIComponent(t.id)}/report.html`)}">${htmlEsc(t.name)}</a>`
@@ -403,9 +439,12 @@ function suiteTestRow(t: SuiteTestResult, linkBase: string): string {
   const prior = t.attempts?.length ? suiteAttemptLinks(t.attempts, linkBase) : '';
   const status = t.flaky ? 'FLAKY' : t.ok ? 'PASS' : 'FAIL';
   const statusClass = t.ok ? 'passed' : 'failed';
+  // Only across a pool: serially every row would repeat SuiteRun.device, which the
+  // meta line already says once.
+  const device = showDevice ? `\n    <td class="dev">${htmlEsc(t.device ?? '—')}</td>` : '';
   return `  <tr>
     <td><span class="st ${statusClass}">${status}</span></td>
-    <td>${label}${flake}${failure}${prior}</td>
+    <td>${label}${flake}${failure}${prior}</td>${device}
     <td class="num">${t.passedSteps}/${t.steps}${t.failedSteps ? ` (${t.failedSteps} failed)` : ''}</td>
     <td class="num">${t.modelRepairs || ''}</td>
     <td class="num">$${t.costUsd.toFixed(4)}</td>
@@ -422,12 +461,18 @@ export function toSuiteHtml(suite: SuiteRun, opts: { linkBase?: string } = {}): 
   const linkBase = opts.linkBase ?? '../../';
   const t = suite.totals;
   const flaky = suite.tests.filter((x) => x.flaky).length;
+  const parallel = (suite.concurrency ?? 1) > 1;
+  // Across a pool the sum is device time, not elapsed — say which is which, or the
+  // headline number silently changes meaning the day a second device is added.
+  const timeChip = parallel
+    ? `${fmtDuration(t.wallClockMs ?? t.durationMs)} wall &middot; ${fmtDuration(t.durationMs)} device time on ${suite.concurrency} devices`
+    : fmtDuration(t.durationMs);
   const chips = [
     `<span class="chip pass">${t.passed} passed</span>`,
     t.failed ? `<span class="chip fail">${t.failed} failed</span>` : '',
     flaky ? `<span class="chip warn">${flaky} flaky</span>` : '',
     suite.aborted ? `<span class="chip fail">ABORTED</span>` : '',
-    `<span class="chip muted">${t.tests} tests &middot; ${t.steps} steps &middot; ${fmtDuration(t.durationMs)} &middot; $${t.costUsd.toFixed(4)}</span>`,
+    `<span class="chip muted">${t.tests} tests &middot; ${t.steps} steps &middot; ${timeChip} &middot; $${t.costUsd.toFixed(4)}</span>`,
   ]
     .filter(Boolean)
     .join('\n      ');
@@ -436,7 +481,11 @@ export function toSuiteHtml(suite: SuiteRun, opts: { linkBase?: string } = {}): 
   // faking a FAIL row for one would be the very "phantom regression" this prevents.
   const abortedBanner = suite.aborted
     ? `  <div class="aborted">
-    <strong>Suite aborted — the device environment broke mid-run.</strong>
+    <strong>${
+      suite.aborted.kind === 'budget'
+        ? 'Suite stopped early — the cost ceiling was reached.'
+        : 'Suite aborted — the device environment broke mid-run.'
+    }</strong>
     <div>${htmlEsc(suite.aborted.reason)}</div>
 ${
   suite.aborted.notRun.length
@@ -458,6 +507,7 @@ ${
   const metaBits = [
     `<code>${htmlEsc(suite.id)}</code>`,
     htmlEsc(suite.platform) + (suite.device ? ` · ${htmlEsc(suite.device)}` : ''),
+    parallel ? `${suite.concurrency} devices in parallel` : '',
     `started ${htmlEsc(suite.startedAt)}`,
     `finished ${htmlEsc(suite.finishedAt)}`,
     `verikun ${htmlEsc(suite.verikun)}`,
@@ -479,9 +529,9 @@ ${
       ${chips}
   </div>
 ${abortedBanner}${warningsBanner}  <table class="tests">
-    <thead><tr><th></th><th>Test</th><th>Steps</th><th>Repairs</th><th>Cost</th><th>Duration</th></tr></thead>
+    <thead><tr><th></th><th>Test</th>${parallel ? '<th>Device</th>' : ''}<th>Steps</th><th>Repairs</th><th>Cost</th><th>Duration</th></tr></thead>
     <tbody>
-${suite.tests.map((x) => suiteTestRow(x, linkBase)).join('\n')}
+${suite.tests.map((x) => suiteTestRow(x, linkBase, parallel)).join('\n')}
     </tbody>
   </table>
 </div>
