@@ -3,10 +3,13 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { cmdSuite, sortTestFiles, listTestFiles, toSuiteResult, mergeSuiteAttempts, AiRunResult, SuiteDeps } from '../src/suite';
+import {
+  cmdSuite, sortTestFiles, listTestFiles, toSuiteResult, mergeSuiteAttempts, orderTests,
+  readDurationHints, laneCount, AiRunResult, SuiteDeps, Lane,
+} from '../src/suite';
 import { RunState, RunStep } from '../src/run';
 import { SuiteRun } from '../src/report';
-import { envError, usageError } from '../src/errors';
+import { CliError, envError, usageError } from '../src/errors';
 
 // --- sortTestFiles ----------------------------------------------------------
 
@@ -611,5 +614,294 @@ test('cmdSuite: rejects a negative --retries', async () => {
     const dir = suiteDir(root, 1);
     const { deps } = harness({ files: 1 });
     await assert.rejects(() => cmdSuite(dir, { retries: '-1' }, deps), /non-negative integer/);
+  });
+});
+
+// --- orderTests -------------------------------------------------------------
+
+test('orderTests: longest known first, unknowns ahead of everything', () => {
+  // An unknown might BE the long one, and starting it early is the only bound
+  // available — putting it last is how a newly added 13-minute flow defines the finish.
+  const files = ['a.md', 'b.md', 'c.md', 'new.md'];
+  const hints = { 'a.md': 100, 'b.md': 800, 'c.md': 400 };
+  assert.deepEqual(orderTests(files, hints), ['new.md', 'b.md', 'c.md', 'a.md']);
+});
+
+test('orderTests: with no hints at all it degenerates to file order', () => {
+  const files = ['01-a.md', '02-b.md', '03-c.md'];
+  assert.deepEqual(orderTests(files, {}), files);
+});
+
+test('orderTests: equal durations tie-break by name, so the order is deterministic', () => {
+  assert.deepEqual(orderTests(['b.md', 'a.md'], { 'a.md': 500, 'b.md': 500 }), ['a.md', 'b.md']);
+});
+
+test('orderTests: a zero or non-numeric hint counts as unknown', () => {
+  const order = orderTests(['a.md', 'b.md'], { 'a.md': 0, 'b.md': 300 });
+  assert.deepEqual(order, ['a.md', 'b.md']);
+});
+
+// --- readDurationHints ------------------------------------------------------
+
+function writeSuiteManifest(suitesDir: string, id: string, suite: Partial<SuiteRun>): void {
+  mkdirSync(join(suitesDir, id), { recursive: true });
+  writeFileSync(join(suitesDir, id, 'index.json'), JSON.stringify({ name: 'tests', tests: [], ...suite }));
+}
+
+test('readDurationHints: takes the most recent run of the SAME suite', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vk-hints-'));
+  try {
+    writeSuiteManifest(root, '20260101-100000', {
+      name: 'tests',
+      tests: [{ file: 'a.md', durationMs: 111 }] as SuiteRun['tests'],
+    });
+    writeSuiteManifest(root, '20260202-100000', {
+      name: 'tests',
+      tests: [{ file: 'a.md', durationMs: 222 }] as SuiteRun['tests'],
+    });
+    // A different suite in the same store must not contribute.
+    writeSuiteManifest(root, '20260303-100000', {
+      name: 'other',
+      tests: [{ file: 'a.md', durationMs: 999 }] as SuiteRun['tests'],
+    });
+    assert.deepEqual(readDurationHints(root, 'tests'), { 'a.md': 222 });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('readDurationHints: no store, junk manifests and missing files all mean "no hints"', () => {
+  assert.deepEqual(readDurationHints(join(tmpdir(), 'vk-does-not-exist-4a1f'), 'tests'), {});
+  const root = mkdtempSync(join(tmpdir(), 'vk-hints-'));
+  try {
+    mkdirSync(join(root, 'empty-dir'), { recursive: true });
+    writeSuiteManifest(root, 'junk', {});
+    writeFileSync(join(root, 'junk', 'index.json'), 'not json at all');
+    assert.deepEqual(readDurationHints(root, 'tests'), {});
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// --- laneCount --------------------------------------------------------------
+
+test('laneCount: bounded by the pool, the test count, and --concurrency', () => {
+  assert.equal(laneCount(3, 7, {}), 3);
+  assert.equal(laneCount(3, 2, {}), 2, 'a lane with nothing to run only pads the report');
+  assert.equal(laneCount(3, 7, { concurrency: '2' }), 2);
+  assert.equal(laneCount(3, 7, { concurrency: '9' }), 3, 'never more than the pool');
+  assert.equal(laneCount(1, 5, {}), 1);
+});
+
+test('laneCount: a non-positive or fractional --concurrency is a usage error', () => {
+  for (const bad of ['0', '-1', '1.5']) {
+    assert.throws(
+      () => laneCount(3, 7, { concurrency: bad }),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2,
+    );
+  }
+});
+
+// --- cmdSuite across a pool -------------------------------------------------
+
+const LANES: Lane[] = [
+  { id: 'l1', label: 'device-a', device: 'device-a' },
+  { id: 'l2', label: 'device-b', device: 'device-b' },
+];
+
+interface PoolOpts {
+  lanes?: Lane[];
+  /** Per-file result, keyed on the file's basename. */
+  onTest?: (file: string, lane: Lane) => AiRunResult | Error;
+  delayMs?: number;
+  preflight?: (lane: Lane) => void;
+}
+
+/** A pool harness that records who ran what, and how many ran at once. */
+function poolHarness(o: PoolOpts = {}) {
+  const byLane = new Map<string, string[]>();
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const deps: SuiteDeps = {
+    platform: 'android',
+    lanes: o.lanes ?? LANES,
+    probeRetryMs: 0,
+    runTest: async (file, lane) => {
+      const name = basename(file);
+      byLane.set(lane!.id, [...(byLane.get(lane!.id) ?? []), name]);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        if (o.delayMs) await new Promise((r) => setTimeout(r, o.delayMs));
+        const r = o.onTest?.(name, lane!) ?? aiResult({ device: lane!.device });
+        if (r instanceof Error) throw r;
+        return { ...r, device: r.device ?? lane!.device };
+      } finally {
+        inFlight -= 1;
+      }
+    },
+    ...(o.preflight ? { preflight: (lane) => o.preflight!(lane!) } : {}),
+  };
+  return { deps, byLane, maxInFlight: () => maxInFlight };
+}
+
+test('cmdSuite: a pool runs every test exactly once, spread across the devices', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 6);
+    const { deps, byLane, maxInFlight } = poolHarness({ delayMs: 20 });
+    const code = await cmdSuite(dir, {}, deps);
+    assert.equal(code, 0);
+    const all = [...byLane.values()].flat().sort();
+    assert.equal(all.length, 6, 'no test runs twice, none is dropped');
+    assert.equal(new Set(all).size, 6);
+    assert.equal(maxInFlight(), 2, 'both devices are genuinely busy at the same time');
+    assert.equal(byLane.size, 2, 'both lanes drew work');
+  });
+});
+
+test('cmdSuite: the manifest separates wall-clock from device time, and names the device per row', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 4);
+    const { deps } = poolHarness({ delayMs: 40 });
+    const suites = join(root, '.verikun', 'suites');
+    await cmdSuite(dir, {}, deps);
+    const suite = readManifest(join(suites, readdirSync(suites)[0]));
+    assert.equal(suite.concurrency, 2);
+    assert.ok(suite.totals.wallClockMs !== undefined);
+    assert.ok(
+      suite.totals.wallClockMs! < suite.totals.durationMs,
+      `wall ${suite.totals.wallClockMs} should be below device time ${suite.totals.durationMs}`,
+    );
+    for (const t of suite.tests) assert.ok(t.device === 'device-a' || t.device === 'device-b', `row ${t.file} has no device`);
+    // Rows are file-ordered regardless of who finished first, so two runs compare.
+    assert.deepEqual(suite.tests.map((t) => t.file), ['01-t.md', '02-t.md', '03-t.md', '04-t.md']);
+  });
+});
+
+test('cmdSuite: --concurrency 1 collapses a pool back to one device at a time', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 4);
+    const { deps, maxInFlight } = poolHarness({ delayMs: 10 });
+    const code = await cmdSuite(dir, { concurrency: '1' }, deps);
+    assert.equal(code, 0);
+    assert.equal(maxInFlight(), 1);
+  });
+});
+
+test('cmdSuite: a broken device retires its lane and the others finish the work', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 6);
+    // device-a is dead: every test routed to it aborts for the environment.
+    const { deps, byLane } = poolHarness({
+      onTest: (_file, lane) => (lane.id === 'l1' ? envFailedRun() : aiResult({ device: lane.device })),
+      preflight: (lane) => {
+        if (lane.id === 'l1') throw envError('device-a is gone');
+      },
+    });
+    const code = await cmdSuite(dir, {}, deps);
+    // The suite still ran to completion on the surviving device.
+    assert.equal(code, 1, 'the tests device-a already failed stay failed');
+    const ranOnB = byLane.get('l2') ?? [];
+    assert.ok(ranOnB.length >= 5, `device-b should have absorbed the rest, got ${ranOnB.length}`);
+    assert.equal((byLane.get('l1') ?? []).length, 1, 'device-a is retired after its first confirmed break');
+  });
+});
+
+test('cmdSuite: when every lane retires the suite aborts (exit 3) and names what did not run', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 6);
+    const { deps } = poolHarness({
+      onTest: () => envFailedRun(),
+      preflight: () => {
+        throw envError('the whole box is gone');
+      },
+    });
+    const code = await cmdSuite(dir, {}, deps);
+    assert.equal(code, 3);
+  });
+});
+
+test('cmdSuite: a lane that dies before producing a row hands its file back to the pool', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 3);
+    let firstResetOnA = true;
+    const lanes = LANES;
+    const attempted: string[] = [];
+    const deps: SuiteDeps = {
+      platform: 'android',
+      lanes,
+      probeRetryMs: 0,
+      // The reset fails only on device-a, and only the once — so its file never ran.
+      reset: (lane) => {
+        if (lane!.id === 'l1' && firstResetOnA) {
+          firstResetOnA = false;
+          throw envError('device-a vanished during reset');
+        }
+      },
+      runTest: async (file, lane) => {
+        attempted.push(basename(file));
+        return aiResult({ device: lane!.device });
+      },
+      preflight: (lane) => {
+        if (lane!.id === 'l1') throw envError('device-a is gone');
+      },
+    };
+    const code = await cmdSuite(dir, {}, deps);
+    assert.equal(code, 0, 'device-b covered everything');
+    assert.deepEqual(attempted.sort(), ['01-t.md', '02-t.md', '03-t.md'], 'the requeued file still ran');
+  });
+});
+
+test('cmdSuite: --max-suite-cost-usd stops dequeuing and exits 1, not 3', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 8);
+    const { deps, byLane } = poolHarness({
+      onTest: (_f, lane) => aiResult({ costUsd: 0.5, device: lane.device }),
+    });
+    const code = await cmdSuite(dir, { 'max-suite-cost-usd': '1' }, deps);
+    // The box is fine; the run just did not finish — exit 1 mirrors `vk ai --max-cost-usd`.
+    assert.equal(code, 1);
+    const ran = [...byLane.values()].flat();
+    assert.ok(ran.length < 8, `should have stopped early, ran ${ran.length}`);
+  });
+});
+
+test('cmdSuite: --max-suite-cost-usd must be positive', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 2);
+    const { deps } = poolHarness();
+    await assert.rejects(
+      () => cmdSuite(dir, { 'max-suite-cost-usd': '0' }, deps),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2,
+    );
+  });
+});
+
+test('cmdSuite: a pool retires a lane after repeated env failures even when the probe says fine', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 6);
+    // The shape of one dead device behind a HEALTHY pooled server: the probe can only
+    // ask whether the server answers, so without this backstop device-a would keep
+    // drawing work and failing it for the whole suite.
+    const { deps, byLane } = poolHarness({
+      onTest: (_file, lane) => (lane.id === 'l1' ? envFailedRun() : aiResult({ device: lane.device })),
+      preflight: () => {},
+    });
+    const code = await cmdSuite(dir, {}, deps);
+    assert.equal(code, 1);
+    assert.equal((byLane.get('l1') ?? []).length, 2, 'retired at the streak limit, not after every test');
+    assert.ok((byLane.get('l2') ?? []).length >= 4);
+  });
+});
+
+test('cmdSuite: the serial path keeps its old tolerance for repeated env blips', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 4);
+    // Same signal as above with ONE lane: retiring early would only lose coverage,
+    // since there is nothing to redistribute to. Every test must still be attempted.
+    const { deps, ran } = harness({ files: 4, onTest: () => envFailedRun(), preflight: healthy });
+    const code = await cmdSuite(dir, {}, deps);
+    assert.equal(code, 1);
+    assert.deepEqual(ran, ['01-t.md', '02-t.md', '03-t.md', '04-t.md']);
   });
 });

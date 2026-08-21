@@ -73,6 +73,22 @@ The serial is resolved via `driver.resolvedSerial()` (cached, so no extra device
 and passed into `beginStep`. `Recorder.seal()` is the shared finalize-and-move used by both
 rollover and `vk run archive`.
 
+### One active run per lane
+
+The active run directory is `./.verikun/run/`, or `./.verikun/run-<lane>/` when `VERIKUN_LANE`
+is set. Every test starts its run with `force`, which removes that directory — so two
+concurrent tests sharing one path means the loser's in-flight state and artifacts are deleted
+under it, and the winner's `archive` either ENOENTs or archives the wrong steps. A
+[parallel suite](/verikun/guides/suites/#running-across-several-devices) sets the lane on each
+child process; artifacts are keyed on step index alone, which is safe precisely because they
+live *inside* that directory.
+
+Archives still land in the shared `./.verikun/runs/<id>/`, so every lane's evidence ends up in
+one place and the suite index's links do not change. Two things keep those ids from colliding:
+`runId()` appends the lane (a one-second timestamp alone is not unique across devices), and
+`uniqueDir()` claims its directory with an exclusive `mkdir` rather than an `existsSync` check —
+check-then-act was sound only while one run could be active per working directory.
+
 ### Rollover must not strand a device snapshot
 
 Because `deviceOverrides` lives in the run and `rolloverReason` *seals* runs, a rollover used

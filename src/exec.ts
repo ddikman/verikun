@@ -126,6 +126,77 @@ export function spawnDetached(
   }
 }
 
+/**
+ * Run a command to completion WITHOUT blocking the event loop, capturing stdout and
+ * streaming stderr line-by-line as it arrives.
+ *
+ * The second deliberate exception to "everything is one blocking spawnSync", after
+ * `spawnDetached`. It exists for the parallel `vk suite` scheduler, which runs each
+ * test as a child `vk ai`: `spawnSync` blocks the whole thread, so a parent that used
+ * it could not have two tests in flight — the very thing parallelism is for. It is
+ * SCHEDULER code and must never become a `Driver` method; the Driver interface is
+ * synchronous on purpose (see `sleepSync` above for what that buys).
+ *
+ * `onStderrLine` is what keeps N concurrent tests legible: the caller prefixes each
+ * line with its lane instead of receiving one interleaved blob at the end. Lines are
+ * reassembled across chunk boundaries, and a trailing partial line is flushed on exit
+ * so a child that dies mid-line still reports what it managed to say.
+ *
+ * Unlike `runText` this never throws for a failed spawn: ENOENT arrives as an 'error'
+ * event and is reported as exit 127 with the reason on stderr, because a scheduler
+ * wants a failed lane, not an exception unwinding the whole suite.
+ */
+export function spawnCollect(
+  cmd: string,
+  args: string[],
+  opts: { env?: NodeJS.ProcessEnv; cwd?: string; onStderrLine?: (line: string) => void } = {},
+): Promise<TextResult> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: opts.cwd,
+      env: opts.env,
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    let pending = '';
+    const emit = (line: string): void => {
+      stderr += line + '\n';
+      opts.onStderrLine?.(line);
+    };
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (c: string) => {
+      stdout += c;
+    });
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (c: string) => {
+      pending += c;
+      const lines = pending.split('\n');
+      pending = lines.pop() ?? '';
+      for (const line of lines) emit(line);
+    });
+    let failure: string | undefined;
+    child.on('error', (e) => {
+      failure = describeError(cmd, args, e as NodeJS.ErrnoException).message;
+    });
+    child.on('close', (code, signal) => {
+      if (pending) {
+        emit(pending);
+        pending = '';
+      }
+      if (failure) {
+        stderr += failure + '\n';
+        resolve({ code: 127, stdout, stderr });
+        return;
+      }
+      // A signalled child has a null exit code; report it as a non-zero outcome so a
+      // killed lane reads as failed rather than as a silent pass.
+      resolve({ code: code ?? (signal ? 128 : 1), stdout, stderr });
+    });
+  });
+}
+
 /** Run a command and capture stdout as raw bytes (e.g. PNG screenshots). */
 export function runBinary(
   cmd: string,

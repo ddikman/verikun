@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-21
+
+### Added
+- **`vk suite --devices a,b` / `--servers u1,u2`**: run tests across a device pool, next free
+  device takes the next test. One merged report. ([#39])
+- **`vk suite --server`**: sizes itself automatically from a pooled server's capacity — one URL,
+  one secret, unchanged CI line. ([#39])
+- **`vk server --devices all | all-android | all-ios | a,b`**: serve several devices from one
+  address. A run token leases one device for its whole run. ([#39])
+- **`vk suite --concurrency n`**: cap how many devices run at once, below the pool's size. ([#39])
+- **`vk suite --max-suite-cost-usd n`**: stop the suite once total model spend crosses it
+  (exit `1`). Off by default. ([#39])
+- **`vk ai --reset-app <id>`**: clear (iOS: force-stop) the app before the first step, on the run's
+  own device.
+- **`VERIKUN_LANE`**: moves the active run to `./.verikun/run-<lane>/` so concurrent tests in one
+  working directory don't delete each other's state.
+- **`POST /v1/lease`** and `capacity` / `devices` on `/v1/health`: which device a run token holds,
+  and how many the server has.
+
+### Changed
+- **Suite manifest**: adds `totals.wallClockMs`, `concurrency` and a per-test `device`.
+  `totals.durationMs` is unchanged but is now labelled device time. `schemaVersion` stays `1`.
+- **`vk install --server`** installs on **every** device of a pooled server, not one.
+- **`vk suite --devices`**: file order no longer sequences tests, and longest-first ordering is
+  taken from the previous run's manifest. A serial suite is unchanged. ([#39])
+- **`vk server --devices`**: `/v1/devices/{start,restart,stop}` answer `403` on a pool — there is
+  no single device to act on. `--ensure-device` is likewise refused with `--devices`.
+- **`vk server` failover on a pool**: a failed device is quarantined and a healthy one takes its
+  place, so capacity holds. The lease follows the move; the failing step is still never replayed.
+  The **last** device is never shed, so its own error keeps reaching the caller. ([#39], [#99])
+
+### Fixed
+- **`--server` runs no longer fail with `fetch failed`** after a pause longer than 5s — the server
+  was hanging up idle connections mid-run, so a cold compile broke the next step.
+
+[#39]: https://github.com/ddikman/verikun/issues/39
+
 ## [0.25.1] - 2026-08-21
 
 ### Changed
