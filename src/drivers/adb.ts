@@ -1,7 +1,7 @@
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
-  Driver, DeviceInfo, Element, HierarchySource, Platform, ToolProbe, Viewport,
+  Driver, DeviceInfo, Element, HierarchySource, LockKind, Platform, ScreenState, ToolProbe, Viewport,
   StartOpts, StartResult, StopOpts, StopResult,
 } from '../types';
 import type { RawImage } from '../image';
@@ -43,6 +43,91 @@ export function probeAdb(): ToolProbe {
 }
 
 
+/**
+ * What kind of screen lock a `dumpsys lock_settings` dump describes. Pure, and exported so
+ * the two measured rules below are unit-testable without a device.
+ *
+ *   * MATCH CASE-INSENSITIVELY. The string changed between releases — `CredentialType: Pin`
+ *     on API 32, `CredentialType: PIN` on API 35.
+ *   * NEVER read the neighbouring `Quality` field. It reported 196608 on API 32 and 0 on API
+ *     35 for two devices that BOTH had a PIN set, so trusting it would report a locked phone
+ *     as unlocked — and "no lock" is exactly what licenses us to walk past a keyguard.
+ *
+ * Anything unrecognized is `unknown`, never `none`: a failed read must not be able to grant
+ * permission that a successful read would have withheld.
+ *
+ * MEASURED GAP: API 29 does not print `CredentialType` at all — its dump is just
+ * `SP Enabled` / `SP Handle` / `SID` — so this returns `unknown` there and `vk doctor` stays
+ * silent about the lock. That is the honest degrade and it costs nothing important, because
+ * the read-time protection in `AdbDriver.onKeyguard` keys off `dumpsys trust`'s `deviceLocked`,
+ * which works on API 29. `SID` looks like a usable substitute but is not: only the
+ * credential-present case has been observed, so reading it could only ever be a guess.
+ */
+export function parseLockKind(dump: string): LockKind {
+  const m = /CredentialType:\s*(\w+)/i.exec(dump);
+  switch (m?.[1].toLowerCase()) {
+    case 'none':
+      return 'none';
+    case 'pin':
+      return 'pin';
+    case 'pattern':
+      return 'pattern';
+    case 'password':
+      return 'password';
+    default:
+      return 'unknown';
+  }
+}
+
+const SYSTEMUI_ID_PREFIX = 'com.android.systemui:id/';
+/** The platform's own namespace. Neutral evidence — see `looksLikeSystemUi`. */
+const FRAMEWORK_ID_PREFIX = 'android:id/';
+
+/**
+ * Is every package-qualified resource-id in this hierarchy the system's rather than an app's?
+ *
+ * The free half of the keyguard check (see `AdbDriver.onKeyguard`). Pure, and exported so the
+ * discriminator is unit-testable without a device.
+ *
+ * Two rules, both measured on a locked Pixel 3a (API 32):
+ *
+ *   * Nodes with no package-qualified id are SKIPPED, not counted either way. Most nodes have
+ *     no resource-id at all, and a Flutter app has none anywhere, so the answer hinges on
+ *     whether any APP id appears rather than on a ratio.
+ *   * `android:` is NEUTRAL, not disqualifying. The lock screen inflates framework notification
+ *     layouts inside SystemUI's rows — `android:id/status_bar_latest_event_content`,
+ *     `android:id/icon` — so treating the platform namespace as "this must be an app" made the
+ *     check pass on a bare keyguard and fail once a notification was on it. One third-party
+ *     package id is proof we are looking at an app; none, plus at least one SystemUI id, is the
+ *     keyguard's signature.
+ *
+ * False positives are cheap and safe: they cost one `dumpsys trust`, which then reports the
+ * device unlocked and the elements are returned untouched.
+ */
+export function looksLikeSystemUi(els: Element[]): boolean {
+  let sawSystemUi = false;
+  for (const e of els) {
+    if (!e.id.includes(':id/')) continue;
+    if (e.id.startsWith(SYSTEMUI_ID_PREFIX)) {
+      sawSystemUi = true;
+      continue;
+    }
+    if (e.id.startsWith(FRAMEWORK_ID_PREFIX)) continue;
+    return false;
+  }
+  return sawSystemUi;
+}
+
+/** Screen-lock kind for a serial WITHOUT building a driver — and therefore without taking a
+ *  claim, which is what lets `vk doctor` report it while staying the read-only survey it is. */
+export function lockKindOf(serial: string): LockKind {
+  try {
+    return parseLockKind(runText(ADB, ['-s', serial, 'shell', 'dumpsys', 'lock_settings']).stdout);
+  } catch {
+    return 'unknown';
+  }
+}
+
 /** Short probes only — a boot poll must not block the event loop (see wait.ts). */
 const PROBE_TIMEOUT_MS = 5000;
 /** The boot animation lags sys.boot_completed; waiting it out makes dumps less flaky,
@@ -74,7 +159,11 @@ const KEYCODES: Record<string, number> = {
   dpad_left: 21,
   dpad_right: 22,
   dpad_center: 23,
+  // `power` is a TOGGLE, so it cannot express "make sure the screen is on". sleep/wakeup
+  // are the directional pair, and they are what the wake-before-dump path below uses.
   power: 26,
+  sleep: 223,
+  wakeup: 224,
   app_switch: 187,
   recents: 187,
   volume_up: 24,
@@ -173,6 +262,14 @@ export function severanceRisk(transport: AdbTransport, key: SettingKey, value: s
  *  local writes, so they land in well under a second or not at all. */
 const VERIFY_TIMEOUT_MS = 4000;
 const VERIFY_INTERVAL_MS = 200;
+
+/** How long to let the screen settle after a wakeup before reading it. Long enough for
+ *  the unlock/wake animation, short enough that it is noise next to the dump it precedes. */
+const WAKE_SETTLE_MS = 600;
+
+/** The three `global` scales behind the `animations` setting. All must be zero for it to
+ *  read `off` — one live scale is enough to make a dump flaky. */
+const ANIMATION_SCALES = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'];
 /**
  * Parse `adb devices -l` output into DeviceInfo[]. PURE — exported for unit tests
  * and reused by the device-lifecycle layer, which needs the attached-device list
@@ -547,11 +644,93 @@ export class AdbDriver implements Driver {
   }
 
   getElements(opts: { all?: boolean } = {}): Element[] {
+    // Ask whether the display is even on BEFORE dumping. Measured at ~85ms against a 278ms
+    // read, and it pays for itself twice over when the answer is "no": the dump that would
+    // have returned the wrong screen is skipped entirely rather than done and discarded.
+    //
+    // It cannot be deferred to "only if the hierarchy looks wrong", which is what this
+    // originally did. A dozing device does not reliably show SystemUI: a Motorola on API 29
+    // serves its VENDOR always-on display (`@clock`, `@date`, `@battery_progress`, package
+    // `com.motorola.*`), which no package heuristic can tell from an app. The display being
+    // off is the only signal that generalises — if it is off, the app is not on screen,
+    // whoever drew what is there.
+    if (this.readWakefulness() === false) {
+      err('note: the display is off — waking the device before reading the screen');
+      this.wakeAndUnlock();
+    }
+
+    const els = this.captureElements(opts);
+    // Second net, for a device that is awake but still behind the keyguard.
+    if (!this.keyguardReason(els)) return els;
+
+    err('note: the app is not on screen — trying to dismiss the keyguard');
+    this.wakeAndUnlock();
+
+    const after = this.captureElements(opts);
+    const reason = this.keyguardReason(after);
+    if (!reason) return after;
+
+    const lock = this.readLockKind();
+    const what =
+      reason === 'locked'
+        ? `The device is on the lock screen${lock === 'unknown' ? '' : ` (${lock})`}`
+        : "The device's display will not stay on";
+    throw new CliError(
+      `${what}, so this read would return the keyguard rather than the app — which would look ` +
+        'like a successful read of the wrong screen.\n' +
+        (reason === 'locked'
+          ? 'Remove the screen lock on your test device (Settings > Security), then `verikun device ' +
+            'prep` to stop the display sleeping in the first place.\n' +
+            'verikun never asks for or stores a device PIN, so it cannot unlock this for you.'
+          : 'Keep the display awake with `verikun device prep`, or wake it with `verikun key wakeup`.'),
+      3,
+    );
+  }
+
+  private captureElements(opts: { all?: boolean }): Element[] {
     const xml = this.dumpXml();
     // Read off the dump we already have: free, and it refreshes every capture, so a
     // device rotated mid-run is handled without re-asking for the screen size.
     this.lastRotation = parseRotation(xml);
     return parseHierarchy(xml, { ...opts, screen: this.screenOrNull() ?? undefined });
+  }
+
+  /**
+   * Why is the system UI what we just read, rather than the app? `null` means it isn't — we
+   * are looking at the app and the elements are good.
+   *
+   * MEASURED, and the reason this check exists at all: a sleeping display does not reliably
+   * fail the read. The companion serves a hierarchy quite happily while the device is
+   * `Dozing`, so the dump SUCCEEDS and hands back a perfectly well-formed tree of
+   * `com.android.systemui` — a false green, which is worse than the hang it was assumed to be.
+   *
+   * TWO reasons, not one. `deviceLocked` alone is not enough: it is only true behind a SECURE
+   * credential, so a phone with no lock (or a swipe lock) reports `deviceLocked=0` while
+   * dozing and still shows the ambient keyguard rather than the app. Measured on a Pixel 3a
+   * once its PIN was removed — exit 0 with 36 SystemUI nodes, the same false green again.
+   *
+   * Staged so the happy path costs nothing: `looksLikeSystemUi` reads only ids we already
+   * have, and the `dumpsys` round-trips run ONLY when that says the whole screen belongs to
+   * the system. That ordering is also what stops this hijacking a notification shade the
+   * caller deliberately opened — the shade looks identical, but the device is neither locked
+   * nor asleep, so both reasons come back false and the elements are returned untouched.
+   */
+  private keyguardReason(els: Element[]): 'locked' | 'display-off' | null {
+    if (!looksLikeSystemUi(els)) return null;
+    if (this.deviceLocked() === true) return 'locked';
+    if (this.readWakefulness() === false) return 'display-off';
+    return null;
+  }
+
+  /** `dumpsys trust` reports `deviceLocked=1` while the keyguard is up. `null` = could not tell,
+   *  which never triggers a refusal — an unreadable probe must not block a legitimate read. */
+  private deviceLocked(): boolean | null {
+    try {
+      const m = /deviceLocked=(\d)/.exec(this.shell(['dumpsys', 'trust']));
+      return m ? m[1] === '1' : null;
+    } catch {
+      return null;
+    }
   }
 
   viewport(): Viewport | null {
@@ -639,16 +818,22 @@ export class AdbDriver implements Driver {
             'Retry, or use a command that waits (`vk wait`, or any selector lookup).',
         );
       }
-      // A companion holds the device's ONE UiAutomation connection and SIGKILLs anything
-      // else that wants it — including this dump. It outlives the process that started it,
-      // so a later command that never opted in would fail for as long as it lives. Ask it
-      // to let go and try again: verikun's own helper must not be why verikun cannot read
-      // the screen. No companion running is the normal case and costs one refused connect.
-      if (attempt === 0) releaseCompanionOn(this.resolvedSerial());
+      if (attempt === 0) {
+        // A sleeping display is the other documented cause of a failed read, so it is checked
+        // here, lazily, where it costs nothing until something has already gone wrong.
+        this.wakeIfAsleep();
+        // A companion holds the device's ONE UiAutomation connection and SIGKILLs anything
+        // else that wants it — including this dump. It outlives the process that started it,
+        // so a later command that never opted in would fail for as long as it lives. Ask it
+        // to let go and try again: verikun's own helper must not be why verikun cannot read
+        // the screen. No companion running is the normal case and costs one refused connect.
+        releaseCompanionOn(this.resolvedSerial());
+      }
     }
     throw new CliError(
       `Failed to capture UI hierarchy after 3 attempts. ${lastErr}\n` +
-        'Tip: disable animations (`verikun doctor --fix`) and ensure the screen is idle.',
+        'Tip: prepare the device once with `verikun device prep` (disables animations, keeps the ' +
+        'display awake) and ensure the screen is idle.',
       3,
     );
   }
@@ -927,6 +1112,13 @@ export class AdbDriver implements Driver {
 
   getDeviceSetting(key: SettingKey): string | null {
     switch (key) {
+      case 'animations': {
+        // Three separate scales, one knob: any of them still animating is enough to make a
+        // dump flaky, so `off` means all three are zero and anything else reads as `on`.
+        const vals = ANIMATION_SCALES.map((k) => this.readSetting('global', k));
+        if (vals.some((v) => v === null)) return null;
+        return vals.every((v) => Number(v) === 0) ? 'off' : 'on';
+      }
       case 'airplane':
         return this.readSetting('global', 'airplane_mode_on') === '1' ? 'on' : 'off';
       case 'dark': {
@@ -956,11 +1148,49 @@ export class AdbDriver implements Driver {
         const v = this.readSetting('global', 'stay_on_while_plugged_in');
         return v === null ? 'off' : v !== '0' ? 'on' : 'off';
       }
+      case 'screen-timeout':
+        // Unset is not a meaningful default here (unlike font_scale, whose absence means
+        // 1.0) — the device always has one. Report null so a snapshot declines rather than
+        // restoring to a number we invented.
+        return this.readSetting('system', 'screen_off_timeout');
+      case 'dnd': {
+        // zen_mode: 0 = off, 1 = priority only, 2 = total silence, 3 = alarms only. Our
+        // on|off domain only claims "is anything suppressing notifications", so any
+        // non-zero mode is `on` — and `set` below picks one specific mode to turn it on.
+        const v = this.readSetting('global', 'zen_mode');
+        return v === null ? 'off' : v !== '0' ? 'on' : 'off';
+      }
+      case 'doze': {
+        // `dumpsys deviceidle enabled` prints a bare 1/0. Note this is whether the idle
+        // MANAGER is enabled, not the momentary idle state (`get deep`, which reports
+        // ACTIVE/IDLE and swings on its own) — only the former is a setting we can hold.
+        const v = this.shell(['dumpsys', 'deviceidle', 'enabled']).trim();
+        if (v === '1') return 'on';
+        if (v === '0') return 'off';
+        return null;
+      }
     }
   }
 
   setDeviceSetting(key: SettingKey, value: string): void {
     switch (key) {
+      case 'animations':
+        return this.applyAndVerify(
+          `animations=${value}`,
+          () => {
+            // One shell per scale, but only the LAST result is reported — every write here
+            // is the same command against the same namespace, so a failure looks identical
+            // whichever of the three refused, and the readback below is the real contract.
+            let last!: TextResult;
+            for (const k of ANIMATION_SCALES) {
+              last = this.shellFull(['settings', 'put', 'global', k, value === 'on' ? '1' : '0']);
+            }
+            return last;
+          },
+          () => this.getDeviceSetting('animations'),
+          (v) => v === value,
+          'Writing global settings requires an unrestricted adb shell.',
+        );
       case 'airplane':
         return this.setAirplane(value === 'on');
       case 'dark':
@@ -988,6 +1218,34 @@ export class AdbDriver implements Driver {
           () => this.getDeviceSetting('stay-awake'),
           (v) => v === value,
           'Some devices restrict `svc power` while a battery-saver profile is active.',
+        );
+      case 'screen-timeout':
+        return this.applyAndVerify(
+          `screen-timeout=${value}`,
+          () => this.shellFull(['settings', 'put', 'system', 'screen_off_timeout', value]),
+          () => this.getDeviceSetting('screen-timeout'),
+          (v) => v === value,
+          'Writing system settings requires an unrestricted adb shell.',
+        );
+      case 'dnd':
+        // `priority` rather than `on`/`none`: total silence also suppresses ALARMS, which
+        // would be a surprising thing for a testing tool to leave on a borrowed phone.
+        // Priority-only is enough to stop a heads-up notification stealing a tap.
+        return this.applyAndVerify(
+          `dnd=${value}`,
+          () => this.shellFull(['cmd', 'notification', 'set_dnd', value === 'on' ? 'priority' : 'off']),
+          () => this.getDeviceSetting('dnd'),
+          (v) => v === value,
+          'Setting Do Not Disturb needs `cmd notification` (API 28+); some OEM skins gate it behind ' +
+            'notification-policy access.',
+        );
+      case 'doze':
+        return this.applyAndVerify(
+          `doze=${value}`,
+          () => this.shellFull(['dumpsys', 'deviceidle', value === 'on' ? 'enable' : 'disable']),
+          () => this.getDeviceSetting('doze'),
+          (v) => v === value,
+          '`dumpsys deviceidle` is refused on some locked-down builds.',
         );
     }
   }
@@ -1074,5 +1332,69 @@ export class AdbDriver implements Driver {
       (v) => v === target,
       'Writing system settings requires an unrestricted adb shell.',
     );
+  }
+
+  // --- screen + lock state --------------------------------------------------
+
+  /** Best-effort, never throws: this sits on the READ path, and a probe that could fail
+   *  a dump would be worse than the hang it exists to prevent. */
+  screenState(): ScreenState {
+    return { awake: this.readWakefulness(), lock: this.readLockKind() };
+  }
+
+  private readWakefulness(): boolean | null {
+    try {
+      const m = /mWakefulness=(\w+)/.exec(this.shell(['dumpsys', 'power']));
+      return m ? m[1].toLowerCase() === 'awake' : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private readLockKind(): LockKind {
+    try {
+      return parseLockKind(this.shell(['dumpsys', 'lock_settings']));
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /** Wake the display and clear a non-secure keyguard, then let the screen settle. Never
+   *  throws — deciding whether the result is good enough is `getElements`' job. */
+  private wakeAndUnlock(): void {
+    this.pressKey('wakeup');
+    sleepSync(WAKE_SETTLE_MS);
+    this.dismissKeyguard();
+    sleepSync(WAKE_SETTLE_MS);
+  }
+
+  /** Only ever clears a SWIPE lock. On a secure keyguard `wm dismiss-keyguard` raises the
+   *  credential prompt instead, which is why callers must check `lock` first. */
+  dismissKeyguard(): boolean {
+    try {
+      this.shell(['wm', 'dismiss-keyguard']);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Wake a sleeping display before retrying a dump that already failed.
+   *
+   * Best-effort and never throws: refusing is `getElements`' job, which owns the ONE decision
+   * about whether we are looking at the app or the keyguard. This only handles the narrower
+   * case where the stock dump genuinely could not read a sleeping screen at all.
+   *
+   * Called lazily, after the first attempt has failed, so the happy path pays nothing — an
+   * extra `dumpsys power` on every read would tax every command in the CLI to help the rare one.
+   */
+  private wakeIfAsleep(): void {
+    // `null` means the probe could not tell. Do nothing — the dump may well be failing for an
+    // unrelated reason, and pressing wakeup at random is not a fix.
+    if (this.screenState().awake !== false) return;
+    err('note: the display was asleep — waking it before retrying the read');
+    this.pressKey('wakeup');
+    sleepSync(WAKE_SETTLE_MS);
   }
 }

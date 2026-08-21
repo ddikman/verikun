@@ -37,7 +37,8 @@ The package also carries the agent [`SKILL.md`](.claude/skills/verikun/SKILL.md)
 ## Quick start
 
 ```sh
-vk doctor --fix                 # check adb/device; disable animations for stable dumps
+vk doctor                       # check adb/device (read-only — never changes anything)
+vk device prep --device <id>    # set a TEST device up once: animations off, stays awake
 vk devices                      # list attached devices
 vk ui                           # semantic snapshot of the current screen
 vk tap @login_button            # tap by resource-id

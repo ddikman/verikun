@@ -17,7 +17,16 @@
 import { CliError } from '../errors';
 import type { Platform } from '../types';
 
-export type SettingKey = 'airplane' | 'dark' | 'font-scale' | 'rotation' | 'stay-awake';
+export type SettingKey =
+  | 'animations'
+  | 'airplane'
+  | 'dark'
+  | 'font-scale'
+  | 'rotation'
+  | 'stay-awake'
+  | 'screen-timeout'
+  | 'dnd'
+  | 'doze';
 
 /**
  * - `supported`   — apply it, then verify by reading it back.
@@ -94,6 +103,51 @@ function parseFontScale(raw: string): string {
   }
   // Canonicalize so '1.30', '1.3' and '1.300' all snapshot/compare identically.
   return canonicalFontScale(n);
+}
+
+// --- screen timeout ---------------------------------------------------------
+
+/**
+ * Android stores `screen_off_timeout` as a signed 32-bit int of MILLISECONDS, so this is
+ * as close to "never" as the setting can express. `max` is offered as a name because the
+ * number is meaningless to read and nobody should have to remember it.
+ */
+const SCREEN_TIMEOUT_MAX_MS = 2147483647;
+
+/** Below a second the display would blank between two steps of the same tap. A value
+ *  that low is a typo, not an intent — refuse it here rather than after it is written. */
+const SCREEN_TIMEOUT_MIN_MS = 1000;
+
+/**
+ * Canonical form is the raw millisecond string, NOT a pretty duration, because the
+ * device stores and reads back milliseconds. A snapshot has to round-trip through
+ * `setDeviceSetting` unchanged, and `30s` vs `30000` would compare unequal for the same
+ * value and report a perfectly good restore as refused — the same trap
+ * `canonicalFontScale` exists to close.
+ */
+function parseScreenTimeout(raw: string): string {
+  const t = raw.trim().toLowerCase();
+  if (t === 'max' || t === 'never') return String(SCREEN_TIMEOUT_MAX_MS);
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m)?$/.exec(t);
+  if (!m) {
+    throw new CliError(
+      `Invalid value '${raw}' for 'screen-timeout': expected a duration like 30s, 10m, ` +
+        "a bare number of milliseconds, or 'max'.",
+      2,
+    );
+  }
+  // A bare number is milliseconds, matching what the device stores and what
+  // `parseDuration` does everywhere else in the CLI.
+  const unit = m[2] ?? 'ms';
+  const n = Number(m[1]);
+  const ms = Math.round(unit === 'm' ? n * 60000 : unit === 's' ? n * 1000 : n);
+  if (ms < SCREEN_TIMEOUT_MIN_MS || ms > SCREEN_TIMEOUT_MAX_MS) {
+    throw new CliError(
+      `Invalid value '${raw}' for 'screen-timeout': must be between ${SCREEN_TIMEOUT_MIN_MS}ms and 'max'.`,
+      2,
+    );
+  }
+  return String(ms);
 }
 
 /** Android `user_rotation` values, by the name we expose. */
@@ -184,6 +238,19 @@ export function contentSizeToFontScale(category: string): number | null {
 // --- the table --------------------------------------------------------------
 
 export const SETTINGS: Record<SettingKey, SettingSpec> = {
+  animations: {
+    key: 'animations',
+    describe: 'Window/transition/animator scales — live animations are the main cause of flaky dumps',
+    values: 'on|off',
+    parse: (raw) => parseOnOff('animations', raw),
+    support: { android: 'supported', ios: 'unsupported' },
+    manual: {
+      ios: 'Neither `simctl` nor `idb` can disable UIKit animation. The Simulator menu offers only ' +
+        'Debug > Slow Animations, which is the opposite of what a test wants — prefer `vk` selector ' +
+        'auto-wait, which polls until the screen settles.',
+    },
+    note: {},
+  },
   airplane: {
     key: 'airplane',
     describe: 'Airplane mode — cut the radios to test offline/retry handling',
@@ -238,6 +305,39 @@ export const SETTINGS: Record<SettingKey, SettingSpec> = {
     support: { android: 'supported', ios: 'noop' },
     manual: {},
     note: { ios: 'simulators do not sleep, so there is nothing to keep awake' },
+  },
+  'screen-timeout': {
+    key: 'screen-timeout',
+    describe: "How long the display stays on when idle — 'max' is the test-device setting",
+    values: "a duration like 30s or 10m, a bare number of milliseconds, or 'max'",
+    parse: parseScreenTimeout,
+    support: { android: 'supported', ios: 'noop' },
+    manual: {},
+    note: { ios: 'simulators do not sleep, so there is no display timeout to extend' },
+  },
+  dnd: {
+    key: 'dnd',
+    describe: 'Do Not Disturb — stops a heads-up notification stealing a tap mid-run',
+    values: 'on|off',
+    parse: (raw) => parseOnOff('dnd', raw),
+    support: { android: 'supported', ios: 'unsupported' },
+    manual: {
+      ios: '`simctl ui` exposes only appearance/content_size/increase_contrast, and neither it ' +
+        "nor `idb` can reach Focus. Turn it on inside the simulator: Settings > Focus > Do Not Disturb.",
+    },
+    note: {},
+  },
+  doze: {
+    key: 'doze',
+    describe: 'Battery idle/Doze — leave it off on a test device so background work is not suspended',
+    values: 'on|off',
+    parse: (raw) => parseOnOff('doze', raw),
+    support: { android: 'supported', ios: 'noop' },
+    manual: {},
+    note: {
+      ios: 'iOS has no scriptable Doze equivalent, and a simulator does not idle-suspend ' +
+        'the app the way Android does — there is nothing to turn off',
+    },
   },
 };
 

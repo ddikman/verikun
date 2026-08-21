@@ -165,13 +165,48 @@ test('isSettingKey: only the table keys', () => {
 });
 
 test('support matrix: the verified per-platform truth', () => {
-  // Probed on a Samsung SM-A415F (Android 12) and a booted iPhone 17 Pro sim (iOS 26.5).
+  // Probed on a Samsung SM-A415F (Android 12) and a booted iPhone 17 Pro sim (iOS 26.5);
+  // the prep knobs additionally on a Pixel 3a (API 32) and a Redmi 25028RN03Y (API 35).
   assert.equal(SETTINGS.airplane.support.ios, 'unsupported'); // a simulator has no radio
   assert.equal(SETTINGS.rotation.support.ios, 'unsupported'); // neither simctl nor idb rotates
+  assert.equal(SETTINGS.animations.support.ios, 'unsupported'); // nothing disables UIKit animation
+  assert.equal(SETTINGS.dnd.support.ios, 'unsupported'); // Focus is not scriptable
   assert.equal(SETTINGS['stay-awake'].support.ios, 'noop'); // simulators never sleep
+  assert.equal(SETTINGS['screen-timeout'].support.ios, 'noop'); // ditto
+  assert.equal(SETTINGS.doze.support.ios, 'noop'); // no Doze equivalent
   assert.equal(SETTINGS.dark.support.ios, 'supported'); // simctl ui appearance
   assert.equal(SETTINGS['font-scale'].support.ios, 'supported'); // simctl ui content_size
   for (const k of SETTING_KEYS) assert.equal(SETTINGS[k].support.android, 'supported');
+});
+
+// --- screen-timeout --------------------------------------------------------
+
+test('screen-timeout: durations canonicalize to the millisecond string the device stores', () => {
+  // Canonical form is ms, NOT the pretty duration: the readback is ms, and a snapshot has to
+  // round-trip through setDeviceSetting unchanged or restore compares unequal and "fails".
+  const parse = SETTINGS['screen-timeout'].parse;
+  assert.equal(parse('30s'), '30000');
+  assert.equal(parse('10m'), '600000');
+  assert.equal(parse('1800000'), '1800000'); // a bare number is ms — what `device get` returns
+  assert.equal(parse('5000ms'), '5000'); // an explicit ms unit is accepted too
+  assert.equal(parse('max'), '2147483647'); // Android's signed-32-bit ceiling
+  assert.equal(parse('never'), parse('max'));
+});
+
+test('screen-timeout: a value that would blank the screen mid-tap is refused', () => {
+  const parse = SETTINGS['screen-timeout'].parse;
+  assert.throws(() => parse('10'), (e: unknown) => e instanceof CliError && e.exitCode === 2);
+  assert.throws(() => parse('0'), (e: unknown) => e instanceof CliError && e.exitCode === 2);
+  assert.throws(() => parse('9999999999'), (e: unknown) => e instanceof CliError && e.exitCode === 2);
+  assert.throws(() => parse('soon'), (e: unknown) => e instanceof CliError && e.exitCode === 2);
+});
+
+test('screen-timeout: a parsed value re-parses to itself', () => {
+  // The property restore depends on. `parse(parse(x)) === parse(x)` for every accepted form.
+  const parse = SETTINGS['screen-timeout'].parse;
+  for (const raw of ['30s', '10m', 'max', '1800000']) {
+    assert.equal(parse(parse(raw)), parse(raw), `${raw} does not round-trip`);
+  }
 });
 
 test('support matrix: every gap is self-documenting', () => {

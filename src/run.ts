@@ -129,7 +129,9 @@ export function isRecordable(command: string, positionals: string[] = []): boole
   // the environment the app runs in and belong in the report, while `get`/`caps` are
   // pure inspection — recording those would auto-start a test run just for asking what
   // the device supports, exactly the noise `ui`/`find` are excluded to avoid.
-  if (command === 'device') return ['set', 'reset'].includes((positionals[0] ?? '').toLowerCase());
+  // `prep` joins set/reset: it changes the device the app runs on, and a report showing a
+  // flaky read without "we turned animations off mid-suite" would be missing the cause.
+  if (command === 'device') return ['set', 'reset', 'prep'].includes((positionals[0] ?? '').toLowerCase());
   return RECORDABLE.has(command);
 }
 

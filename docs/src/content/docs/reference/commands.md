@@ -52,7 +52,7 @@ They are not redacted.
 | `tap <selector\|index>` / `tap --at x,y` <br/>*alias:* `click` | Tap an element (or raw coordinates). Selector taps [auto-wait](/verikun/reference/auto-wait/) and [auto-scroll](/verikun/reference/auto-wait/#auto-scroll-into-view); a bare integer taps `[index]` from the latest `ui` and **never waits**. |
 | `text <selector> <text…> [--clear] [--enter]` | Focus a field and type. `--clear` deletes existing text first. The field lookup auto-waits. Punctuation and symbols are escaped for the device shell and type verbatim — [quote the value in your shell](/verikun/guides/troubleshooting/#my-email-address-arrives-truncated). |
 | `type <text…> [--enter]` | Type into the currently focused field. |
-| `key <name\|code>` / `back` / `home` / `enter` | Send a key event (named keys, or a raw Android keycode). |
+| `key <name\|code>` / `back` / `home` / `enter` | Send a key event, by name or as a raw Android keycode. Names: `enter`, `back`, `home`, `tab`, `space`, `del`/`delete`/`backspace`, `forward_del`, `escape`/`esc`, `menu`, `search`, `up`/`down`/`left`/`right`/`center` (also `dpad_*`), `power`, `sleep`, `wakeup`, `app_switch`/`recents`, `volume_up`, `volume_down`, `mute`, `move_home`, `move_end`, `page_up`, `page_down`. `power` is a **toggle** — use `sleep`/`wakeup` when you mean a direction. iOS accepts a different set; see [Platform support](/verikun/guides/platform-support/). |
 | `swipe <up\|down\|left\|right> [--on <selector>] [--distance f] [--duration ms]` <br/>*alias:* `scroll` | Directional swipe over the screen, or within an element via `--on` (whose lookup auto-waits). `--distance` is a fraction of the region, default `0.6`. |
 | `swipe --from x,y --to x,y [--duration ms]` | Explicit swipe between two points. |
 | `screenshot [--out path] [--more] [--max px] [--full] [--json]` <br/>*alias:* `shot` | Save a PNG (default `./.verikun/screen.png`) and print the path. [Downscaled](/verikun/reference/screenshots/) to a 700px longest edge by default. |
@@ -79,9 +79,10 @@ Change the *device* the app runs on, then put it back. Full detail:
 
 | Command | Description |
 |---|---|
-| `device set <key>=<value> …` | Apply settings, snapshotting each original first. Keys: `airplane`, `dark`, `font-scale`, `rotation`, `stay-awake`. Every change is **verified by reading it back**. Refuses `airplane=on` over wireless adb; `--allow-wireless` overrides. |
+| `device set <key>=<value> …` | Apply settings, snapshotting each original first. Keys: `animations`, `airplane`, `dark`, `font-scale`, `rotation`, `stay-awake`, `screen-timeout`, `dnd`, `doze`. Every change is **verified by reading it back**. Refuses `airplane=on` over wireless adb; `--allow-wireless` overrides. |
 | `device get [key] [--json]` <br/>*alias:* `device status` | Current values; `n/a` where the platform cannot answer. |
 | `device reset [key …]` | Restore what this run changed. `batch`, `ai` and `suite` also do this automatically when the flow ends **or fails**. |
+| `device prep [--dry-run] [--json]` <br/>`device prep --revert` | Prepare a **test** device once: `animations=off`, `stay-awake=on`, `screen-timeout=max`, `dnd=on`, `doze=off`. Unlike `device set` this is **sticky** — it survives the run and is undone only by `--revert`. A **physical** device must be named with `--device`, so prep can never land on a personal phone. `--no-sleep-when-idle` stops the device being put to sleep when a run ends. See [Device state](/verikun/reference/device-state/). |
 | `device caps [--json]` | What the active platform supports, and the manual equivalent where it does not. |
 | `device release [serial] [--json]` | Hand a claimed device back to the pool. Claims expire on their own; this is for when you do not want to wait. Releases another job's claim too. See [Device claims](/verikun/reference/device-claims/). |
 
@@ -136,7 +137,7 @@ accept `--server <url>` to act on a remote server's device.
 | `devices start <name> [--wipe] [--timeout dur] [--no-wait]` | Boot an Android AVD or iOS simulator, waiting until it is genuinely drivable; prints the resolved serial on stdout. Already running = a no-op. |
 | `devices stop <name\|serial>` | Shut a running emulator or simulator down. |
 | `devices restart <name> [--wipe]` | Stop then boot — the fix for a wedged or flaky device. |
-| `doctor [--fix]` | Diagnose adb + device, and report the CLI/plugin versions. `--fix` sets the three animation scales to `0` for deterministic UI. `--ios` checks the idb toolchain. Version staleness is reported as a **warning** and does not affect the exit code — only a genuinely unusable setup gives `3`. |
+| `doctor [--fix]` | Diagnose adb + device, and report the CLI/plugin versions plus whether the device has been prepared and whether it has a screen lock. Read-only without `--fix`; `--fix` is an alias for [`device prep`](/verikun/reference/device-state/#preparing-a-test-device) and inherits its gate, so on a physical device it refuses unless the serial was named. `--ios` checks the idb toolchain. Version staleness and a screen lock are reported as **warnings** and do not affect the exit code — only a genuinely unusable setup gives `3`. |
 | `companion <status\|stop> [--json]` | Inspect or stop the on-device hierarchy reader (Android only). `stop` hands back the device's single `UiAutomation` connection so Appium or Layout Inspector can use it. See [Companion](/verikun/guides/companion/). |
 
 `vk devices stop` powers a **device** off; `vk stop <appId>` force-stops an **app**, and

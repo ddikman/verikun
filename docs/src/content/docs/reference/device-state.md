@@ -26,14 +26,22 @@ vk device caps                                           # what this platform su
 
 | key | values |
 |---|---|
+| `animations` | `on\|off` |
 | `airplane` | `on\|off` |
 | `dark` | `on\|off` |
 | `font-scale` | `0.5`–`3.0`, or `default` |
 | `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` |
 | `stay-awake` | `on\|off` |
+| `screen-timeout` | a duration like `30s` / `10m`, a bare number of milliseconds, or `max` |
+| `dnd` | `on\|off` |
+| `doze` | `on\|off` |
 
-Android supports all five. iOS does not, and a simulator and a physical device differ —
+Android supports all nine. iOS does not, and a simulator and a physical device differ —
 [Platform support](/verikun/guides/platform-support/#device-settings) is the per-key matrix.
+
+`screen-timeout` reads back as **milliseconds**, not as the duration you typed, because that
+is what the device stores — and a snapshot has to round-trip exactly or restoring it would
+compare unequal and be reported as refused.
 
 `vk device caps` prints what the active platform supports, but note that on iOS it reports the
 **simulator** answer whether or not you resolved a physical device: the capability table is
@@ -91,6 +99,80 @@ Follow it with a real wait rather than tapping straight away:
 vk device set airplane=off
 vk assert @content --wait 10s
 ```
+
+## Preparing a test device
+
+`device set` is for **one test**: change something, then put it back. Setting up a phone so
+that reads are trustworthy at all is a different job, and it is what `vk device prep` does.
+
+```sh
+vk device prep --dry-run                 # what would change, and from what
+vk device prep --device 032AY1UNR2       # a physical device must be named
+vk device prep                           # an emulator is auto-selected
+vk device prep --revert --device 032AY1UNR2   # put it back the way you found it
+```
+
+It establishes five knobs, each because it prevents a failure verikun actually has:
+
+| knob | why |
+|---|---|
+| `animations=off` | a live animation makes `uiautomator dump` return a stale or empty screen |
+| `stay-awake=on` | a sleeping display **hangs** the dump rather than failing it |
+| `screen-timeout=max` | the same, for a device that is not plugged in |
+| `dnd=on` | a heads-up notification lands on top of the app and steals the next tap |
+| `doze=off` | battery idle suspends the background work a test is waiting on |
+
+### Prep is sticky; `device set` is not
+
+This is the difference that matters. `device set` snapshots into the **run file** and is
+auto-restored by `batch`/`ai`/`suite` — correct, because a test that goes offline must come
+back. Prep must *survive* the run that established it, so its snapshot goes to a host-global
+record under `~/.verikun/prepared/` that no `finally` may touch, and is undone only by an
+explicit `--revert`.
+
+That also means prep is the only copy of the values needed to put a borrowed phone back. It
+deliberately does **not** live beside the claim files in `~/.verikun/devices/`, which are
+churn and get swept.
+
+### A physical device must be named
+
+Naming the serial *is* the opt-in. There is no `trust` verb and no allow-list: one less piece
+of state to go stale, and the thing you type names the phone you mean — which a `--yes` flag
+never does, since an agent would simply always pass it. An emulator is auto-selected, matching
+[`devices start|stop|restart`](/verikun/reference/commands/), which likewise refuses to
+power-cycle a physical device.
+
+### Asleep between runs
+
+A prepped device is put to sleep when `batch`, `ai` or `suite` finishes with it — #97's "in
+sleep mode when they're not in use". Only a device you explicitly prepped is ever slept, and
+`vk device prep --no-sleep-when-idle` opts out. A slept display is recovered automatically on
+the next read (see below).
+
+### Screen locks: warned about, never removed
+
+verikun **cannot** remove a screen lock and does not try.
+
+- Clearing one needs `locksettings clear --old <PIN>` — i.e. your device credential. verikun
+  never asks for or stores one; run files, reports and CI artifacts are the wrong place for it.
+- On Android 15 the obvious alternative provably does not work anyway. `locksettings help`
+  says of `set-disabled`: *"If the lock screen is secure, this has no immediate effect. I.e.
+  this can only change between Swipe and None."*
+
+So `vk doctor` and `vk device prep` **report** a lock (read from `dumpsys lock_settings`) and
+name the manual fix: remove it in *Settings > Security*. Do that once and the residual swipe
+lock is cleared automatically on every run thereafter.
+
+This matters because of what a slept device actually does. It does **not** reliably fail the
+read — measured on a Pixel 3a (API 32), a `Dozing` device served a well-formed hierarchy of
+`com.android.systemui`. The read *succeeds* and returns the **lock screen**, which is a false
+green: every selector then misses for a reason that has nothing to do with your app.
+
+So verikun checks the hierarchy it already has, confirms with `dumpsys trust`, wakes the device
+and tries `wm dismiss-keyguard` — which clears a swipe lock but only raises the prompt on a
+secure one. If the keyguard is still up afterwards it exits `3` naming the lock rather than
+handing back a dump of it. See
+[Troubleshooting](/verikun/guides/troubleshooting/) for the detection rules.
 
 ## Wireless adb is refused for `airplane=on`
 

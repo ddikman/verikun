@@ -170,6 +170,20 @@ export interface HierarchySource {
   detail: string;
 }
 
+/**
+ * What kind of screen lock a device has configured. `unknown` is a real answer and means
+ * the probe could not tell — never assume `none` from a failed read, because "no lock" is
+ * what licenses `vk` to walk past the keyguard.
+ */
+export type LockKind = 'none' | 'pin' | 'pattern' | 'password' | 'unknown';
+
+/** Display + lock state, read by the wake-before-dump path. */
+export interface ScreenState {
+  /** Is the display on? `null` where the platform cannot say. */
+  awake: boolean | null;
+  lock: LockKind;
+}
+
 export interface Driver {
   readonly platform: Platform;
   /**
@@ -271,4 +285,20 @@ export interface Driver {
    * or the platform cannot honor it.
    */
   setDeviceSetting(key: SettingKey, value: string): void;
+  /**
+   * Display + lock state. OPTIONAL, in the shape of `screenshotRaw?()` / `hierarchySource?()`:
+   * a backend with nothing to report omits the method entirely and callers then say nothing
+   * rather than inventing an answer. iOS omits it — a simulator does not sleep and has no
+   * keyguard, so a synthesized "awake" would be a claim we cannot back.
+   *
+   * Best-effort and never throws: this sits on the READ path, and a probe that can fail a
+   * dump would be worse than the hang it exists to prevent.
+   */
+  screenState?(): ScreenState;
+  /**
+   * Dismiss a NON-SECURE keyguard (a swipe lock). Returns whether it was attempted at all.
+   * Never tries to defeat a PIN/pattern/password — that needs the credential, which `vk`
+   * deliberately never holds. Optional for the same reason as `screenState`.
+   */
+  dismissKeyguard?(): boolean;
 }

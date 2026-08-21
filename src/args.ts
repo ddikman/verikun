@@ -54,6 +54,9 @@ const BOOLEAN = new Set([
   'no-restart',
   'no-logs',
   'wipe',
+  'dry-run',
+  'revert',
+  'no-sleep-when-idle',
   'allow-install',
   'allow-unsafe-anonymous',
   // NOT here on purpose: 'allow-device-control' and 'ensure-device' are tri-state

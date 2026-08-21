@@ -79,9 +79,10 @@ column. The three that bite in practice:
 <tr><td><code>clear</code></td><td>✅ <code>pm clear</code></td><td>✅</td><td>❌ <code>3</code> — no per-app reset</td><td>❌ <code>3</code> — no per-app reset</td></tr>
 <tr><td><code>install</code></td><td>✅ <code>.apk</code></td><td>✅ <code>.apk</code></td><td>✅ <code>.ipa</code> or <code>.app</code></td><td>✅ <code>.ipa</code> or <code>.app</code></td></tr>
 <tr><th colspan="5">Device state</th></tr>
-<tr><td><code>device set</code></td><td>✅ all five keys</td><td>✅ all five keys</td><td>⚠️ two of five</td><td>❌ <code>3</code> — none</td></tr>
-<tr><td><code>device get</code></td><td>✅</td><td>✅</td><td>⚠️ two of five</td><td>⊘ <code>n/a</code> for every key</td></tr>
+<tr><td><code>device set</code></td><td>✅ all eight keys</td><td>✅ all eight keys</td><td>⚠️ four of eight</td><td>❌ <code>3</code> — none</td></tr>
+<tr><td><code>device get</code></td><td>✅</td><td>✅</td><td>⚠️ four of eight</td><td>⊘ <code>n/a</code> for every key</td></tr>
 <tr><td><code>device reset</code></td><td>✅</td><td>✅</td><td>⚠️ restores what it could read</td><td>⊘ nothing was captured</td></tr>
+<tr><td><code>device prep</code></td><td>⚠️ needs an explicit <code>--device</code></td><td>✅</td><td>⊘ every knob is a no-op or unsupported</td><td>⊘ same</td></tr>
 <tr><td><code>device caps</code></td><td>✅</td><td>✅</td><td>✅</td><td>⚠️ reports the simulator table</td></tr>
 <tr><td><code>device release</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><th colspan="5">Run a test</th></tr>
@@ -121,8 +122,13 @@ Notes on the rows that carry a caveat:
 - **`suite --app` does not reset app data on iOS.** It degrades to a force-stop. If your test
   depends on starting logged-out, that assumption does not hold there — see
   [Suites](/verikun/guides/suites/).
-- **`doctor --fix` is Android-only.** It zeroes the three animation scales; iOS has no
-  equivalent knob. `vk doctor --ios` still checks the toolchain.
+- **`doctor --fix` is Android-only, and is an alias for `device prep`.** It therefore inherits
+  prep's gate: on a **physical** device it refuses unless the serial was named with `--device`,
+  because prep changes settings that outlive the run. iOS has no equivalent knob;
+  `vk doctor --ios` still checks the toolchain.
+- **`device prep` needs an explicit `--device` on a physical phone.** Naming the serial *is* the
+  opt-in — there is no `trust` verb and no allow-list. An emulator is auto-selected, matching
+  `devices start|stop|restart`, which likewise refuses to power-cycle a physical device.
 - **`companion` is Android-only**, and exits `3` on iOS. It is **on by default**
   (`VERIKUN_COMPANION=0` opts out). It speeds up the UI-hierarchy read,
   which on Android costs ~2.4s per call because `uiautomator dump` starts a fresh VM every
@@ -168,19 +174,25 @@ how the snapshot-and-restore works and what each value domain accepts.
 <tr><th>Physical</th><th>Emulator</th><th>Simulator</th><th>Physical</th></tr>
 </thead>
 <tbody>
+<tr><td><code>animations</code></td><td>✅</td><td>✅</td><td>❌ <code>3</code> — nothing disables UIKit animation</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>airplane</code></td><td>⚠️ refused over wireless adb</td><td>✅</td><td>❌ <code>3</code> — no radio</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>dark</code></td><td>✅</td><td>✅</td><td>✅</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>font-scale</code></td><td>✅</td><td>✅</td><td>⚠️ nearest Dynamic Type category</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>rotation</code></td><td>✅</td><td>✅</td><td>❌ <code>3</code> — nothing rotates it</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>stay-awake</code></td><td>✅</td><td>✅</td><td>⊘ no-op — simulators do not sleep</td><td>❌ <code>3</code></td></tr>
+<tr><td><code>screen-timeout</code></td><td>✅</td><td>✅</td><td>⊘ no-op — simulators do not sleep</td><td>❌ <code>3</code></td></tr>
+<tr><td><code>dnd</code></td><td>✅</td><td>✅</td><td>❌ <code>3</code> — Focus is not scriptable</td><td>❌ <code>3</code></td></tr>
+<tr><td><code>doze</code></td><td>✅</td><td>✅</td><td>⊘ no-op — no Doze equivalent</td><td>❌ <code>3</code></td></tr>
 </tbody>
 </table>
 
-Three things this table says that nothing else did:
+Four things this table says that nothing else did:
 
-- **A physical iOS device supports none of the five.** `simctl` drives simulators only, and
+- **A physical iOS device supports none of them.** `simctl` drives simulators only, and
   `idb` covers interaction rather than preferences, so there is no scriptable settings surface
   at all. Each key refuses with the manual equivalent named.
+- **`vk device prep` is therefore Android-only in practice.** On iOS every knob in the prep set
+  is a no-op or unsupported, so `prep` applies nothing and says so per key rather than failing.
 - **`vk device caps --ios` reports the *simulator* answer either way.** The capability table is
   static and describes a simulator; only the driver knows what it resolved. So on a physical
   device `caps` will say `dark` is supported and `set` will exit `3`. Trust this page, or trust
