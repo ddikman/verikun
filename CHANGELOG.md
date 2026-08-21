@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-08-21
+
+### Changed
+- **`vk device prep`**: gives the display a 1-minute timeout instead of keeping it lit forever; `--no-sleep-when-idle` keeps the old behaviour. ([#101])
+- **`vk batch|ai|suite`**: no longer switch a prepped device's display off at teardown — it now sleeps by itself.
+- **`vk tap|type|key|swipe|screenshot`**: wake a sleeping display first; an injected tap on a dozing screen did nothing and exited `0`.
+
+### Added
+- **`vk device prep`**: warns when a device that will now sleep is behind a PIN/pattern lock.
+
+[#101]: https://github.com/ddikman/verikun/issues/101
+
 ## [0.25.0] - 2026-08-21
 
 ### Added

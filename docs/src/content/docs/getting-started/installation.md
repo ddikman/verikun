@@ -30,8 +30,8 @@ vk doctor
 the device has been prepared for testing, and whether it has a screen lock. It is **read-only**
 — it never changes a device.
 
-To actually set a test device up, prepare it once. This turns animations off, keeps the display
-awake, silences notifications and disables battery idle:
+To actually set a test device up, prepare it once. This turns animations off, gives the display
+a 1-minute timeout, silences notifications and disables battery idle:
 
 ```sh
 vk device prep --device <serial>   # a physical device must be named

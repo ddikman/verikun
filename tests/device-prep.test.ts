@@ -8,13 +8,14 @@ import { looksLikeSystemUi, parseLockKind } from '../src/drivers/adb';
 import { makeEl } from './helpers';
 import { SETTINGS } from '../src/device/settings';
 import {
-  PREP_KNOBS,
+  PREP_SCREEN_TIMEOUT,
   assertPreppable,
   clearPrep,
   isPrepared,
   mergeOriginals,
   newPrepRecord,
   prepDir,
+  prepKnobs,
   readPrep,
   writePrep,
 } from '../src/device/prep';
@@ -35,11 +36,13 @@ function withHome<T>(fn: (home: string) => T): T {
 
 // --- the knob set ----------------------------------------------------------
 
+const BOTH_SETS = [prepKnobs(true), prepKnobs(false)];
+
 test('every prep knob is a real settings-table key with a value that table accepts', () => {
   // Prep is not allowed its own private vocabulary: each knob must be a row in
   // device/settings.ts, or it would bypass `device caps`, the per-platform gaps and the
   // readback verification that makes a write trustworthy.
-  for (const knob of PREP_KNOBS) {
+  for (const knob of BOTH_SETS.flat()) {
     const spec = SETTINGS[knob.key];
     assert.ok(spec, `prep knob '${knob.key}' is not in the settings table`);
     assert.doesNotThrow(() => spec.parse(knob.value), `prep knob '${knob.key}=${knob.value}' does not parse`);
@@ -49,14 +52,42 @@ test('every prep knob is a real settings-table key with a value that table accep
 test('every prep knob says which failure it prevents', () => {
   // The list stays short only if each entry has to earn its place. "Sensible default for a
   // phone" is not a reason; "a dump returns a stale screen" is.
-  for (const knob of PREP_KNOBS) {
+  for (const knob of BOTH_SETS.flat()) {
     assert.ok(knob.why && knob.why.length > 10, `prep knob '${knob.key}' does not say why it is in the set`);
   }
 });
 
-test('prep knobs are unique', () => {
-  const keys = PREP_KNOBS.map((k) => k.key);
-  assert.equal(new Set(keys).size, keys.length, 'a knob is listed twice');
+test('prep knobs are unique within a set', () => {
+  for (const set of BOTH_SETS) {
+    const keys = set.map((k) => k.key);
+    assert.equal(new Set(keys).size, keys.length, 'a knob is listed twice');
+  }
+});
+
+test('both display policies cover the SAME keys', () => {
+  // `--revert` restores whatever `original` holds, and `original` is snapshotted per applied
+  // knob. If one policy touched a key the other did not, a device prepped one way and then the
+  // other would leave that key changed with nothing recording its pre-prep value.
+  const keys = BOTH_SETS.map((set) => set.map((k) => k.key).sort().join(','));
+  assert.equal(keys[0], keys[1], 'the two prep knob sets do not cover the same keys');
+});
+
+test('the default policy turns stay-awake OFF, so the display timeout is not inert', () => {
+  // The bug this exists to stop coming back: `stay-awake=on` is `stay_on_while_plugged_in`,
+  // which keeps the screen up while CHARGING — and a device on USB adb always is. Leave it on
+  // and `screen-timeout` never fires, which is how prep came to mean "never sleeps" (#101).
+  const sleepy = prepKnobs(true);
+  assert.equal(sleepy.find((k) => k.key === 'stay-awake')?.value, 'off');
+  assert.equal(prepKnobs(false).find((k) => k.key === 'stay-awake')?.value, 'on');
+});
+
+test('the default display timeout outlasts the stock one, and --no-sleep-when-idle never sleeps', () => {
+  // It has to span the gap between two commands of one flow (an agent's turn), which the
+  // stock 15-30s does not. `max` is the opt-out, and is what prep used to do unconditionally.
+  const ms = Number(SETTINGS['screen-timeout'].parse(PREP_SCREEN_TIMEOUT));
+  assert.ok(ms > 30_000, `prep's display timeout (${ms}ms) is no better than the stock default`);
+  assert.equal(prepKnobs(true).find((k) => k.key === 'screen-timeout')?.value, PREP_SCREEN_TIMEOUT);
+  assert.equal(prepKnobs(false).find((k) => k.key === 'screen-timeout')?.value, 'max');
 });
 
 // --- the store -------------------------------------------------------------

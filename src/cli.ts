@@ -22,7 +22,6 @@ import {
 import {
   claimsEnabled,
   describeClaim,
-  ownClaimedSerials,
   releaseClaim,
   releaseOwnClaims,
   setProcessScoped,
@@ -30,12 +29,13 @@ import {
   touchClaim,
 } from './device/claims';
 import {
-  PREP_KNOBS,
+  PREP_SCREEN_TIMEOUT,
   assertPreppable,
   clearPrep,
   isPrepared,
   mergeOriginals,
   newPrepRecord,
+  prepKnobs,
   readPrep,
   writePrep,
 } from './device/prep';
@@ -1490,10 +1490,13 @@ function devicePrep(ctx: Ctx): number {
   const serial = ctx.driver.resolvedSerial();
   if (flagBool(ctx.flags, 'revert')) return devicePrepRevert(ctx, serial, dryRun, asJson);
 
+  // Which display policy: sleeps by itself after PREP_SCREEN_TIMEOUT, or never turns off.
+  const sleepWhenIdle = !flagBool(ctx.flags, 'no-sleep-when-idle');
+
   // Partition by what this platform can actually do, so the gate below counts real writes.
   const skipped: Array<{ key: SettingKey; reason: string }> = [];
   const applicable: Array<{ key: SettingKey; target: string; current: string | null; why: string }> = [];
-  for (const knob of PREP_KNOBS) {
+  for (const knob of prepKnobs(sleepWhenIdle)) {
     const spec = SETTINGS[knob.key];
     const support = spec.support[ctx.platform];
     if (support === 'unsupported') {
@@ -1546,7 +1549,6 @@ function devicePrep(ctx: Ctx): number {
 
   // Earliest wins across re-preps, or `--revert` would restore the device to prepped.
   const prior = readPrep(serial);
-  const sleepWhenIdle = !flagBool(ctx.flags, 'no-sleep-when-idle');
   writePrep(
     newPrepRecord(serial, ctx.platform, mergeOriginals(prior?.original ?? {}, original), sleepWhenIdle),
   );
@@ -1558,10 +1560,32 @@ function devicePrep(ctx: Ctx): number {
   } else {
     out(`device prep ${serial}: ${changes.length ? changes.map((c) => `${c.key}=${c.target}`).join(' ') : 'already prepared'}`);
     for (const s of skipped) err(`note: ${s.key} skipped — ${s.reason.replace(/\n/g, ' ')}`);
-    if (sleepWhenIdle) err('note: this device will be put to sleep when a run using it finishes');
+    if (sleepWhenIdle) err(`note: the display sleeps by itself after ${PREP_SCREEN_TIMEOUT} idle, and is woken on the next read`);
+    warnSecureLock(ctx.platform, serial, sleepWhenIdle);
     err(`undo with: verikun device prep --revert --device ${serial}`);
   }
   return 0;
+}
+
+/**
+ * Say so, once, when a device that will now sleep is behind a SECURE lock.
+ *
+ * The wake on the read path can only clear a *swipe* keyguard; a PIN/pattern/password one makes
+ * `getElements` exit 3 rather than hand back the lock screen. That is honest, but it is a
+ * failure, and prep — an explicit setup command that already resolved the serial — is where you
+ * want to hear about it, not twenty minutes into a suite. It only warns: refusing would make a
+ * perfectly usable device un-preppable, and `--no-sleep-when-idle` is the way out.
+ */
+function warnSecureLock(platform: Platform, serial: string, sleepWhenIdle: boolean): void {
+  if (!sleepWhenIdle || platform !== 'android') return;
+  const lock = lockKindOf(serial);
+  if (lock === 'none' || lock === 'unknown') return;
+  err(
+    `warning: this device has a screen lock (${lock}), so a read after the display sleeps can land ` +
+      'on the keyguard (verikun can only clear a swipe lock, and never asks for a PIN).\n' +
+      'Remove it in Settings > Security, or keep the display lit with `verikun device prep ' +
+      `--no-sleep-when-idle --device ${serial}\`.`,
+  );
 }
 
 /** Put a prepared device back the way it was found, and forget it. */
@@ -1648,34 +1672,6 @@ function requireSettingKey(v: string): SettingKey {
  * same code. (Remote is a known gap: the overrides live in the *server's* run file, so
  * a locally-empty snapshot means this correctly skips — see the issue's Out of scope.)
  */
-/**
- * Park prepared devices when the flow that used them ends — #97's "in sleep mode when they're
- * not [in use]".
- *
- * Three properties worth keeping:
- *
- *   * It can only ever touch a device you explicitly PREPPED, and only if that prep did not
- *     pass `--no-sleep-when-idle`. A borrowed phone that was never prepped is never slept.
- *   * It goes through the driver rather than the command dispatcher, so it does not appear as
- *     a `key sleep` testcase in the report. Parking is host hygiene, not a test step.
- *   * `ownClaimedSerials()` is empty in `--server` mode (the local process never resolves a
- *     device), so the remote path degrades to doing nothing on its own, with no branch here.
- *     Managing a remote device's power is `--allow-device-control`'s job.
- *
- * Must run BEFORE `releaseOwnClaims()`, which is what it reads its serials from.
- */
-function parkPreparedDevices(platform: Platform): void {
-  for (const serial of ownClaimedSerials()) {
-    if (!readPrep(serial)?.sleepWhenIdle) continue;
-    try {
-      err(`[verikun] parking prepared device ${serial} (sleep)`);
-      getDriver(platform, serial).pressKey('sleep');
-    } catch {
-      /* teardown must never throw — the device may be exactly why we are unwinding */
-    }
-  }
-}
-
 async function restoreDeviceOverrides(backend: ExecBackend): Promise<void> {
   if (!Recorder.hasDeviceOverrides()) return;
   try {
@@ -1948,7 +1944,6 @@ async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<numbe
         /* the device may be exactly why we are unwinding — never mask the real error */
       }
     }
-    parkPreparedDevices(platformFromFlags(batchFlags));
     releaseOwnClaims();
   }
 }
@@ -2688,8 +2683,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     // otherwise an unattended run leaves the phone offline or in dark mode.
     await restoreDeviceOverrides(backend);
     await backend.close?.(); // frees a remote server's device lock for the next command
-    parkPreparedDevices(platform); // a prepped device goes back to sleep between runs
-    releaseOwnClaims(); // and the host-level claim, so the next job can have the device
+    releaseOwnClaims(); // the host-level claim, so the next job can have the device
   }
 
   if (flagBool(flags, 'json')) {
@@ -2780,7 +2774,6 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
   } finally {
     await restoreDeviceOverrides(backend);
     await backend.close?.();
-    parkPreparedDevices(platform);
     releaseOwnClaims();
   }
 }
@@ -3137,11 +3130,11 @@ DEVICE STATE (change the device the app runs on, then put it back)
                                       do this automatically when the flow ends OR fails,
                                       so a dead test can't leave the phone offline.
   device prep [--dry-run] [--json]    Prepare a TEST device once, stickily: animations off,
-                                      display kept awake, Do Not Disturb on, battery idle off.
-                                      Survives the run (unlike \`device set\`), so it is undone
-                                      only by \`--revert\`. A PHYSICAL device must be named with
-                                      --device — prep must never land on a personal phone.
-                                      --no-sleep-when-idle keeps the screen on after a run.
+                                      display timeout ${PREP_SCREEN_TIMEOUT}, Do Not Disturb on,
+                                      battery idle off. Survives the run (unlike \`device set\`),
+                                      so it is undone only by \`--revert\`. A PHYSICAL device must
+                                      be named with --device — prep must never land on a personal
+                                      phone. --no-sleep-when-idle keeps the display on for good.
   device prep --revert [--dry-run]    Put a prepared device back the way it was found
   device caps [--json]                What this platform supports, and the manual
                                       equivalent where it doesn't
