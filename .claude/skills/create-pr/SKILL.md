@@ -16,7 +16,7 @@ metadata:
 
 # Create PR
 
-Open a pull request for the current branch with a description a reviewer can scan in seconds. In order: **rebase onto main → summarise scope → draft a concise, intent-led body → create it as a draft**. The description leads with *why*, not a re-narration of the diff.
+Open a pull request for the current branch with a description a reviewer can scan in seconds. In order: **rebase onto main → summarise scope → draft a concise, intent-led body → create it as a draft**. The description leads with *why*, then explains the change as **two or three ideas** — never as a re-narration of the diff.
 
 To keep the PR's base current, **rebase onto `origin/main`** before opening it, then create the PR with `gh`.
 
@@ -85,21 +85,26 @@ Draw the *why* (and the rationale for any new default) from the ticket/commits/c
 
 ## Step 4 — Draft the description
 
-Fill the sections of [`.github/pull_request_template.md`](../../../.github/pull_request_template.md), **deleting any that don't apply**. Keep it short — **length scales with the change**; a one-line fix gets a few lines, not a wall. Rules per section:
+Fill the sections of [`.github/pull_request_template.md`](../../../.github/pull_request_template.md), **deleting any that don't apply**. Shorten a heading where a shorter one reads better — `Why`, `How it works`, `Verified`, `Deliberately not done`. It's a checklist of what a reviewer needs, not a form.
 
-- **TL;DR** — one plain, user/system-facing sentence: *what happens* and the resulting behaviour, not internals. No URLs/endpoints, no raw code identifiers, minimal jargon. When the PR **resolves** a GitHub issue in this repo, add a [closing keyword](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue) — `Resolves #12` (`Closes` / `Fixes` work too) — so merging closes the issue and the two show as linked instead of someone closing it by hand:
-  - **On its own line under the sentence**, not folded into it — the TL;DR stays one plain sentence, and the link sits where a reviewer sees it first.
+**Length scales with the change, and it tops out fast.** A one-line fix is a TL;DR and a testing line; a 2,000-line feature is still only ~800 words, because this is what a reviewer reads *once, before* opening the diff. If a draft runs longer, what's over is nearly always rationale — and rationale already has homes: the commit body, `CLAUDE.md`, `docs/`. Cutting it from here isn't losing it.
+
+Rules per section:
+
+- **TL;DR** — one plain, user/system-facing sentence: *what happens* and the resulting behaviour, not internals. No URLs/endpoints, no raw code identifiers, minimal jargon. If the change has a headline number, it gets **a line of its own below** — `40 min → 13 min on three devices`; one number that makes the case, not a benchmark table. When the PR **resolves** a GitHub issue in this repo, add a [closing keyword](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue) — `Resolves #12` (`Closes` / `Fixes` work too) — so merging closes the issue and the two show as linked instead of someone closing it by hand:
+  - **On its own line directly under the sentence** (above any headline number), not folded into it — the TL;DR stays one plain sentence, and the link sits where a reviewer sees it first.
   - **Repeat the keyword per issue:** `Resolves #12, resolves #13`. `Resolves #12 and #13` closes only #12.
   - **Only if this PR actually resolves it.** For partial or adjacent work, reference it *without* a keyword — "Part of #43", "Related to #43" — so merging doesn't close work that isn't done.
   - The keyword has to be in the **PR description** to link; the same words in a commit message or a review comment don't.
   - No issue behind the work? Leave the line off and say so in *Why make this change?* ("Requested directly — no ticket.") rather than padding it or inventing a number.
-- **What changed?** — the parts a reviewer can't get from the diff: the approach and any tradeoff/decision behind it, **not a file-by-file list**. If the change adds new flags/config/defaults, say they're new and why those defaults were chosen.
-- **Why make this change?** — ≤2 non-technical sentences: the real motivation, not a side-effect; no irrelevant facts. The issue link itself lives in the TL;DR, so don't repeat it here.
-- **How to test?** — concrete reviewer steps. Skip anything CI already proves (don't write "builds clean" / "units pass"). **Show the result, not just what you ran:** where you can, include a before/after, trimmed command/test output, a screenshot, or a reference — not a bare "tested it".
-  - **New tests** — the flows/edge cases now covered in `tests/*.test.ts` (the unit suite covers the platform-agnostic core), **not** a list of files. If none, say why (e.g. "driver/platform method — device-verified only", or "covered by existing `selector.test.ts`").
-  - **Manual testing performed** — there is no device CI, so this is the only record of on-device behaviour: who · device or emulator + OS · which `vk` commands · what you confirmed. The connected device may be a personal phone — avoid destructive actions (submitting forms, creating accounts) while exercising it.
+- **What changed?** — **the design as two or three named ideas**, not a tour of the diff. Each idea is a bolded one-line claim followed by two or three plain sentences on the constraint that forced it; a reviewer should understand the shape of the change before meeting a single filename. If the change adds new flags/config/defaults, say they're new and why those defaults were chosen. Resist a fourth idea: a decision-by-decision list is a commit body, not a PR body.
+- **Where the risk is** *(large PRs — add it under "What changed?")* — a short **reading order**, hardest first: the two or three files where a wrong change would be *silent* rather than loud, one sentence each on why. An ordered pointer, not an inventory — leave out everything the diff explains by itself.
+- **Why make this change?** — ≤2 non-technical sentences: the real motivation, not a side-effect; no irrelevant facts. State the problem as the cost someone was paying, not as the code that caused it. The issue link itself lives in the TL;DR, so don't repeat it here.
+- **How to test?** — concrete reviewer steps. Skip anything CI already proves (don't write "builds clean" / "units pass"). **Show the result, not just what you ran:** a before/after, trimmed command/test output, a screenshot, or a reference — not a bare "tested it". Beyond a small fix, make it **a table, one row per claim**, each row something the reviewer could go and check; that scans better than prose and usually absorbs both sub-sections below.
+  - **New tests** — the flows/edge cases now covered in `tests/*.test.ts` (the unit suite covers the platform-agnostic core), plus the total, **not** a list of files. If none, say why (e.g. "driver/platform method — device-verified only", or "covered by existing `selector.test.ts`").
+  - **Manual testing performed** — there is no device CI, so this is the only record of on-device behaviour: device or emulator + OS, and what you confirmed — claims and outcomes, not a transcript of the session. The connected device may be a personal phone — avoid destructive actions (submitting forms, creating accounts) while exercising it.
 - **Docs & contracts** — tick the boxes that apply (README + SKILL for CLI changes; `usageText()` / `RECORDABLE` for a new command; a `tests/<module>.test.ts` case for a new pure core function). Delete the block if the PR touches none of it.
-- **Out of scope & next steps** *(optional)* — what you deliberately left out and why, known rough edges, and any follow-ups. Drop it if empty.
+- **Out of scope & next steps** *(optional)* — what you deliberately left out and why, known rough edges, and any follow-ups. Drop it if empty — but **don't shorten it when it isn't**. Everything above is explanation a reviewer can skip; this is the part they're being asked to sign off, so it's the wrong economy.
 
 Never add a "Generated with Claude Code" / AI-attribution footer — almost all work here is AI-aided, so it carries no signal.
 
@@ -127,6 +132,25 @@ Good — keyword on its own line under the TL;DR, motivation left plain:
 > Resolves #42.
 >
 > **Why make this change?** A tap could land on a different control and still report success, so a green run didn't mean the flow had worked.
+
+Bad — a decision log: every sentence is true, none of it is the design, and the reviewer meets six internals before one idea:
+
+> **What changed?** The app reset moved inside the test, because from the parent it could reset one phone and test another. The parent holds the device claims and children run `VERIKUN_NO_CLAIM=1`, since `isMine` matches on session or cwd. An empty queue isn't the end while another lane is busy, so the worker idle-polls. Lane retirement has two triggers because the probe can't see through a server…
+
+Good — one named idea, the constraint that forced it, no filenames:
+
+> **A child process per test.** Every device call bottoms out in a blocking `spawnSync`, so tests awaited inside one process wouldn't overlap at all — they'd take turns. A process per test is the smallest thing that makes the parallelism real, and it hands us crash isolation and per-test run state for free.
+
+Bad — a transcript of the session; nothing in it is a claim a reviewer could check:
+
+> Started the server with two phones, ran the suite, disconnected one over TCP, checked the pool, checked the lease, checked the other lease, restored USB, cleaned up the temp dirs.
+
+Good — one row per claim, each one checkable, the numbers left in (a headerless two-column table; the left cell is the claim):
+
+> | | |
+> |---|---|
+> | Parallel suite through a pooled server | 3/3 green, **43.7s wall vs 81.2s device time** |
+> | Failover on a pool | killed a leased device for real: quarantined, spare joined, capacity held at 2, lease followed, the other lease undisturbed |
 
 ## Step 5 — Create the PR
 
@@ -160,15 +184,15 @@ If it should be a draft but isn't, `gh pr ready <n> --undo`. Leave it as a draft
 ## What to avoid
 
 - Pasting the full diff or narrating it file-by-file — the diff shows the files.
+- More than three ideas in "What changed?", or a decision-by-decision rationale list — that is the commit body's job, and `CLAUDE.md`'s. A body much past ~800 words means something in it belongs elsewhere, however big the change.
+- A benchmark table where one number makes the case; a session transcript where a row of claims would do.
 - URLs or code identifiers in the TL;DR *sentence* (the `Resolves #12` line below it is the exception); filler openers ("This PR introduces…", "This pull request…").
 - A side-effect framed as the reason; irrelevant facts.
 - Restating what CI proves ("builds clean", "units pass") — CI runs `npm run build` + `npm run test:ci` on Node 20.x and 22.x.
 - Bumping the version or dating a `CHANGELOG.md` entry for a purely internal change (refactor / CI / tests / docs) — those ship without either.
 - Bumping `package.json` but forgetting `package-lock.json` or `.claude-plugin/plugin.json` — they've drifted before; keep them in lockstep. (`src/version.ts` is regenerated from `package.json` by `npm run build`'s `prebuild`, so never hand-edit it — it follows automatically.)
-- Skipping the testing section — if untested, say why.
-- Claiming testing without showing the result — include the before/after, output, screenshot, or reference.
+- Skipping the testing section (if untested, say why), or claiming testing without the result — include the before/after, output, screenshot, or reference.
 - A "Generated with Claude Code" footer; Slack/internal thread URLs in the body.
 - Publishing (marking ready) unless the user explicitly asked.
 - Inventing ticket ids, or rationale for a default you didn't actually find.
-- Referencing an issue this PR *resolves* with a bare `#42` or a plain URL — neither links it, so it's still open after merge. Use `Resolves #42` on its own line under the TL;DR, not buried in the "Why".
-- The inverse: a closing keyword on an issue this PR only partly addresses — that closes work that isn't done. Say "Part of #43" instead.
+- An issue link that doesn't link: a bare `#42` or a plain URL leaves it open after merge — use `Resolves #42` on its own line under the TL;DR, not buried in the "Why". And the inverse — a closing keyword on an issue this PR only *partly* addresses closes work that isn't done; say "Part of #43".
