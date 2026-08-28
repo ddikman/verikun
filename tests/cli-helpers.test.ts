@@ -20,8 +20,13 @@ import {
   lastJsonObject,
   lanesFromFlags,
   laneResult,
+  grantLanes,
 } from '../src/cli';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { claimDevice, type ClaimOpts } from '../src/device/claims';
+import type { DeviceGrant } from '../src/device/grant';
 import { parseSelector } from '../src/ui/selector';
 import { CliError } from '../src/errors';
 import { makeEl } from './helpers';
@@ -546,6 +551,84 @@ test('lanesFromFlags: duplicates and blanks are dropped, ids stay short', () => 
   const lanes = lanesFromFlags({ devices: '00008120-001A2B3C4D5E6F00,,00008120-001A2B3C4D5E6F00, other' }, () => [])!;
   assert.deepEqual(lanes.map((l) => l.id), ['d1', 'd2']);
   assert.equal(lanes[0].label, '00008120-001A2B3C4D5E6F00');
+});
+
+// --- grantLanes -------------------------------------------------------------
+//
+// The parent's hold on a parallel suite's LOCAL lanes. A throwaway claim store per test
+// (`home`), so nothing here reads or writes the developer's ~/.verikun/devices.
+
+/** A store nobody else is using, plus a stable identity for "this job". */
+function grantOpts(home: string, over: Partial<ClaimOpts> = {}): ClaimOpts & { heartbeatMs: number } {
+  return { home, host: 'test-host', env: {}, cwd: '/work/alpha', heartbeatMs: 0, ...over };
+}
+
+function withStore(fn: (home: string) => void): void {
+  const home = mkdtempSync(join(tmpdir(), 'vk-lane-grant-'));
+  try {
+    fn(home);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+const laneFor = (device: string): { id: string; label: string; device: string } => ({ id: device, label: device, device });
+
+test('grantLanes: a server lane is passed through — its device is held by the child that leases it', () => {
+  withStore((home) => {
+    const grants: DeviceGrant[] = [];
+    const lanes = [{ id: 'd1', label: 'ci:8391', server: 'http://ci:8391' }];
+    assert.deepEqual(grantLanes(lanes, 'android', false, grants, grantOpts(home)), lanes);
+    assert.equal(grants.length, 0, 'the parent claimed nothing');
+  });
+});
+
+test('grantLanes: `--devices all` drops a device another job is driving, and runs on the rest', () => {
+  withStore((home) => {
+    // A sibling job in a different working directory has device-b.
+    assert.ok(claimDevice('device-b', 'android', grantOpts(home, { cwd: '/work/beta', now: Date.now() })).ok);
+    const grants: DeviceGrant[] = [];
+    const kept = grantLanes(['device-a', 'device-b', 'device-c'].map(laneFor), 'android', true, grants, grantOpts(home));
+    // Failing the whole suite because one of three phones is busy would leave two idle.
+    assert.deepEqual(kept.map((l) => l.device), ['device-a', 'device-c']);
+    assert.deepEqual(grants.map((g) => g.serial), ['device-a', 'device-c']);
+  });
+});
+
+test('grantLanes: a NAMED serial somebody else holds is exit 2, not a silently smaller pool', () => {
+  withStore((home) => {
+    assert.ok(claimDevice('device-b', 'android', grantOpts(home, { cwd: '/work/beta', now: Date.now() })).ok);
+    const grants: DeviceGrant[] = [];
+    assert.throws(
+      () => grantLanes(['device-a', 'device-b'].map(laneFor), 'android', false, grants, grantOpts(home)),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2,
+    );
+    // The out-parameter is what makes the caller's `finally` able to hand device-a back;
+    // a return value would have been lost with the throw.
+    assert.deepEqual(grants.map((g) => g.serial), ['device-a']);
+  });
+});
+
+test('grantLanes: a pool with nothing left to run on is exit 2, never an empty green suite', () => {
+  withStore((home) => {
+    assert.ok(claimDevice('device-a', 'android', grantOpts(home, { cwd: '/work/beta', now: Date.now() })).ok);
+    assert.throws(
+      () => grantLanes([laneFor('device-a')], 'android', true, [], grantOpts(home)),
+      (e: unknown) => e instanceof CliError && e.exitCode === 2 && /every device in the pool/.test(e.message),
+    );
+  });
+});
+
+test('grantLanes: VERIKUN_NO_CLAIM keeps every lane and holds nothing', () => {
+  withStore((home) => {
+    assert.ok(claimDevice('device-a', 'android', grantOpts(home, { cwd: '/work/beta', now: Date.now() })).ok);
+    const grants: DeviceGrant[] = [];
+    const o = grantOpts(home, { env: { VERIKUN_NO_CLAIM: '1' } });
+    // The escape hatch restores the pre-claims behaviour EXACTLY: a busy device is not
+    // skipped, because nothing can tell us it is busy.
+    const kept = grantLanes(['device-a', 'device-b'].map(laneFor), 'android', true, grants, o);
+    assert.deepEqual(kept.map((l) => l.device), ['device-a', 'device-b']);
+  });
 });
 
 test('laneResult: the EXIT CODE is the verdict, the JSON only adds detail', () => {

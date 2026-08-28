@@ -20,8 +20,6 @@ import {
   parseDeviceAssignments,
 } from './device/settings';
 import {
-  assertClaimable,
-  claimDevice,
   claimsEnabled,
   describeClaim,
   releaseClaim,
@@ -30,6 +28,15 @@ import {
   summarize,
   touchClaim,
 } from './device/claims';
+import {
+  ClaimGrantOpts,
+  DeviceGrant,
+  claimGrant,
+  leaseGrant,
+  processClaimGrant,
+  releaseGrants,
+  requireClaimGrant,
+} from './device/grant';
 import {
   PREP_SCREEN_TIMEOUT,
   assertPreppable,
@@ -2161,6 +2168,12 @@ interface ResolvedBackend {
   backend: ExecBackend;
   platform: Platform;
   device?: string;
+  /**
+   * This run's hold on the device, whichever kind it turned out to be — a host claim
+   * locally, a server lease remotely. ONE teardown for both, so a caller's `finally` says
+   * "hand the device back" rather than re-deriving which of the two mechanisms it is on.
+   */
+  grant: DeviceGrant;
   /** Set when the backend is a remote `vk server`. `reads` is absent against a pre-0.21.1
    *  server, which did not report its hierarchy read path. */
   remote?: { url: string; version: string; reads?: HierarchySource };
@@ -2363,6 +2376,12 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       },
       platform,
       device,
+      // The claim was taken lazily, inside `driver.preflight()` → `resolvedSerial()`, and
+      // when no `--device` was passed only the store knows which phone it landed on — so
+      // the grant defers to `releaseOwnClaims()` rather than naming a serial it may not
+      // have. `touch` is a no-op because `executeOutcome` already stamps the claim on
+      // every recorded command, which beats a timer: it fires when work happens.
+      grant: processClaimGrant(device, releaseOwnClaims),
       moves: [],
     };
   }
@@ -2455,6 +2474,11 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     },
     platform: health.platform,
     device: serial,
+    // The lease IS this run's hold: the transport's run token is its key, so every later
+    // call — leaf, repair, archive read — lands on the phone named above. Handing it back
+    // is `close()`, which is why the grant delegates rather than posting its own release:
+    // two teardowns for one lease is how one of them stops being called.
+    grant: leaseGrant(remote, serial),
     remote: { url: server, version: health.version, reads },
     moves,
   };
@@ -2718,7 +2742,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   }
 
   const reqPlatform = platformFromFlags(flags);
-  const { backend, platform, device, moves } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  const { backend, platform, device, grant, moves } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
   let result: AiRunResult;
   try {
     result = await runAiTest(file, opts, backend, platform, device);
@@ -2726,8 +2750,9 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
     // Undo any device setting the test changed, INCLUDING when it failed part-way —
     // otherwise an unattended run leaves the phone offline or in dark mode.
     await restoreDeviceOverrides(backend);
-    await backend.close?.(); // frees a remote server's device lock for the next command
-    releaseOwnClaims(); // the host-level claim, so the next job can have the device
+    // Hand the device back — the host claim locally, the server's lease remotely. One
+    // call for both, so a teardown cannot get one half right and forget the other.
+    await grant.release();
   }
 
   if (flagBool(flags, 'json')) {
@@ -2778,6 +2803,11 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
   try {
     await backend.install(path);
   } finally {
+    // `close()`, deliberately NOT `grant.release()`. Remotely they are the same call; the
+    // difference is local, and it is wanted: `vk install && vk suite` in one CI job wants
+    // the claim to BRIDGE the two commands, so a sibling job on the same host cannot take
+    // the phone in between and leave the suite running against a build it never saw. The
+    // claim ages out on its own (VERIKUN_CLAIM_TTL_MIN) if no command follows.
     await backend.close?.();
   }
   // Where it LANDED, not just that it landed: after a failover that is a different
@@ -2940,6 +2970,52 @@ export function lanesFromFlags(flags: Flags, resolveAll: (spec: DevicePoolSpec) 
 }
 
 /**
+ * Take the parent's hold on every LOCAL lane, and return the lanes it may actually run.
+ *
+ * A SERVER lane is passed through untouched: its device is held by the child that leases
+ * it, under the child's own run token, and the parent has nothing to claim.
+ *
+ * `elastic` is the whole policy. `--devices all` asked for a SET, so a phone a sibling job
+ * is driving is simply not in it — dropped with a note, exactly as `vk server --devices
+ * all` drops a device whose worker will not start. A NAMED serial was asked for by name,
+ * so it throws exit 2 instead: quietly running without it would hand back less capacity
+ * than was requested with nothing saying so.
+ *
+ * `grants` is an OUT-parameter, appended to as each device is taken rather than returned
+ * at the end: the named path throws part-way through, and the caller's `finally` still has
+ * to hand back everything granted before the throw — which a return value would lose
+ * precisely when it matters. Exported for the unit suite.
+ */
+export function grantLanes(
+  lanes: Lane[],
+  platform: Platform,
+  elastic: boolean,
+  grants: DeviceGrant[],
+  o: ClaimGrantOpts = {},
+): Lane[] {
+  const kept: Lane[] = [];
+  for (const lane of lanes) {
+    if (!lane.device) {
+      kept.push(lane);
+      continue;
+    }
+    const grant = elastic
+      ? claimGrant(lane.device, platform, o)
+      : requireClaimGrant(lane.device, platform, () => [], o);
+    if (!grant) {
+      err(`[suite] ${lane.device} is held by another job — running without it`);
+      continue;
+    }
+    grants.push(grant);
+    kept.push(lane);
+  }
+  if (!kept.length) {
+    throw new CliError('every device in the pool is held by another job — see `verikun devices`.', 2);
+  }
+  return kept;
+}
+
+/**
  * The last JSON object a child printed on stdout.
  *
  * `vk ai --json` writes exactly one document, and per-step `out()` is suppressed for
@@ -3093,6 +3169,10 @@ async function runLaneTest(file: string, lane: Lane, flags: Flags, platform: Pla
   return result;
 }
 
+/** How long a lane probe may take before the device counts as not answering. Generous
+ *  for a `uiautomator dump` on a cold phone, far short of a lane's own test. */
+const PREFLIGHT_TIMEOUT_MS = 45_000;
+
 /**
  * Is this lane's device still drivable?
  *
@@ -3103,14 +3183,6 @@ async function runLaneTest(file: string, lane: Lane, flags: Flags, platform: Pla
  * device behind a live server is covered instead by the suite's consecutive-failure
  * retirement (ENV_STREAK_LIMIT in suite.ts).
  */
-/** How often the parallel parent re-stamps the claims it holds. Well inside the idle TTL
- *  (VERIKUN_CLAIM_TTL_MIN, default 5m) so a lane's phone never reads as abandoned. */
-const CLAIM_HEARTBEAT_MS = 60_000;
-
-/** How long a lane probe may take before the device counts as not answering. Generous
- *  for a `uiautomator dump` on a cold phone, far short of a lane's own test. */
-const PREFLIGHT_TIMEOUT_MS = 45_000;
-
 async function lanePreflight(lane: Lane, flags: Flags, platform: Platform): Promise<void> {
   if (lane.server) {
     await pingServer(remoteOptsFrom(lane.server, flags));
@@ -3278,21 +3350,20 @@ async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): P
   const lanes = pool.lanes;
   const sole = lanes.length && lanes.every((l) => l.device && l.device === lanes[0].device) ? lanes[0].device : undefined;
   /**
-   * Keep the parent's claims warm for the whole suite.
+   * The PARENT's hold on every local lane's device, for the suite's lifetime.
    *
-   * `touchClaim` normally rides along on `executeOutcome`, which this parent never runs:
-   * every device call happens in a child, and the children run with VERIKUN_NO_CLAIM=1.
-   * Without a heartbeat every lane's claim keeps its start-of-suite timestamp, so
-   * `vk devices` reports the whole pool as stale — and a suite outlasting
-   * `PID_TRUST_MAX_MS` has its claims read as DEAD by a concurrent job, which then takes
-   * the phones out from under the running lanes: the exact collision claims exist to
-   * prevent. Unref'd, so it can never hold the process open.
+   * One `DeviceGrant` per lane rather than a serial list plus a timer beside it: the
+   * grant owns acquire / heartbeat / release together, so this is now the only place that
+   * decides WHICH devices are held and none of the places that decide HOW. That matters
+   * because the heartbeat is not optional here — `touchClaim` normally rides along on
+   * `executeOutcome`, which this parent never runs (every device call happens in a child,
+   * and the children run with VERIKUN_NO_CLAIM=1), so without one each claim keeps its
+   * start-of-suite timestamp: `vk devices` reports the whole pool as stale, and a suite
+   * outlasting `PID_TRUST_MAX_MS` has its claims read as DEAD by a concurrent job, which
+   * then takes the phones out from under the running lanes — the exact collision claims
+   * exist to prevent.
    */
-  const claimed: string[] = [];
-  const heartbeat = setInterval(() => {
-    for (const serial of claimed) touchClaim(serial, platform);
-  }, CLAIM_HEARTBEAT_MS);
-  heartbeat.unref();
+  const grants: DeviceGrant[] = [];
   try {
     return await cmdSuite(dirArg, flags, {
       platform,
@@ -3301,35 +3372,11 @@ async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): P
       ...(pool.server ? { server: pool.server } : {}),
       // Claiming happens HERE, on the lanes the suite actually kept: taking every lane in
       // the pool up front would hold phones that `--concurrency` throttles away, refusing
-      // them to every other job on the host while nothing ran on them. Gated on
-      // claimsEnabled() like every other acquisition — VERIKUN_NO_CLAIM=1 must restore
-      // the pre-claims behaviour EXACTLY, which is what makes it debuggable by bisection.
-      claimLanes: (used) => {
-        if (!claimsEnabled()) return used;
-        const kept: Lane[] = [];
-        for (const lane of used) {
-          if (!lane.device) {
-            kept.push(lane);
-            continue;
-          }
-          // `all` is a SET; a serial list is a demand. When the operator asked for "every
-          // usable device", a phone a sibling job is driving is simply not one of them —
-          // which is what `vk server --devices all` already does. Failing the whole suite
-          // because one of three phones is busy would leave two idle and run nothing. A
-          // NAMED serial still throws: it was asked for by name.
-          if (pool.elastic && !claimDevice(lane.device, platform).ok) {
-            err(`[suite] ${lane.device} is held by another job — running without it`);
-            continue;
-          }
-          assertClaimable(lane.device, platform);
-          claimed.push(lane.device);
-          kept.push(lane);
-        }
-        if (!kept.length) {
-          throw new CliError('every device in the pool is held by another job — see `verikun devices`.', 2);
-        }
-        return kept;
-      },
+      // them to every other job on the host while nothing ran on them. VERIKUN_NO_CLAIM=1
+      // must restore the pre-claims behaviour EXACTLY (it is what makes the mechanism
+      // debuggable by bisection) — the grant constructors own that gate, so it cannot be
+      // honoured here and forgotten at the next acquisition site.
+      claimLanes: (used) => grantLanes(used, platform, pool.elastic, grants),
       runTest: (file, lane) => runLaneTest(file, lane, flags, platform, app),
       preflight: (lane) => lanePreflight(lane, flags, platform),
       // `reset` is deliberately NOT wired: against a pooled server a reset issued from
@@ -3337,12 +3384,11 @@ async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): P
       // that follows. `vk ai --reset-app` does it inside the test's own lease instead.
     });
   } finally {
-    clearInterval(heartbeat);
-    // The PARENT holds every local lane's claim, so it is the one process that hands them
-    // back; the children run with VERIKUN_NO_CLAIM=1 and have none of their own. A prepped
-    // device needs nothing further here — prep leaves it a short display timeout, so it
-    // sleeps by itself once the lanes stop reading from it.
-    releaseOwnClaims();
+    // The grants ARE this parent's claims: it builds no driver of its own (`poolSerials`
+    // only lists), so nothing else here can have taken one. The children run with
+    // VERIKUN_NO_CLAIM=1 and have none. A prepped device needs nothing further — prep
+    // leaves it a short display timeout, so it sleeps by itself once the lanes stop.
+    await releaseGrants(grants);
   }
 }
 
@@ -3367,7 +3413,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
   const pool = await buildLanePool(flags, reqPlatform);
   if (pool) return cmdSuiteParallel(dirArg, flags, pool);
 
-  const { backend, platform, device, remote, moves } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  const { backend, platform, device, grant, remote, moves } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
   const app = flagStr(flags, 'app');
   if (app) assertSafeAppId(app);
   try {
@@ -3387,8 +3433,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
     });
   } finally {
     await restoreDeviceOverrides(backend);
-    await backend.close?.();
-    releaseOwnClaims();
+    await grant.release();
   }
 }
 

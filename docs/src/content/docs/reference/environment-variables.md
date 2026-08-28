@@ -15,7 +15,7 @@ sidebar:
 | `IDB` | `idb` | Path to the `idb` binary — useful when it lives in a Python virtualenv |
 | `VERIKUN_NO_FAILOVER` | unset | Set to `1` to stop a [`vk server`](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) moving off a device that fails. Wins over `--allow-failover`, and is announced in the server's startup log. |
 | `VERIKUN_NO_CLAIM` | unset | Set to `1` to disable [device claims](/verikun/reference/device-claims/) entirely — no reads, no writes. Restores the older behaviour: more than one attached device exits `2` rather than picking a free one. |
-| `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. |
+| `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. It also paces the heartbeat of a job that holds devices without running commands itself (a parallel `vk suite`) — a quarter of the window, capped at 60s. |
 | `VERIKUN_EMULATOR` | — | Path to the Android SDK's `emulator` binary, for `vk devices start`. Only needed when it is not on `PATH`, under `$ANDROID_HOME` / `$ANDROID_SDK_ROOT`, beside `$ADB`, or in the default SDK location. Set but unusable is a hard error, never a silent fallback. |
 
 Resolution order for the device is `--device` → `VERIKUN_DEVICE` → `ANDROID_SERIAL`. With

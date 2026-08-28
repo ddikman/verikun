@@ -73,7 +73,7 @@ This constraint governs the **published CLI package**. This documentation site h
 
 ## Pure layers stay pure
 
-Three separations are load-bearing, and each has been violated at least once in a way that
+These separations are load-bearing, and each has been violated at least once in a way that
 caused a real bug:
 
 | Layer | Must not know about |
@@ -83,6 +83,7 @@ caused a real bug:
 | `image.ts` | **device I/O** — it is image maths |
 | `report.ts` | **the filesystem and the driver** — `RunState` in, strings out |
 | `agent/engine.ts` | **`cli.ts`** — dependency-injected, so no cycle and it unit-tests with a fake `exec` |
+| `device/grant.ts` | **`agent/`** — a server lease reaches it as a structural `LeaseSource`, not as an import of the remote backend, so the device layer never depends on the transport |
 
 ## Inspection has no side effects
 

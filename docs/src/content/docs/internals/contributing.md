@@ -59,12 +59,14 @@ Three separate reasons — do not "simplify" it back to a bare directory:
 
 The **platform-agnostic core** — the layers that never touch `adb` / `xcrun` / `idb`, so no
 device is needed: `args.ts`, `ui/selector.ts`, `ui/android-parse.ts`, `ui/ios-parse.ts`,
-`ui/format.ts`, `image.ts`, `report.ts`, `errors.ts`, plus pure helpers from `cli.ts`,
-`run.ts` and `drivers/adb.ts`.
+`ui/format.ts`, `image.ts`, `report.ts`, `errors.ts`, the whole of `device/` (`claims.ts`,
+`grant.ts`, `settings.ts`, `pool.ts`, `failover.ts`, `prep.ts`), plus pure helpers from
+`cli.ts`, `run.ts` and `drivers/adb.ts`.
 
 A handful of those helpers — `escapeText`, `tokenizeLine`, `evalAssert`, `parseDuration`,
 `waitWindowMs`, `parsePoint`, `healNote`, `waitNote`, `withBatchGlobals`, `stepName`,
-`rolloverReason` — are `export`ed **solely so the suite can reach them**. Keep them exported.
+`rolloverReason`, `grantLanes` — are `export`ed **solely so the suite can reach them**. Keep
+them exported.
 
 The drivers themselves and the `getElements` → `uiautomator` round-trip are intentionally
 **not** unit-tested; that is what `vk doctor` and `vk ui` against a real device cover.

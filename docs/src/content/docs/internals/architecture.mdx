@@ -168,10 +168,22 @@ so a platform gap can never be documented in one place and forgotten in another.
 |---|---|
 | `run.ts` | The `Recorder`: disk-persisted run state, implicit start and rollover, step capture, device-override snapshots, archive |
 | `report.ts` | Pure rendering: `RunState` → JUnit/HTML, `SuiteRun` → `index.json`/`index.html` |
-| `suite.ts` | `vk suite`: enumerate, run sequentially, reset between tests, retries, manifest, the CI-gate exit code. Dependency-injected; imports nothing from `cli.ts`. |
-| `server.ts` | `vk server`: HTTP+JSON with mandatory bearer auth, the `validateNode` gate, a device lock |
+| `suite.ts` | `vk suite`: enumerate, run the queue across one or more lanes, reset between tests, retries, manifest, the CI-gate exit code. Dependency-injected; imports nothing from `cli.ts`. |
+| `server.ts` | `vk server`: HTTP+JSON with mandatory bearer auth, the `validateNode` gate, leases and failover — every piece of policy stays on the main thread |
+| `server-pool.ts` | One worker thread per device, replies correlated, one command at a time per device. Mechanism only. |
+| `server-worker.ts` | The device call at the end of that pipeline, on its own thread |
 | `rpc.ts` | The pure wire contract, including the error codec that preserves thrown-error subclass identity |
+
+### Devices
+
+| File | Purpose |
+|---|---|
 | `device/settings.ts` | The device-settings capability table |
+| `device/claims.ts` | The host-global claim store — which attached device another job is already driving |
+| `device/grant.ts` | `DeviceGrant`: the one run-scoped acquire / touch / release contract, over a host claim or a `vk server` lease |
+| `device/pool.ts` | `--devices` parsing and resolution, shared by `vk server` and `vk suite` |
+| `device/failover.ts` | Pure classifiers deciding whether a failure is the artifact's or the device's |
+| `device/prep.ts` | `vk device prep`: explicit, undoable test-device setup |
 
 ### Agent (`vk ai`)
 

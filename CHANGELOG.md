@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **`VERIKUN_CLAIM_TTL_MIN`** now also paces a parallel suite's claim heartbeat — a quarter of
+  the window, capped at 60s — so a short TTL no longer races it.
+
 ## [0.26.0] - 2026-08-24
 
 ### Added
