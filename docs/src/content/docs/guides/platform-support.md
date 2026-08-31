@@ -77,7 +77,7 @@ column. The three that bite in practice:
 <tr><td><code>launch</code> / <code>open</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--clear</code> exits <code>3</code></td><td>⚠️ <code>--clear</code> exits <code>3</code></td></tr>
 <tr><td><code>stop</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>clear</code></td><td>✅ <code>pm clear</code></td><td>✅</td><td>❌ <code>3</code> — no per-app reset</td><td>❌ <code>3</code> — no per-app reset</td></tr>
-<tr><td><code>install</code></td><td>✅ <code>.apk</code></td><td>✅ <code>.apk</code></td><td>✅ <code>.ipa</code> or <code>.app</code></td><td>✅ <code>.ipa</code> or <code>.app</code></td></tr>
+<tr><td><code>install</code></td><td>✅ <code>.apk</code> — replaces a differently-signed build</td><td>✅ <code>.apk</code> — replaces a differently-signed build</td><td>⚠️ <code>.ipa</code> or <code>.app</code> — no replace</td><td>⚠️ <code>.ipa</code> or <code>.app</code> — no replace</td></tr>
 <tr><th colspan="5">Device state</th></tr>
 <tr><td><code>device set</code></td><td>✅ all eight keys</td><td>✅ all eight keys</td><td>⚠️ four of eight</td><td>❌ <code>3</code> — none</td></tr>
 <tr><td><code>device get</code></td><td>✅</td><td>✅</td><td>⚠️ four of eight</td><td>⊘ <code>n/a</code> for every key</td></tr>
@@ -124,6 +124,12 @@ Notes on the rows that carry a caveat:
 - **`suite --app` does not reset app data on iOS.** It degrades to a force-stop. If your test
   depends on starting logged-out, that assumption does not hold there — see
   [Suites](/verikun/guides/suites/).
+- **`install` replaces a differently-signed build on Android only.** Android refuses to update
+  a package across signing keys, which is routine on a shared device — a release build from one
+  job, a debug build from another. On Android verikun removes the installed build and installs
+  again, warning on stderr that its app data is gone; a same-key install still keeps its data.
+  On iOS the install simply fails, for the same reason failover cannot read `idb`'s output:
+  its failure vocabulary is not the `INSTALL_FAILED_*` set and verikun has not measured it.
 - **A device pool is one platform.** `vk server --devices` serves one platform per server, and
   `vk suite --servers a,b` refuses (exit `2`) when the servers report different ones. A pool is
   a set of *interchangeable* devices; running one suite on Android and iOS is a matrix, which

@@ -478,6 +478,12 @@ leased by another run; `503` means the server has no device attached — boot on
 (below). To expose a device from THIS machine: `vk server --allow-install`
 (add `--bind <addr>` to leave loopback; auth key auto-generates if unset).
 
+**`vk install` on Android replaces a build signed by a different key.** Android refuses
+to update a package across signing keys, so verikun removes the installed build and
+installs again, warning on stderr that **that build's app data is gone**. A same-key
+install still keeps its data. Do not treat the warning as a failure — it is how the
+install succeeded. iOS has no equivalent recovery; the install just fails there.
+
 `vk server --devices all` (or `all-android` / `all-ios` / a serial list) serves a **pool**
 from one address. Each run leases one device for its whole life, so a run's steps and
 repairs always land on the same phone. `vk install --server` then installs on every device;

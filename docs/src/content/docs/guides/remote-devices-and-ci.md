@@ -154,6 +154,13 @@ in (below).
 only single-file `.apk` / `.ipa` uploads, writes to a **server-generated** temp path (never a
 client-supplied one), and verifies a sha256 of the body.
 
+That one flag also authorizes the removal an install sometimes needs. On Android a build signed
+by a different key than the one already installed cannot be updated over, so the server removes
+the installed build and installs again — losing that build's app data, and logging it. There is
+no separate permission, because a server you may hand an arbitrary binary to write is not more
+trusted by also being allowed to delete the build that binary replaces. If you do not want that,
+do not pass `--allow-install`.
+
 ### Device control is opt-in, and naming is allowlisted
 
 `--allow-device-control` lets an authenticated client `restart` or `stop` **the server's own
@@ -505,6 +512,7 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 | `401` | The auth key does not match. Both sides must use the same `VERIKUN_SERVER_AUTH_KEY`. |
 | Exit `3`, "server unreachable" | Network path, not verikun. Check the tailnet is up on the runner. |
 | Installs rejected | The server was started without `--allow-install`. |
+| `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / `signatures do not match` | The device holds a build of the same package signed by a different key. On Android the server removes it and retries by itself; if it still fails, the message names the package and the `adb uninstall` to run on the host. iOS has no such recovery. |
 | `not enough space` / `INSTALL_FAILED_INSUFFICIENT_STORAGE` | The device's disk is full. With failover on the server moves to another attached device by itself; if it reports `no working device remains`, free space on the named device or `vk devices restart` it. |
 | The suite ran on a device you did not expect | The server failed over. `[verikun] server moved device:` on the client, and `/v1/health`'s `quarantined`, say which device was ruled out and why. |
 | Steps take ~2.4s each on Android | The server is on the stock read path. `curl "$VERIKUN_SERVER/v1/health" \| jq .reads` says which, and why — most often `VERIKUN_COMPANION` is set in the **server's** environment, or the [companion](/verikun/guides/companion/) declined on that device. |
