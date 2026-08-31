@@ -205,7 +205,13 @@ committed generated files are current, verifies `package-lock.json` is in sync, 
 suite and the packaging check, then publishes with **provenance**.
 
 A tag carrying a prerelease suffix (`v1.0.0-rc.1`) goes out under the `next` dist-tag rather
-than `latest`.
+than `latest`, so `npm install -g verikun` is untouched and testers opt in with
+`npm install -g verikun@next`. The GitHub release is marked as a pre-release too.
+
+Its release notes come from the section of **the release it is a candidate for** —
+`v1.0.0-rc.1` uses `## [1.0.0]` — so an rc does not need a changelog section of its own.
+Give it one anyway (`## [1.0.0-rc.1]`) when the rc needs to say something the final release
+will not, and that exact heading wins.
 
 The GitHub release is a **separate job** — so if the publish succeeded and only that job
 failed, *do not* re-push the tag (the republish would fail). Re-run the job, or create the

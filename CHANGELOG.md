@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Release workflow**: a prerelease tag takes its GitHub release notes from the version it is a candidate for (`v1.0.0-rc.1` → `## [1.0.0]`).
+
 ## [0.25.1] - 2026-08-21
 
 ### Changed
