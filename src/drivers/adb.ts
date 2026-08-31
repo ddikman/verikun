@@ -259,7 +259,23 @@ export function severanceRisk(transport: AdbTransport, key: SettingKey, value: s
 }
 
 /**
+ * Is this install failure a signing-key conflict? PURE — exported for the unit suite.
+ *
+ * Separate from `blockingPackage` because the two answer different questions, and a
+ * caller that treats "named no package" as "was a conflict" turns EVERY install failure
+ * — a full disk, an offline device, an unparseable APK — into a confident wrong answer
+ * about signing keys. Both spellings are checked: the code is what modern adb prints,
+ * the phrase is what survives when an OEM or a truncation drops the code.
+ */
+export function isSignatureConflict(adbOutput: string): boolean {
+  return /INSTALL_FAILED_UPDATE_INCOMPATIBLE|signatures do not match/i.test(adbOutput);
+}
+
+/**
  * The package a signature conflict names, or null. PURE — exported for the unit suite.
+ *
+ * Ask `isSignatureConflict` FIRST — a null here means "no package named", never "not a
+ * conflict", and the two need different messages.
  *
  * Android will not update a package across signing keys, so a device already holding a
  * differently-signed build of the same package rejects every install of it. That is a
@@ -1056,6 +1072,13 @@ export class AdbDriver implements Driver {
     // data, which is the common case and has to stay lossless. Data is destroyed only
     // where the install would otherwise have failed outright, which is why this needs no
     // opt-in flag — nothing that used to survive stops surviving.
+    //
+    // TWO QUESTIONS, ASKED IN THIS ORDER, and collapsing them is a bug: "is this a
+    // signature conflict?" and only then "which package does it name?". A full disk, an
+    // offline device or an unparseable APK is not a conflict and must keep the plain
+    // message it has always had — both because a signing-key diagnosis would be a
+    // confident wrong answer, and because `device/failover.ts` classifies on that string.
+    if (!isSignatureConflict(first)) throw new CliError(`Failed to install '${appPath}': ${first}`, 3);
     const pkg = blockingPackage(first);
     if (!pkg) throw new CliError(signatureConflictHelp(appPath, null, 'not-named', first), 3);
 

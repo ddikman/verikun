@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { blockingPackage, signatureConflictHelp } from '../src/drivers/adb';
+import { blockingPackage, isSignatureConflict, signatureConflictHelp } from '../src/drivers/adb';
 
 // The two wordings adb has used, inside the envelope the driver actually collapses.
 const CURRENT =
@@ -17,6 +17,34 @@ const CURRENT =
 const OLDER =
   'Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package com.example.app signatures do not ' +
   'match previously installed version; ignoring!]';
+
+// Every install failure that is NOT a conflict keeps the plain message it has always
+// had. This is the pairing `install` has to get right: `blockingPackage` returning null
+// means "named no package", NOT "was not a conflict", and reading it as the latter makes
+// a full disk report a signing-key mismatch and recommend `adb uninstall`. It also feeds
+// device/failover.ts, which classifies on the thrown string.
+test('isSignatureConflict: only a signing conflict, not every install failure', () => {
+  for (const out of [CURRENT, OLDER, 'Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]']) {
+    assert.equal(isSignatureConflict(out), true, out);
+  }
+  for (const out of [
+    'Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]',
+    'Failure [INSTALL_PARSE_FAILED_NO_CERTIFICATES]',
+    'Failure [INSTALL_FAILED_NO_MATCHING_ABIS]',
+    'java.io.IOException: Requested internal only, but not enough space',
+    'adb: device offline',
+    'exit code 1',
+    '',
+  ]) {
+    assert.equal(isSignatureConflict(out), false, out);
+  }
+});
+
+test('isSignatureConflict: the code and the phrase are each enough on their own', () => {
+  // An OEM wording or a truncated detail can carry one without the other.
+  assert.equal(isSignatureConflict('Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]'), true);
+  assert.equal(isSignatureConflict('Package com.foo signatures do not match'), true);
+});
 
 test('blockingPackage: names the package in both adb wordings', () => {
   assert.equal(blockingPackage(CURRENT), 'com.example.app');
