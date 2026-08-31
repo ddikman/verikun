@@ -113,7 +113,9 @@ const DEVICE_STATE_RULES: readonly Rule[] = [
   // what decides. Keep both: they only shape the message.
   [/INSTALL_FAILED_INSUFFICIENT_STORAGE/, 'the device is out of space'],
   [/Requested internal only, but not enough space|not enough space/i, 'the device is out of space'],
-  [/INSTALL_FAILED_UPDATE_INCOMPATIBLE/, 'a differently-signed build of this package is installed on the device'],
+  // `install` already tried removing it and reinstalling (drivers/adb.ts); reaching here
+  // means that did not work, so the wording must not imply nothing was attempted.
+  [/INSTALL_FAILED_UPDATE_INCOMPATIBLE/, 'a differently-signed build could not be replaced on the device'],
   [/INSTALL_FAILED_VERSION_DOWNGRADE/, 'the device holds a newer build of this package'],
   [/INSTALL_FAILED_ALREADY_EXISTS/, 'the package is already installed on the device'],
   [/INSTALL_FAILED_DUPLICATE_PERMISSION/, 'another app on the device declares one of these permissions'],

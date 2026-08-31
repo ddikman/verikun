@@ -258,6 +258,91 @@ export function severanceRisk(transport: AdbTransport, key: SettingKey, value: s
   return transport === 'tcp' && key === 'airplane' && value === 'on';
 }
 
+/**
+ * Is this install failure a signing-key conflict? PURE — exported for the unit suite.
+ *
+ * Separate from `blockingPackage` because the two answer different questions, and a
+ * caller that treats "named no package" as "was a conflict" turns EVERY install failure
+ * — a full disk, an offline device, an unparseable APK — into a confident wrong answer
+ * about signing keys. Both spellings are checked: the code is what modern adb prints,
+ * the phrase is what survives when an OEM or a truncation drops the code.
+ */
+export function isSignatureConflict(adbOutput: string): boolean {
+  return /INSTALL_FAILED_UPDATE_INCOMPATIBLE|signatures do not match/i.test(adbOutput);
+}
+
+/**
+ * The package a signature conflict names, or null. PURE — exported for the unit suite.
+ *
+ * Ask `isSignatureConflict` FIRST — a null here means "no package named", never "not a
+ * conflict", and the two need different messages.
+ *
+ * Android will not update a package across signing keys, so a device already holding a
+ * differently-signed build of the same package rejects every install of it. That is a
+ * routine state on a shared device (a release build from one job, a debug build from
+ * another), and the only way out is to REMOVE the installed build — which `install`
+ * does automatically, and needs the package name for.
+ *
+ * adb names it in the failure itself, in one of two long-stable wordings. Reading it
+ * there beats every alternative: `aapt dump badging` needs build-tools that may not be
+ * installed, and decoding an APK's binary AndroidManifest is far outside a zero-dep repo.
+ *
+ * The pattern doubles as the SAFETY GATE. It can only ever yield `[A-Za-z0-9._]+`, so no
+ * caller-influenced string reaches a command line — the same closed-alphabet argument
+ * `device/settings.ts` makes, rather than a separate `assertSafeAppId` call that a later
+ * edit could drop. `adb uninstall` is an adb-level verb anyway, never `adb shell`, so
+ * nothing here is re-concatenated into a device-side command line.
+ */
+export function blockingPackage(adbOutput: string): string | null {
+  // "Existing package com.foo signatures do not match newer version" (current) and
+  // "Package com.foo signatures do not match previously installed version" (older).
+  // The trailing phrase is load-bearing, not decoration: it is what makes an id with a
+  // stray character fail the WHOLE match instead of yielding the prefix before it.
+  const m = /(?:Existing package|Package)\s+([A-Za-z0-9._]+)\s+signatures do not match/i.exec(adbOutput);
+  return m ? m[1] : null;
+}
+
+/** Which step of the automatic replace ran out of road. Shapes the message, not the code. */
+export type ReplaceOutcome =
+  /** Removed the blocking build, installed again, still refused. */
+  | 'retry-failed'
+  /** Found the blocking package but could not remove it (device admin, managed profile). */
+  | 'remove-failed'
+  /** adb reported a conflict without naming a package, so there was nothing to remove. */
+  | 'not-named';
+
+/**
+ * The message a signature conflict `install` could not resolve by itself. PURE —
+ * exported for the unit suite.
+ *
+ * Names the CAUSE and the REMEDY rather than forwarding adb's string, because the raw
+ * string ("signatures do not match newer version") reads as a corrupt build and sends
+ * people to rebuild an APK that was fine. It is also the only thing a `--server` caller
+ * sees: they have no shell on the host holding the device, so the message has to carry
+ * the whole diagnosis — including which half of the automatic replace failed, since
+ * "could not remove it" and "removed it and it still refused" need different next steps.
+ */
+export function signatureConflictHelp(
+  appPath: string,
+  pkg: string | null,
+  outcome: ReplaceOutcome,
+  detail: string,
+): string {
+  const target = pkg ? `'${pkg}'` : 'this package';
+  const tried =
+    outcome === 'retry-failed'
+      ? `verikun removed ${target} and installed again; the device still refused.`
+      : outcome === 'remove-failed'
+        ? `verikun could not remove ${target}.`
+        : "adb did not name the installed package, so verikun had nothing to remove.";
+  return (
+    `Failed to install '${appPath}': the device already holds a build of ${target} signed by a ` +
+    `different key, and Android will not update a package across signing keys.\n` +
+    `  ${tried} adb said: ${detail}\n` +
+    `  On the machine holding the device: adb ${pkg ? `uninstall ${pkg}` : 'uninstall <package>'}`
+  );
+}
+
 /** How long a written setting has to read back before we call it refused. These are
  *  local writes, so they land in well under a second or not at all. */
 const VERIFY_TIMEOUT_MS = 4000;
@@ -975,15 +1060,77 @@ export class AdbDriver implements Driver {
   }
 
   install(appPath: string): void {
-    // `-r` reinstalls over an existing package keeping its data (the common
-    // update-the-build-under-test case). A large APK can legitimately take
-    // minutes to stream + install, so the timeout is far above the 30s default.
-    // adb reports failures both as a non-zero exit AND as a `Failure [REASON]`
-    // line on stdout with exit 0 (varies by adb version) — check both.
+    const first = this.tryInstall(appPath);
+    if (!first) return;
+
+    // A SIGNATURE CONFLICT is the one install failure the device can be talked out of,
+    // and until 0.26 nothing could: `clear` wipes data, not the certificate, and over
+    // `--server` there is no shell to run `adb uninstall` from — so one stale build
+    // stranded the device and every CI run against it (#96). Replace it and retry.
+    //
+    // On FAILURE only, never up front: with the same signing key `-r` keeps the app's
+    // data, which is the common case and has to stay lossless. Data is destroyed only
+    // where the install would otherwise have failed outright, which is why this needs no
+    // opt-in flag — nothing that used to survive stops surviving.
+    //
+    // TWO QUESTIONS, ASKED IN THIS ORDER, and collapsing them is a bug: "is this a
+    // signature conflict?" and only then "which package does it name?". A full disk, an
+    // offline device or an unparseable APK is not a conflict and must keep the plain
+    // message it has always had — both because a signing-key diagnosis would be a
+    // confident wrong answer, and because `device/failover.ts` classifies on that string.
+    if (!isSignatureConflict(first)) throw new CliError(`Failed to install '${appPath}': ${first}`, 3);
+    const pkg = blockingPackage(first);
+    if (!pkg) throw new CliError(signatureConflictHelp(appPath, null, 'not-named', first), 3);
+
+    // Loud, because it is destructive and nobody asked for it in so many words.
+    err(
+      `note: '${pkg}' on this device is signed by a different key — removing it (its data is ` +
+        `lost) and installing again`,
+    );
+    try {
+      this.uninstallPackage(pkg);
+    } catch (e) {
+      throw new CliError(signatureConflictHelp(appPath, pkg, 'remove-failed', (e as Error).message), 3);
+    }
+
+    const second = this.tryInstall(appPath);
+    if (second) throw new CliError(signatureConflictHelp(appPath, pkg, 'retry-failed', second), 3);
+  }
+
+  /**
+   * One `adb install -r` attempt: null on success, else adb's collapsed output.
+   *
+   * Returns rather than throws because the caller has to READ the failure to decide
+   * whether it is recoverable — and a thrown-and-caught CliError would put the final
+   * message's own prefix inside the message it is composing.
+   *
+   * `-r` reinstalls over an existing package keeping its data (the common
+   * update-the-build-under-test case). A large APK can legitimately take minutes to
+   * stream + install, so the timeout is far above the 30s default. adb reports failures
+   * both as a non-zero exit AND as a `Failure [REASON]` line on stdout with exit 0
+   * (varies by adb version) — check both, and require `Success` positively rather than
+   * merely inferring it from the absence of `Failure`.
+   */
+  private tryInstall(appPath: string): string | null {
     const r = runText(ADB, this.withSerial(['install', '-r', appPath]), { timeout: 10 * 60 * 1000 });
     const combined = `${r.stdout}\n${r.stderr}`;
     if (r.code !== 0 || /^Failure\b/im.test(combined) || !/^Success\b/im.test(combined)) {
-      throw new CliError(`Failed to install '${appPath}': ${combined.replace(/\s+/g, ' ').trim() || `exit code ${r.code}`}`, 3);
+      return combined.replace(/\s+/g, ' ').trim() || `exit code ${r.code}`;
+    }
+    return null;
+  }
+
+  /**
+   * Remove a package and its data. `adb uninstall` is an adb-level verb like `install`,
+   * not an `adb shell` command, so `pkg` is never re-concatenated into a device-side
+   * command line — and `blockingPackage`, its only caller's source, can emit nothing
+   * outside `[A-Za-z0-9._]+` regardless.
+   */
+  private uninstallPackage(appId: string): void {
+    const r = runText(ADB, this.withSerial(['uninstall', appId]), { timeout: 60 * 1000 });
+    const combined = `${r.stdout}\n${r.stderr}`;
+    if (r.code !== 0 || /^Failure\b/im.test(combined) || !/^Success\b/im.test(combined)) {
+      throw new CliError(combined.replace(/\s+/g, ' ').trim() || `exit code ${r.code}`, 3);
     }
   }
 

@@ -59,7 +59,7 @@ They are not redacted.
 | `launch <app> [--clear] [--no-restart]` <br/>*alias:* `open` | Start an app by package id (Android) or bundle id (iOS). **Restarts by default** — see below. |
 | `stop <app>` | Force-stop the app. |
 | `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to just-installed state (Android `pm clear`, which also force-stops). **iOS unsupported**: there is no per-app data reset. |
-| `install <app.apk\|.ipa> [--server url]` | Install a build (`adb install -r` / `idb install`). With `--server`, the file is uploaded to a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) started with `--allow-install` (single-file `.apk`/`.ipa`, sha256-verified). |
+| `install <app.apk\|.ipa> [--server url]` | Install a build (`adb install -r` / `idb install`). With `--server`, the file is uploaded to a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) started with `--allow-install` (single-file `.apk`/`.ipa`, sha256-verified). **Android**: if the device holds a build of the same package signed by a *different* key, that build is removed and the install retried — **its app data is lost**, and a note says so on stderr. Same-key installs keep their data as before. |
 
 ### Why `launch` restarts by default
 
