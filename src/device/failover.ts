@@ -255,7 +255,7 @@ export function failoverCandidates(
 ): DeviceInfo[] {
   const excluded = new Set(opts.exclude.filter(Boolean));
   const allow = opts.allow ?? [];
-  return devices.filter((d) => {
+  const eligible = devices.filter((d) => {
     // An unbooted AVD is { serial: '', state: 'shutdown' } and has no adb address.
     // Failover is lateral, never upward: booting is `vk devices start`'s job.
     if (!d.serial) return false;
@@ -266,6 +266,14 @@ export function failoverCandidates(
     if (allow.length && !allow.includes(d.serial) && !(d.name && allow.includes(d.name))) return false;
     return true;
   });
+  // With an explicit allowlist the operator has already said which devices are fair game,
+  // their own phone included. WITHOUT one, a PHYSICAL device is a last resort: a bare
+  // `--allow-failover` (or the default on an unpinned server) must not quietly start
+  // driving somebody's handset because an emulator wedged. Same judgement `--devices all`
+  // makes in device/pool.ts, and for the same reason.
+  if (allow.length) return eligible;
+  const virtual = eligible.filter((d) => d.kind === 'emulator' || d.kind === 'simulator');
+  return virtual.length ? virtual : eligible;
 }
 
 /**
@@ -276,6 +284,14 @@ export function failoverCandidates(
  * backends into a module whose whole value is being pure. One line of duplication is the
  * cheaper side of that trade.
  */
-function isUsableState(state: string): boolean {
-  return state === 'device' || state === 'booted';
+export function isUsableState(state: string): boolean {
+  // `connected` is devicectl's word for a physical iPhone, matched loosely because the
+  // string it reports is not a fixed token — `IdbDriver` filters the same way. Without
+  // it a physical iOS device can be neither pooled nor failed over onto.
+  //
+  // Loosely, but not carelessly: an unanchored `/connected/i` also matches `disconnected`
+  // and `not connected`, which would pool — and fail over ONTO — a phone that is not
+  // there. Rule those out first, since devicectl's column is free text we do not control.
+  if (/\bdis-?connected\b|\bnot\s+connected\b|unavailable/i.test(state)) return false;
+  return state === 'device' || state === 'booted' || /\bconnected\b/i.test(state);
 }

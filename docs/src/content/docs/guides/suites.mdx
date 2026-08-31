@@ -9,18 +9,24 @@ import { Image } from 'astro:assets';
 import suiteOverview from '../../../../pr/55-suite-retries-overview.png';
 
 `vk suite <dir>` runs every `*.md` in a directory through the
-[`vk ai`](/verikun/guides/natural-language-tests/) engine, sequentially, against one shared
-device — local or [remote](/verikun/guides/remote-devices-and-ci/):
+[`vk ai`](/verikun/guides/natural-language-tests/) engine, against one device — local or
+[remote](/verikun/guides/remote-devices-and-ci/) — or across a whole pool of them:
 
 ```sh
 vk suite tests/ --app com.example.app                              # local device
 vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote device
+vk suite tests/ --app com.example.app --devices emu-5554,emu-5556  # two local devices
 ```
+
+Suite time is the **sum** of its tests on one device, so a suite grows linearly and eventually
+stops being something you run on every push. See [Running across several
+devices](#running-across-several-devices).
 
 ## How it runs
 
 - **Ordering is lexicographic.** Prefix files `01-…`, `02-…` to sequence them. `README.md`
-  is skipped — it documents the suite, it is not a test.
+  is skipped — it documents the suite, it is not a test. (Across a pool, ordering can no
+  longer sequence anything — see below.)
 - **Isolation between tests.** With `--app <id>`, the app's data is cleared before each test
   (`pm clear`; iOS degrades to a force-stop, since it has no per-app reset). Without
   `--app`, make each test self-isolating — start the prose with `launch <pkg> --clear`.
@@ -29,8 +35,8 @@ vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"   # remote devi
   does not stop the suite; the rest still run.
 - **All `ai` flags apply to every test** — `--model`, `--max-cost-usd`, `--timeout`, and so
   on. That makes the spend ceiling **per test, not per suite**: at the \$3 default, a 20-test
-  suite can reach \$60. There is no suite-wide cap — see
-  [Cost & budget](/verikun/reference/cost/#the-budget).
+  suite can reach \$60. `--max-suite-cost-usd` adds an aggregate cap on top (off by default) —
+  see [Cost & budget](/verikun/reference/cost/#the-budget).
 - **Preflight is up front.** Both the provider (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or
   the `codex` / `cursor-agent` CLI) **and** the device toolchain (`adb` / `idb` plus a
   resolvable device) are checked before anything is compiled.
@@ -89,6 +95,74 @@ That re-probe matters: a transient `uiautomator` dump failure also exits `3`, an
 vaporise a 20-test run. But continuing on a genuinely dead box just produces one identical
 red row per remaining test — noise that reads exactly like a mass regression.
 
+## Running across several devices
+
+Point the suite at a pool and it stops being a loop: every device takes the next test the
+moment it frees up.
+
+```sh
+# a pool of local devices — named, or every usable one
+vk suite tests/ --app com.example.app --devices emulator-5554,emulator-5556
+vk suite tests/ --app com.example.app --devices all-android
+
+# one server that holds several devices — the suite sizes itself from its capacity
+vk server --devices all --bind 0.0.0.0            # on the device host
+vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
+
+# several hosts, each with its own server — one lane per device each of them serves
+vk suite tests/ --app com.example.app --servers http://a:8391,http://b:8391
+```
+
+`--devices` names devices on **this** machine, so combining it with `--server` is a usage
+error (exit `2`) rather than a suite that quietly tests the wrong host. `all` /
+`all-android` / `all-ios` mean exactly what they mean for
+[`vk server --devices`](/verikun/guides/remote-devices-and-ci/#serving-several-devices-from-one-address).
+
+The split is **dynamic**, not a partition you maintain: a device that draws three short tests
+simply comes back for a fourth. That matters because real suites have a wide duration spread,
+and any static split forfeits part of what the extra devices bought.
+
+Wall-clock falls to roughly the length of the **slowest single test**, so past that point more
+devices buy nothing — the useful number is small, and it rises only as the suite grows.
+
+### What changes when you use a pool
+
+- **File order no longer sequences anything.** Tests must be independent. Longest-first
+  ordering is taken from the previous run's `index.json`, so cache `./.verikun/suites` in CI
+  the way you already cache `./.verikun/plans`.
+- **Every test is its own process**, one per device at a time. That is what makes the
+  parallelism real — every device call underneath is a blocking shell-out — and it gives each
+  test crash isolation and its own active run directory (`./.verikun/run-<lane>/`).
+- **Each row names the device that ran it**, in `index.json` and in the overview table. That
+  is what makes "is this device bad, or is this test bad?" answerable.
+- **Duration splits in two.** `totals.wallClockMs` is how long the gate took;
+  `totals.durationMs` keeps its meaning but is now device-seconds across the pool.
+- **`--app` resets inside the test**, on the device that test holds — a reset issued from
+  outside could land on a different device than the test that follows.
+- **A device that breaks retires its lane.** Its remaining tests move to the others; the suite
+  aborts (exit `3`) only when every device is gone.
+- **`--ensure-device` is refused with `--devices`.** Its bare form boots "the one startable
+  device", which may well be another lane's emulator — start the pool yourself with
+  [`vk devices start`](/verikun/reference/commands/).
+- **Every lane must share a platform.** A pool is a set of interchangeable devices; running the
+  same suite on Android *and* iOS is a matrix, which you express by running it twice.
+
+### Throttling and budget
+
+```sh
+vk suite tests/ --devices emu-1,emu-2,emu-3 --concurrency 2 --max-suite-cost-usd 5
+```
+
+`--concurrency` caps how many devices run at once. More is not monotonically better: three
+emulators on one host can thrash it badly enough to produce timeouts that look like test
+failures, so a pool is a ceiling and this is the throttle. Separate hosts, or physical devices,
+deliver the win that stacked emulators do not.
+
+`--max-suite-cost-usd` stops dequeuing once total model spend crosses it and exits `1` (the box
+is fine; the run just did not finish). It is off by default — `--max-cost-usd` already caps each
+test, so the total was always bounded; what a pool changes is the rate. See
+[Cost & budget](/verikun/reference/cost/#the-budget) for how the two ceilings interact.
+
 ## The overview report
 
 The suite writes to `./.verikun/suites/<id>/`:
@@ -102,18 +176,21 @@ This is the **output contract for reporting**. Upload and publish steps compose 
 the [CI guide](/verikun/guides/remote-devices-and-ci/#publishing-results-elsewhere)) rather
 than verikun growing upload plugins.
 
-On an abort it also carries `aborted: {reason, notRun}`. The not-run tests get **no rows and
-no place in `totals`**, so `passed + failed === tests` still holds and nothing downstream
-mistakes a skipped test for a regression.
+On an abort it also carries `aborted: {reason, notRun, kind}`. The not-run tests get **no rows
+and no place in `totals`**, so `passed + failed === tests` still holds and nothing downstream
+mistakes a skipped test for a regression. `kind` is `environment` (exit `3`) or `budget`
+(exit `1`).
 
-Retried flakes add `flaky` and `attempts` on the test row plus suite-level `warnings`. These
+Retried flakes add `flaky` and `attempts` on the test row plus suite-level `warnings`. A
+parallel suite adds `concurrency`, `totals.wallClockMs` and a per-test `device`. All of these
 are additive, so `schemaVersion` stays `1`.
 
 ### `index.html`
 
 A summary page linking every test's `report.html`, with a banner naming the not-run tests
 when the suite aborted, and a warnings banner when a flake recovered on retry (prior failed
-attempts stay linked).
+attempts stay linked). A parallel run adds a **Device** column and reports wall-clock beside
+device time.
 
 ## Where to go next
 

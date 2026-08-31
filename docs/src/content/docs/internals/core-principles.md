@@ -32,15 +32,21 @@ confirmation line out of it.
 
 ## `--json` everywhere, including errors
 
-When `--json` is set, the catch in `run()` emits `{error, exitCode}` as JSON. New commands
-should honour `--json` for their success output too.
+When `--json` is set, the catch in `run()` emits `{error, exitCode, errorKind}` as JSON.
+New commands should honour `--json` for their success output too.
 
 The point is that a caller sets `--json` once and parses both outcomes the same way.
+`errorKind` carries the error's **class** — `SelectorNotFoundError`,
+`AmbiguousSelectorError`, `NoWindowError`, `CliError`, `Error` — so a caller can tell
+"the app has not drawn yet" from "the device is gone" without matching on message text,
+which is the same job `rpc.ts`'s codec does across the HTTP boundary.
 
 ## No host shell, ever
 
-`exec.ts` runs everything via `spawnSync` with an **args array** — no `shell: true` — so
-host-side injection is impossible.
+`exec.ts` runs everything with an **args array** — no `shell: true` — so host-side
+injection is impossible. Almost all of it is `spawnSync`; the two exceptions are
+`spawnDetached` (the emulator must outlive the CLI) and `spawnCollect` (a parallel suite
+must not block on its lane children), and both take the same args array.
 
 *Device-side* shell escaping (for `adb shell input text …`) is the driver's job: see
 `escapeText()` in `drivers/adb.ts`. The allowlist is: backslash-escape **all** ASCII
@@ -67,7 +73,7 @@ This constraint governs the **published CLI package**. This documentation site h
 
 ## Pure layers stay pure
 
-Three separations are load-bearing, and each has been violated at least once in a way that
+These separations are load-bearing, and each has been violated at least once in a way that
 caused a real bug:
 
 | Layer | Must not know about |
@@ -77,6 +83,7 @@ caused a real bug:
 | `image.ts` | **device I/O** — it is image maths |
 | `report.ts` | **the filesystem and the driver** — `RunState` in, strings out |
 | `agent/engine.ts` | **`cli.ts`** — dependency-injected, so no cycle and it unit-tests with a fake `exec` |
+| `device/grant.ts` | **`agent/`** — a server lease reaches it as a structural `LeaseSource`, not as an import of the remote backend, so the device layer never depends on the transport |
 
 ## Inspection has no side effects
 

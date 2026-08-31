@@ -9,6 +9,7 @@ import { CliError, probeFailure } from '../errors';
 import { runText } from '../exec';
 import { parseIosHierarchy } from '../ui/ios-parse';
 import { viewportFor } from '../ui/viewport';
+import { isUsableState } from '../device/failover';
 import {
   SettingKey,
   canonicalFontScale,
@@ -390,7 +391,11 @@ export class IdbDriver implements Driver {
    */
   private claimCandidates(sims: DeviceInfo[]): DeviceInfo[] {
     const bootedSims = sims.filter((d) => d.state === 'booted');
-    return bootedSims.length > 0 ? bootedSims : listPhysicalDevices().filter((d) => /connected/i.test(d.state));
+    // `isUsableState`, not a bare `/connected/i`: that also matches `disconnected` and
+    // `not connected`, so an unplugged phone reads as a candidate. The pool and failover
+    // ask the same predicate, and a driver that disagrees with them about which phones
+    // exist is the drift device/failover.ts owns this rule to prevent.
+    return bootedSims.length > 0 ? bootedSims : listPhysicalDevices().filter((d) => isUsableState(d.state));
   }
 
   private udid(): string {

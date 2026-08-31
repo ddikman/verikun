@@ -10,6 +10,7 @@
 // Platform specifics stay in adb.ts / ios.ts, as CLAUDE.md requires; this module is
 // the dispatcher plus the pure target-resolution rules that cli.ts and server.ts share.
 
+import { isUsableState } from '../device/failover';
 import { DeviceKind, Platform, StartOpts, StartResult, StopOpts, StopResult } from '../types';
 import { CliError } from '../errors';
 import { DEFAULT_STOP_TIMEOUT_MS } from '../wait';
@@ -44,7 +45,11 @@ export interface DeviceLifecycle {
 
 /** Is this target usable right now? The two platforms spell it differently. */
 export function isRunning(t: LifecycleTarget): boolean {
-  return t.state === 'device' || t.state === 'booted';
+  // The SAME predicate the pool and failover ask. It was a local copy of
+  // `state === 'device' || 'booted'` and drifted the moment that one learned devicectl's
+  // `connected`: `chooseTarget`'s `prefer: 'running'` then read a connected iPhone as
+  // not-running and resolved ambiguity the wrong way against a device the pool enlists.
+  return isUsableState(t.state);
 }
 
 /** How a target is displayed and re-addressed: prefer the human name. */

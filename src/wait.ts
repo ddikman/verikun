@@ -60,3 +60,23 @@ export async function pollUntil<T>(
     await sleep(Math.min(interval, deadline - now));
   }
 }
+
+/**
+ * A promise-chain mutex: each call runs only after the previous one has settled.
+ *
+ * Two details carry the correctness, which is why this is one function rather than four
+ * lines re-typed at each site. Chaining with `.then(fn, fn)` means a REJECTED predecessor
+ * still lets the queue advance — otherwise one failure wedges every later caller. And the
+ * retained tail drops the payload, so an idle queue does not pin the last command's
+ * result (a screenshot Buffer, a logcat dump) for as long as nothing else runs.
+ *
+ * Used for `vk server`'s failover gate and for each pooled device's command queue.
+ */
+export function serialQueue(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = tail.then(fn, fn);
+    tail = next.then(() => undefined, () => undefined);
+    return next;
+  };
+}

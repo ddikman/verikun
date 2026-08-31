@@ -170,3 +170,18 @@ test('toSuiteHtml: the warnings banner escapes its text', () => {
   assert.ok(html.includes('saw &lt;tag&gt; &amp; more'));
   assert.ok(!html.includes('saw <tag> & more'));
 });
+
+test('toSuiteHtml: the Device column follows the ROWS, not the lane count', () => {
+  // A pooled server the suite sized to one lane, or `--concurrency 1` over two phones,
+  // still ran somewhere the header cannot name — and gating the column on
+  // `concurrency > 1` made that pooled run report LESS than the plain command it
+  // replaced. Conversely a serial run must not grow a redundant column.
+  const pooled: SuiteRun = { ...suite([result({ device: 'emulator-5554' })]), device: undefined };
+  const html = toSuiteHtml(pooled);
+  assert.match(html, /<th>Device<\/th>/);
+  assert.match(html, /emulator-5554/);
+
+  const serial = suite([result({ device: 'R58R42SGVNR' })]); // same serial as the header
+  assert.doesNotMatch(toSuiteHtml(serial), /<th>Device<\/th>/, 'the header already says it');
+  assert.doesNotMatch(toSuiteHtml(suite([result()])), /<th>Device<\/th>/);
+});

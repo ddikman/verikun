@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Driver, Element } from './types';
 import { Selector, MatchTier } from './ui/selector';
 import { formatCompact } from './ui/format';
 import { CliError, isEnvError } from './errors';
-import { artifactDir, err } from './output';
+import { artifactDir, err, laneId } from './output';
 import { toJUnitXml, toHtml } from './report';
 import { capturePng } from './capture';
 
@@ -20,6 +20,16 @@ import { capturePng } from './capture';
 // Each recordable command = one step = one JUnit <testcase>. The selector and
 // the element it resolved through are stored so the report doubles as a record
 // of which identifiers worked (reusable next time, instead of re-inspecting).
+//
+// LANES. `VERIKUN_LANE` moves the ACTIVE run to `./.verikun/run-<lane>/`, which is
+// what lets a parallel `vk suite` run several tests at once in one working
+// directory: every test starts its run with force=true, which rm -rf's the active
+// directory, so two concurrent tests sharing one path means the loser's in-flight
+// state and artifacts are deleted under it. Archives still land in the SHARED
+// ./.verikun/runs/<id>/, so the suite index's ../../runs/<id>/report.html links are
+// unchanged and every lane's evidence ends up in one place. Artifact filenames are
+// keyed on step index alone, which is safe precisely because they live inside the
+// (now per-lane) run directory.
 
 export interface RunStep {
   index: number;
@@ -208,9 +218,23 @@ function runHasFailures(state: RunState): boolean {
 
 // --- paths & persistence --------------------------------------------------
 
-const activeDir = () => join(artifactDir(), 'run');
+// `laneId` lives in output.ts, beside `artifactDir`: every per-process artifact path is
+// derived from that pair, and splitting them is how `screen.png` stayed shared.
+export { laneId };
+
+const activeDir = () => {
+  const lane = laneId();
+  return join(artifactDir(), lane ? `run-${lane}` : 'run');
+};
 const archiveBase = () => join(artifactDir(), 'runs');
 const statePath = (dir: string) => join(dir, 'run.json');
+
+/** Read an ARCHIVED run's state — the same tolerant loader the active run uses, so the
+ *  parallel suite (which reads back each child's archive) follows run.ts's layout and its
+ *  "a corrupt file is surfaced, never thrown" posture instead of re-deriving both. */
+export function loadRunState(dir: string): RunState | null {
+  return loadState(dir);
+}
 
 function loadState(dir: string): RunState | null {
   if (!existsSync(statePath(dir))) return null;
@@ -249,19 +273,63 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** Timestamp id used for runs — exported so `vk suite` mints suite ids the same way. */
+/**
+ * Timestamp id used for runs — exported so `vk suite` mints suite ids the same way.
+ *
+ * A LANE is appended when one is set, because the base id has one-second resolution
+ * and carries no pid: two lanes starting a test in the same second would otherwise
+ * mint the same id. Within a lane runs are strictly serial, so the suffix makes the
+ * id collision-free by construction — and self-describing, which `-2` was not.
+ */
 export function runId(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const lane = laneId();
+  return lane ? `${stamp}-${lane}` : stamp;
 }
 
-/** First non-existing `<base>`, `<base>-2`, `<base>-3`, … — exported for `vk suite`. */
+/**
+ * Claim the first free `<base>`, `<base>-2`, `<base>-3`, … and RETURN IT CREATED.
+ *
+ * The claim is the `mkdir` itself, not a preceding `existsSync`. Check-then-act was
+ * sound while only one run could be active per working directory; with lanes, two
+ * processes archiving in the same second can both see the same candidate free and
+ * both take it — one silently clobbering the other's report. An exclusive (non
+ * `recursive`) mkdir is the smallest thing that decides a winner, and `EEXIST` just
+ * means "try the next number".
+ *
+ * Callers therefore receive an EMPTY EXISTING directory, not a free path. Writing
+ * into it needs nothing extra; renaming ONTO it needs `renameOnto` below.
+ */
 export function uniqueDir(base: string): string {
-  if (!existsSync(base)) return base;
-  for (let i = 2; ; i++) {
-    const candidate = `${base}-${i}`;
-    if (!existsSync(candidate)) return candidate;
+  mkdirSync(dirname(base), { recursive: true });
+  for (let i = 1; ; i++) {
+    const candidate = i === 1 ? base : `${base}-${i}`;
+    try {
+      mkdirSync(candidate);
+      return candidate;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    }
+  }
+}
+
+/**
+ * Move `from` onto a directory `uniqueDir` already claimed.
+ *
+ * POSIX `rename()` replaces an existing EMPTY directory, which is exactly the state
+ * a claim leaves behind — so the happy path is a single atomic call and the claim is
+ * never released. The fallback covers filesystems that refuse it (Windows), where
+ * removing our own empty claim first is safe because nobody else can be inside it.
+ */
+function renameOnto(from: string, to: string): void {
+  try {
+    renameSync(from, to);
+  } catch (e) {
+    if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
+    rmSync(to, { recursive: true, force: true });
+    renameSync(from, to);
   }
 }
 
@@ -672,9 +740,8 @@ export class Recorder {
       }
     }
     writeFileSync(join(dir, 'report.html'), toHtml(state, { appLog }));
-    mkdirSync(archiveBase(), { recursive: true });
     const dest = uniqueDir(join(archiveBase(), state.id));
-    renameSync(dir, dest);
+    renameOnto(dir, dest);
     return dest;
   }
 

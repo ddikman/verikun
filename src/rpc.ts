@@ -8,7 +8,7 @@
 // Pure types + pure functions only: no http, no fetch, no fs — so both sides (and the
 // unit tests) can import it without dragging in transport code.
 
-import { CliError, SelectorNotFoundError, AmbiguousSelectorError } from './errors';
+import { CliError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from './errors';
 import type { DeviceInfo, Element, HierarchySource, Platform } from './types';
 import type { RunStep } from './run';
 
@@ -22,7 +22,7 @@ export interface ExecRequest {
 
 export interface ErrorDescriptor {
   /** Which class to rebuild. 'Error' covers a non-CliError throw (exit 3 semantics). */
-  kind: 'CliError' | 'SelectorNotFoundError' | 'AmbiguousSelectorError' | 'Error';
+  kind: 'CliError' | 'SelectorNotFoundError' | 'AmbiguousSelectorError' | 'NoWindowError' | 'Error';
   name: string;
   message: string;
   exitCode: number;
@@ -81,7 +81,11 @@ export interface InstallResponse {
   ok: true;
   bytes: number;
   sha256: string;
-  /** Set when the first device failed and the build went on to another. `retried: true`. */
+  /** Every device the build landed on. A pooled server installs on ALL of them, or the
+   *  later lanes of a parallel suite would run the previous build. Absent on older servers. */
+  devices?: string[];
+  /** Set when a device failed and the build went on to another. `retried: true`. On a pool
+   *  that moved more than one device this is the first move; the server logs the rest. */
   deviceChanged?: DeviceChange;
 }
 
@@ -97,13 +101,41 @@ export interface LogsResponse {
   logs: string;
 }
 
+/**
+ * POST /v1/lease — which device this run token is driving.
+ *
+ * Affinity needs no device id on the wire: the `x-verikun-run` header already scopes a
+ * whole run, so the server keys the lease on it and every later call of that run lands
+ * on the same device. The client asks up front purely so it can ATTRIBUTE its steps
+ * before the first one executes; a client that never asks still gets a lease implicitly
+ * on its first /v1/exec, it just cannot name the device in its report.
+ *
+ * Idempotent per token, and 409 when every device is already leased.
+ */
+export interface LeaseResponse {
+  platform: Platform;
+  serial: string;
+  /** The read path of THIS device — the per-device answer `/v1/health` cannot give
+   *  for a pool. */
+  reads?: HierarchySource;
+}
+
 export interface HealthResponse {
   ok: boolean;
   version: string;
   platform: Platform;
-  /** Resolved serial/udid, or null when the server is running with NO device bound
-   *  — only reachable with --allow-device-control. Older servers always send a string. */
+  /**
+   * Resolved serial/udid for a SINGLE-device server, or null when there is no one
+   * answer — either nothing is attached, or this server pools several devices (see
+   * `capacity`). Kept as-is for one device so every existing client is untouched.
+   */
   serial: string | null;
+  /** How many devices this server can drive at once. ABSENT on servers predating the
+   *  pool, where it is always 1 (or 0 when `serial` is null). A client sizing a
+   *  parallel suite reads this; treat undefined as 1. */
+  capacity?: number;
+  /** The serials in the pool, for diagnostics. Absent on older servers. */
+  devices?: string[];
   /** Whether POST /v1/install is enabled on this server (`--allow-install`). */
   installEnabled: boolean;
   /**
@@ -187,6 +219,14 @@ export function describeError(e: Error): ErrorDescriptor {
   if (e instanceof SelectorNotFoundError) {
     return { kind: 'SelectorNotFoundError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
+  // BEFORE the CliError arm — NoWindowError extends it, so a subclass check must come
+  // first or the identity is flattened away. device/failover.ts classifies on
+  // `instanceof NoWindowError` deliberately ("identity first, never message text"), and
+  // losing it turns every mid-launch gap into an unknown that costs two device probes and
+  // can quarantine a perfectly healthy phone.
+  if (e instanceof NoWindowError) {
+    return { kind: 'NoWindowError', name: e.name, message: e.message, exitCode: e.exitCode };
+  }
   if (e instanceof CliError) {
     return { kind: 'CliError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
@@ -201,6 +241,8 @@ export function rebuildError(d: ErrorDescriptor): Error {
       return new AmbiguousSelectorError(d.message, d.candidates ?? []);
     case 'SelectorNotFoundError':
       return new SelectorNotFoundError(d.message);
+    case 'NoWindowError':
+      return new NoWindowError(d.message);
     case 'CliError':
       return new CliError(d.message, d.exitCode);
     default: {

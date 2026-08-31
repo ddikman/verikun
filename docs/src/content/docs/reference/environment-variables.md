@@ -15,7 +15,7 @@ sidebar:
 | `IDB` | `idb` | Path to the `idb` binary — useful when it lives in a Python virtualenv |
 | `VERIKUN_NO_FAILOVER` | unset | Set to `1` to stop a [`vk server`](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) moving off a device that fails. Wins over `--allow-failover`, and is announced in the server's startup log. |
 | `VERIKUN_NO_CLAIM` | unset | Set to `1` to disable [device claims](/verikun/reference/device-claims/) entirely — no reads, no writes. Restores the older behaviour: more than one attached device exits `2` rather than picking a free one. |
-| `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. |
+| `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. It also paces the heartbeat of a job that holds devices without running commands itself (a parallel `vk suite`) — a quarter of the window, capped at 60s. |
 | `VERIKUN_EMULATOR` | — | Path to the Android SDK's `emulator` binary, for `vk devices start`. Only needed when it is not on `PATH`, under `$ANDROID_HOME` / `$ANDROID_SDK_ROOT`, beside `$ADB`, or in the default SDK location. Set but unusable is a hard error, never a silent fallback. |
 
 Resolution order for the device is `--device` → `VERIKUN_DEVICE` → `ANDROID_SERIAL`. With
@@ -58,6 +58,7 @@ refuses to start.
 | `VERIKUN_RUN_IDLE_MIN` | `30` | Minutes of idleness before an **implicit** run auto-archives and rolls over. `0` disables. |
 | `VERIKUN_SESSION` | — | Session identity for rollover; a change closes and archives the active run |
 | `TERM_SESSION_ID` | — | Fallback session identity when `VERIKUN_SESSION` is unset |
+| `VERIKUN_LANE` | — | Moves the active run to `./.verikun/run-<lane>/` and suffixes run ids with it. Set by a parallel [`vk suite`](/verikun/guides/suites/) on each of its child processes; you rarely set it yourself |
 
 See [Automatic rollover](/verikun/reference/reports-and-test-runs/#automatic-rollover).
 

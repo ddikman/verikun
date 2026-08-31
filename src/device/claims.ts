@@ -172,6 +172,33 @@ export function claimTtlMs(env: NodeJS.ProcessEnv = process.env): number {
   return (Number.isFinite(n) && n >= 0 ? n : DEFAULT_TTL_MIN) * 60000;
 }
 
+/**
+ * How often a holder that runs no commands of its own should re-stamp its claim.
+ *
+ * The 60s CEILING is what does the work for today's only such holder (the parallel suite
+ * parent), and it is not about expiry: that holder is `processScoped`, so its liveness is
+ * its pid and no TTL can strand it. What a stale timestamp costs there is the `vk devices`
+ * "last seen" column reading hours old for a device being actively driven — and, past
+ * `PID_TRUST_MAX_MS`, the pid itself ceasing to be trusted, at which point a concurrent
+ * job takes the phone out from under a running suite.
+ *
+ * DERIVED from the TTL rather than written as a bare constant because the TTL is the only
+ * window in this store a heartbeat can be measured against, and for a holder that is NOT
+ * process-scoped it is exactly the window it will be judged by — a period larger than it
+ * would publish a claim that is already expired. A quarter leaves three missed beats of
+ * slack. The 5s floor stops a pathological TTL turning this into a spin; a TTL of `0`
+ * (expire one-off claims at once) says nothing about how often a long-lived holder should
+ * report in, so it takes the ceiling.
+ */
+export function claimHeartbeatMs(env: NodeJS.ProcessEnv = process.env): number {
+  const ttl = claimTtlMs(env);
+  if (ttl <= 0) return MAX_HEARTBEAT_MS;
+  return Math.min(MAX_HEARTBEAT_MS, Math.max(MIN_HEARTBEAT_MS, Math.floor(ttl / 4)));
+}
+
+const MAX_HEARTBEAT_MS = 60_000;
+const MIN_HEARTBEAT_MS = 5_000;
+
 // --- paths ------------------------------------------------------------------
 
 export function claimsDir(o: ClaimOpts = {}): string {

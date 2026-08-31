@@ -73,6 +73,22 @@ The serial is resolved via `driver.resolvedSerial()` (cached, so no extra device
 and passed into `beginStep`. `Recorder.seal()` is the shared finalize-and-move used by both
 rollover and `vk run archive`.
 
+### One active run per lane
+
+The active run directory is `./.verikun/run/`, or `./.verikun/run-<lane>/` when `VERIKUN_LANE`
+is set. Every test starts its run with `force`, which removes that directory — so two
+concurrent tests sharing one path means the loser's in-flight state and artifacts are deleted
+under it, and the winner's `archive` either ENOENTs or archives the wrong steps. A
+[parallel suite](/verikun/guides/suites/#running-across-several-devices) sets the lane on each
+child process; artifacts are keyed on step index alone, which is safe precisely because they
+live *inside* that directory.
+
+Archives still land in the shared `./.verikun/runs/<id>/`, so every lane's evidence ends up in
+one place and the suite index's links do not change. Two things keep those ids from colliding:
+`runId()` appends the lane (a one-second timestamp alone is not unique across devices), and
+`uniqueDir()` claims its directory with an exclusive `mkdir` rather than an `existsSync` check —
+check-then-act was sound only while one run could be active per working directory.
+
 ### Rollover must not strand a device snapshot
 
 Because `deviceOverrides` lives in the run and `rolloverReason` *seals* runs, a rollover used
@@ -150,6 +166,45 @@ accusing your own job.
 `VERIKUN_NO_CLAIM=1` disables reads and writes and restores the pre-claims behaviour exactly,
 including the old exit-2-on-multiple-devices. Preserve that equivalence: it is what makes the
 mechanism debuggable by bisection.
+
+## Three scopes, one grant
+
+Exclusive device assignment is solved at three scopes, and only two of them are the same kind
+of thing:
+
+| | Where | Identity | Question it answers |
+|---|---|---|---|
+| **Claims** | `device/claims.ts`, `~/.verikun/devices/` | cwd / session / pid | Which of this **host's** jobs may drive this serial? |
+| **Leases** | `server.ts` (`leaseFor`, `/v1/lease`) | the run token every remote backend mints | Which serial does this **server's** run hold? |
+| **Lanes** | `suite.ts` | lane id | Which worker pulls the next test? |
+
+**Claims and leases stay separate implementations.** They are different trust domains: a host
+claim outlives the process that took it and is judged by a pid on that host, while a lease is
+in-memory and judged by a token on the wire. Collapsing one into the other would mean either
+putting host-global files behind an HTTP endpoint, or trusting a client-supplied token to fence
+a machine.
+
+**What they share is a lifecycle, and that is `DeviceGrant`** (`device/grant.ts`): take a
+device, keep it warm, hand it back. `claimGrant` / `requireClaimGrant` wrap the claim store,
+`leaseGrant` wraps a server lease, and `releaseGrants` is the teardown. A caller that needs a
+device gets one contract and never re-derives which mechanism it is on — which is why the
+parallel suite parent no longer keeps a heartbeat timer of its own beside a list of serials.
+
+**The two acquisition polarities are the whole API surface.** `claimGrant` returns `null` for a
+device somebody else holds; `requireClaimGrant` throws exit `2`. The difference is whose idea the
+serial was: `--devices all` asked for a *set*, so a busy phone is simply not in it, while a named
+serial was asked for by name and quietly dropping it would hand back less capacity than was
+requested with nothing saying so. `poolSerials` applies the same polarity to a serial that is not
+attached.
+
+**Idle takeover, eviction and affinity are deliberately NOT in the shared contract.** They are
+*pool* policy — "somebody else needs a device, whose may I break?" — and only the server has a
+pool to arbitrate: a local pool is dealt once, up front, and held for the run, so there is no
+second claimant. A shared policy module would be an empty shell with one implementor.
+
+**A lane is not a grant.** It is a scheduler slot. A lane pinned to a local serial runs against
+a grant the suite *parent* holds; a lane pointed at a pooled server holds nothing, because the
+lane's own child leases the device under its own run token.
 
 ## Only the server may repoint the server
 
