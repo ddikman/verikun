@@ -168,14 +168,29 @@ jobs:
 
       # Lift this version's section out of CHANGELOG.md: every line between its
       # own `## [X.Y.Z]` heading and the next `## ` heading.
+      # A PRERELEASE falls back to the section of the release it is a candidate
+      # for: `v0.26.0-rc.1` takes `## [0.26.0]` when it has no section of its own.
+      # Without it every rc shipped with auto-generated commit-list notes, which is
+      # the least useful body for exactly the release people are being asked to
+      # try. The exact heading still wins when it exists, so cutting per-rc notes
+      # stays possible. `## [0.26.0]` cannot match `## [0.26.0-rc.1]` by accident —
+      # the closing bracket is part of the search string.
       - name: Extract the release notes
         run: |
           version="${GITHUB_REF_NAME#v}"
-          awk -v heading="## [$version]" '
-            index($0, heading) == 1 { inside = 1; next }
-            inside && /^## /        { exit }
-            inside                  { print }
-          ' CHANGELOG.md > release-notes.md
+          section() {
+            awk -v heading="## [$1]" '
+              index($0, heading) == 1 { inside = 1; next }
+              inside && /^## /        { exit }
+              inside                  { print }
+            ' CHANGELOG.md
+          }
+          section "$version" > release-notes.md
+          base="${version%%-*}"
+          if [ "$base" != "$version" ] && ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "no CHANGELOG.md section for $version — using $base, the release it is a candidate for"
+            section "$base" > release-notes.md
+          fi
           echo "--- extracted release notes ---"
           cat release-notes.md
 
