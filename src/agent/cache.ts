@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { artifactDir, err } from '../output';
 import { VERSION } from '../version';
 import { Plan, parsePlan } from './ir';
-import { GRAMMAR, REPAIR_GRAMMAR } from './grammar';
+import { GRAMMAR, REPAIR_GRAMMAR, SECTION_NOTE } from './grammar';
 
 // The plan cache turns "compile once, replay free" into "$0 steady state": a cache
 // HIT skips the model entirely. The key includes the app build (so a stale plan is
@@ -52,12 +52,12 @@ const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex
  * Fingerprint of the COMPILER that produced a plan: the verikun version PLUS the exact
  * grammar/repair prompts handed to the model. A cached plan is replayed ONLY when this
  * matches the running build — so updating verikun (a version bump, OR any change to the
- * grammar/repair instructions) invalidates stale plans and forces a recompile against
+ * grammar/repair/section instructions) invalidates stale plans and forces a recompile against
  * the current compiler, instead of silently replaying a plan the old one produced. The
  * version alone wouldn't catch unreleased grammar edits (same `0.3.0`); folding the
  * grammar text in does.
  */
-export const COMPILER_FINGERPRINT = sha256([VERSION, GRAMMAR, REPAIR_GRAMMAR].join(String.fromCharCode(0))).slice(0, 16);
+export const COMPILER_FINGERPRINT = sha256([VERSION, GRAMMAR, REPAIR_GRAMMAR, SECTION_NOTE].join(String.fromCharCode(0))).slice(0, 16);
 
 function plansDir(): string {
   return join(artifactDir(), 'plans');

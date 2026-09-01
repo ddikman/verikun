@@ -1,6 +1,6 @@
 # Examples
 
-Three things live here, and all of them revolve around the same app:
+Four things live here, and all of them revolve around the same app:
 
 - **[`example-test.md`](./example-test.md)** — the *showcase*: a natural-language
   [`vk ai`](https://ddikman.github.io/verikun/guides/natural-language-tests/) test you can read to see what a
@@ -10,6 +10,9 @@ Three things live here, and all of them revolve around the same app:
   check the fixture still reports itself correctly, then put everything back with
   `device reset`. The same shape you would use for offline testing
   (`device set airplane=on`).
+- **[`_launch-to-home.md`](./_launch-to-home.md)** — the launch-and-confirm-home block both
+  tests open with, factored out with `@include` so it is written once. The leading `_` is
+  what keeps `vk suite` from running it as a test of its own.
 - **[`flutter-app/`](./flutter-app/)** — the app they drive, and the fixture the device e2e
   suite (`npm run test:e2e`) measures `vk` against. Its README carries the measured,
   per-platform facts about what `vk` actually reports for a Flutter UI.
@@ -22,7 +25,7 @@ deleted two photos on every run. What replaced them is **non-destructive** and r
 on any machine.
 
 `vk suite example` is non-recursive, so it picks up only the `*.md` tests here and ignores
-the app directory. Both are written to pass on **either** platform — anything that only
+the app directory — and skips `_launch-to-home.md`, which is shared prose rather than a test. Both are written to pass on **either** platform — anything that only
 works on one (`rotation`, `airplane`) lives in `tests/e2e/`, which knows which platform it
 is on and can assert the refusal as well as the success.
 

@@ -338,9 +338,14 @@ function leafSchema() {
 /** Raised when a model-produced plan (or repair) is structurally invalid. Kept
  *  out of errors.ts because it is an agent-layer concern, not a CLI exit code. */
 export class InvalidPlanError extends Error {
-  constructor(message: string) {
+  /** `no-steps` marks the one rejection a CALLER may legitimately tolerate: a plan with
+   *  zero steps. That is a false green for a whole test, but the honest answer for one
+   *  SEGMENT of a test (a title, a paragraph of rationale) — see agent/include.ts. */
+  readonly code?: 'no-steps';
+  constructor(message: string, code?: 'no-steps') {
     super(message);
     this.name = 'InvalidPlanError';
+    this.code = code;
   }
 }
 
@@ -512,7 +517,7 @@ export function parsePlan(raw: unknown): Plan {
   const steps = p.steps.map((s, i) => validateNode(s, `steps[${i}]`));
   // A plan with zero steps would "pass" green having done nothing — reject it so a
   // compiler misfire, prompt injection, or truncated cache entry can't be a false green.
-  if (steps.length === 0) throw new InvalidPlanError('plan: has no steps (a test must have at least one step)');
+  if (steps.length === 0) throw new InvalidPlanError('plan: has no steps (a test must have at least one step)', 'no-steps');
   return {
     version: 1,
     package: typeof p.package === 'string' ? p.package : undefined,

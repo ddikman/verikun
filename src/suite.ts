@@ -227,11 +227,14 @@ export function readDurationHints(suitesDir: string, name: string): Record<strin
   return hints;
 }
 
-/** The *.md files in a suite dir (non-recursive). README.md is documentation for
- *  the suite, not a test — skipped by convention. */
+/** The *.md files in a suite dir (non-recursive). Two kinds of `.md` are NOT tests and
+ *  are skipped by convention: `README.md` (documentation for the suite) and any
+ *  `_`-prefixed file, which is a shared FRAGMENT other tests `@include` (see
+ *  agent/include.ts). A fragment run as a test would get its own report row and, under
+ *  `--app`, its own app-data reset — leaving no state for the test that included it. */
 export function listTestFiles(dir: string): string[] {
   const files = readdirSync(dir).filter((f) => {
-    if (!f.toLowerCase().endsWith('.md') || f.toLowerCase() === 'readme.md') return false;
+    if (!f.toLowerCase().endsWith('.md') || f.toLowerCase() === 'readme.md' || f.startsWith('_')) return false;
     try {
       return statSync(join(dir, f)).isFile();
     } catch {
@@ -417,7 +420,7 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
   }
   const files = listTestFiles(dir);
   if (files.length === 0) {
-    throw new CliError(`suite: no test files (*.md) in '${dirArg}'`, 2);
+    throw new CliError(`suite: no test files (*.md) in '${dirArg}' (README.md and _-prefixed fragments are not tests)`, 2);
   }
 
   const retries = parseRetries(flags);

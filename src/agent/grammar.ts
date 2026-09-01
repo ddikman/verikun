@@ -188,3 +188,27 @@ Do not invent elements that are not in the hierarchy.
 An element tagged \`offscreen\` is in the tree but scrolled out of view; tap/text scroll
 to their target on their own, so the fact a step failed on one means scrolling could not
 reach it — pick a different element only if one genuinely serves the same purpose.`;
+
+/**
+ * Extra framing for compiling ONE SECTION of a test rather than a whole one — what
+ * `@include` splits a test into (see ./include.ts, and compileFromSegments in ../cli.ts).
+ *
+ * It exists because of a measured failure, not a hypothetical one. `example-test-devicestate.md`
+ * opens with a paragraph SUMMARISING the test ("checks that the app copes when the device
+ * changes underneath it — dark mode and larger system text — and that everything is put back
+ * afterwards"). Compiled as a whole test that paragraph is context; compiled alone it is the
+ * entire prompt, and the model dutifully turned it into `device set dark=on font-scale=1.3`,
+ * `screenshot`, `device reset` — three invented steps, ahead of the launch, that the test
+ * never asked for. A section compile therefore has to be told it is a fragment, and that
+ * emitting nothing is a legitimate answer.
+ */
+export const SECTION_NOTE = `THIS IS ONE SECTION OF A LARGER TEST, not a whole test. Other sections run before and
+after it, in the order the test file lists them. Compile ONLY the actions THIS section
+states, in the order it states them:
+- Do NOT add setup — launching the app, signing in, navigating to a screen — that this
+  section does not itself state. An earlier section has already done whatever was needed.
+- Do NOT add teardown this section does not state, INCLUDING a trailing "device reset";
+  a later section owns it.
+- Prose that DESCRIBES the test rather than instructing it — a title, a summary of what
+  the test covers, the rationale for a step — is NOT an instruction.
+- If this section states no action at all, emit "steps": [].`;

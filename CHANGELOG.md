@@ -6,13 +6,21 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`@include <path>`** in a `vk ai` test inlines another file's prose, so a shared preamble
+  lives in one place. Paths resolve relative to the including file. ([#112])
+
 ### Changed
+- **`vk suite`** skips `_`-prefixed `*.md` — those are shared fragments, not tests. ([#112])
+- **`vk ai`** compiles each chunk of an `@include`d test separately and caches it, so shared
+  prose is compiled once across a suite. ([#112])
 - **`vk install`** (Android) removes a differently-signed build of the same package and retries,
   instead of failing. Its app data is lost; stderr says so. ([#96])
 - **`VERIKUN_CLAIM_TTL_MIN`** now also paces a parallel suite's claim heartbeat — a quarter of
   the window, capped at 60s — so a short TTL no longer races it.
 
 [#96]: https://github.com/ddikman/verikun/issues/96
+[#112]: https://github.com/ddikman/verikun/issues/112
 
 ## [0.26.0] - 2026-08-24
 

@@ -6,7 +6,7 @@
 
 - **Agent CLI** — `vk <command>`: one-shot commands to inspect the screen as a semantic tree (or screenshot) and act on it.
 - **Puppeteer for native mobile** — a thin wrapper over native Android and iOS automation runners with zero runtime dependencies.
-- **Natural-language tests** — `vk ai <file>`: runs plain-English tests, compiled once and replayed model-free (~$0), calling a model only to self-heal a drifted step. [What that costs](https://ddikman.github.io/verikun/reference/cost/), and how the `--max-cost-usd` ceiling bounds it.
+- **Natural-language tests** — `vk ai <file>`: runs plain-English tests, compiled once and replayed model-free (~$0), calling a model only to self-heal a drifted step. Tests share a preamble with `@include`, written once instead of pasted into each. [What that costs](https://ddikman.github.io/verikun/reference/cost/), and how the `--max-cost-usd` ceiling bounds it.
 - **Self-improving** — the agent runner will provide prescriptive improvements to existing scripts to help stabilise flakiness for future runs.
 - **CI-ready** — `vk suite` runs a folder of tests as one gated pass/fail run, across one device or a whole pool of them; `vk server` exposes real devices over an authenticated tunnel so a disposable CI runner (no phone attached) can still drive them, and swaps out any that goes bad.
 

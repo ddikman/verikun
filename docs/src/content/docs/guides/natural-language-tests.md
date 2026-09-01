@@ -60,6 +60,48 @@ Guidance that materially improves the compiled plan:
 - **Prefer identifiers you know** over descriptions of appearance. "Tap `@get_started`" is
   compiled verbatim; "tap the big green button" is a guess.
 
+## Share a preamble between tests
+
+Every test in a suite tends to need the same opening — cold start, sign in, dismiss whatever
+post-auth screens appear, land on a known screen. Written out per test, that block is
+maintained N times and drifts. `@include <path>` on its own line splices another file's prose
+in where the line sits:
+
+```md title="tests/checkout.md"
+# Checkout
+
+@include _signed-in.md
+
+1. Tap the basket (`@basket`).
+2. Assert the total reads "£12.00".
+```
+
+```md title="tests/_signed-in.md"
+Launch com.example.app with its data cleared.
+Type the credentials from the environment into the sign-in form and submit it.
+If a "rate this app" dialog appears, dismiss it.
+Repeat until the home tab (`@home`) is showing, tapping past any onboarding card.
+```
+
+- **Paths are relative to the including file**, so a fragment moves with the tests that use
+  it. A fragment may include another; an include *cycle* is a usage error (exit `2`) naming
+  the chain.
+- **Name a fragment `_something.md`.** `vk suite` skips `_`-prefixed files, so a fragment
+  never runs as a test of its own — no report row, and no `--app` data reset that would
+  leave nothing behind for the test that included it. (A fragment in a subdirectory is
+  skipped too: suite discovery is not recursive.)
+- **The cache key is the resolved text**, so editing a fragment recompiles every test that
+  includes it. It cannot silently replay a stale plan.
+- **Each chunk compiles and caches on its own**, and the compiled steps are spliced together.
+  A preamble shared by nine tests is compiled once; editing it costs one compile rather than
+  nine, because each test's own prose is still cached. Progress names the file and line each
+  chunk came from.
+- **A fragment holds steps, not a whole test.** It is compiled knowing it is one section of
+  a larger test, so it neither re-launches the app nor adds a teardown the surrounding test
+  already owns.
+
+`@include` inside a fenced code block is left alone — that is documentation, not a directive.
+
 ## Getting the credentials in place
 
 `vk ai` needs a model. You have three options:
@@ -151,7 +193,7 @@ regression the test exists to catch. See
 The cache is keyed by the test text and the app build, and gated by a **compiler
 fingerprint**. A cached plan is discarded — and the test recompiled — when:
 
-- the prose changed
+- the prose changed — including the prose of any fragment it `@include`s
 - the app build changed (`--app-build`)
 - verikun itself was updated, or its grammar or repair prompt changed
 
@@ -168,6 +210,8 @@ The repository ships two working examples that run against a Flutter fixture app
   8-second delayed load that needs an explicit timeout.
 - [`example/example-test-devicestate.md`](https://github.com/ddikman/verikun/blob/main/example/example-test-devicestate.md)
   — sets dark mode and a font scale, asserts the app *observed* the change, then resets.
+
+Both open with `@include _launch-to-home.md`, the launch-and-confirm-home block they share.
 
 Run them as a suite:
 

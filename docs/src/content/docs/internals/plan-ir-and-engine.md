@@ -116,6 +116,18 @@ repeat calls bill at roughly 0.1×.
 It mirrors `SKILL.md` — `SKILL.md` is the human source of truth, `grammar.ts` the compact
 runtime copy. **Keep the two in sync.**
 
+`grammar.ts` also exports `SECTION_NOTE`, added to the *user* message (not the cached system
+prefix) when compiling one chunk of an
+[`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)d test. It
+exists because of a measured failure: a paragraph *summarising* a test is context when the
+whole test is compiled at once, but the entire prompt when that chunk is compiled alone — and
+the model turned one such summary into three steps the test never asked for. The note says the
+chunk is a section, that setup and teardown belong to its neighbours, and that emitting no
+steps is a valid answer. It is folded into the compiler fingerprint like the other two.
+
+`compileUserPrompt` in `provider.ts` assembles that user message for all four providers, which
+differ only in how they send it.
+
 ## Compile-fidelity lint
 
 `lint.ts` catches two specific compile failures and hands the finding back to the model:

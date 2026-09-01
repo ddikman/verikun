@@ -25,8 +25,10 @@ devices](#running-across-several-devices).
 ## How it runs
 
 - **Ordering is lexicographic.** Prefix files `01-…`, `02-…` to sequence them. `README.md`
-  is skipped — it documents the suite, it is not a test. (Across a pool, ordering can no
-  longer sequence anything — see below.)
+  is skipped — it documents the suite, it is not a test. So is any `_`-prefixed file: that is
+  a [shared fragment](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
+  other tests `@include`. (Across a pool, ordering can no longer sequence anything — see
+  below.)
 - **Isolation between tests.** With `--app <id>`, the app's data is cleared before each test
   (`pm clear`; iOS degrades to a force-stop, since it has no per-app reset). Without
   `--app`, make each test self-isolating — start the prose with `launch <pkg> --clear`.
