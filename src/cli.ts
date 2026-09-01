@@ -2068,6 +2068,22 @@ function makeProvider(opts: AiOptions): AgentProvider | null {
   return apiKey ? new ClaudeProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
 }
 
+/**
+ * Refuse a FURTHER model call once the ceiling is crossed.
+ *
+ * The budget is a total-run ceiling that everything else checks *after* the fact: a compile
+ * happens, and `runAiTest` then declines to run. That works while a compile is one call. It
+ * stops working the moment a test can cost several — segment compiles, then a whole-file
+ * fallback on top of them — so each call after the first has to ask first, exactly as the
+ * lint retry already does ("the first attempt has already been billed").
+ *
+ * Exported solely so the unit suite can reach it.
+ */
+export function assertBudgetForCompile(cost: CostTracker, maxCostUsd: number, what: string): void {
+  if (!cost.exceeded()) return;
+  throw new CliError(`ai: cost ceiling $${maxCostUsd} reached — not ${what} (${cost.summaryLine()}).`, 1);
+}
+
 function cachePlan(key: CacheKeyInput, plan: Plan): void {
   try {
     writePlan(key, plan);
@@ -2092,10 +2108,13 @@ function cachePlan(key: CacheKeyInput, plan: Plan): void {
  *
  * Returns null when the split cannot be trusted — an empty result, or a lint finding
  * against the assembled plan — and the caller falls back to compiling the whole test,
- * which is exactly the pre-include behaviour. A budget breach mid-way THROWS instead,
- * because falling back would spend again on top of what is already billed.
+ * which is exactly the pre-include behaviour. Both that fallback and each segment after
+ * the first go through `assertBudgetForCompile`, so a ceiling crossed part-way stops the
+ * spend instead of adding a full compile on top of what is already billed.
+ *
+ * Exported solely so the unit suite can reach it.
  */
-async function compileFromSegments(
+export async function compileFromSegments(
   segments: Segment[],
   key: CacheKeyInput,
   opts: AiOptions,
@@ -2117,6 +2136,11 @@ async function compileFromSegments(
       steps.push(...hit.plan.steps);
       continue;
     }
+    // Asked BEFORE the call, not after it: crossing the ceiling on the LAST segment leaves a
+    // complete plan, which `runAiTest` then declines to run with a proper budget verdict —
+    // far better than throwing away a finished compile. Crossing it earlier means the rest of
+    // the test would go uncompiled, and a partial plan must never be cached or run.
+    assertBudgetForCompile(cost, opts.maxCostUsd, `compiling ${where} — the test is only partly compiled`);
     const seed = findSeed(segKey);
     err(`[ai] ${where}: compiling with ${opts.model}…`);
     let compiled;
@@ -2135,17 +2159,6 @@ async function compileFromSegments(
     cachePlan(segKey, compiled.plan);
     err(`[ai] ${where}: ${compiled.plan.steps.length} step(s)`);
     steps.push(...compiled.plan.steps);
-    // Checked between segments for the same reason the lint retry checks it: the calls so
-    // far are already billed, and the next one is an ADDITIONAL call. Throwing rather than
-    // returning null is deliberate — null means "fall back to a whole-file compile", which
-    // is one more call again, and the partial plan must never be cached or shown as if it
-    // were the test.
-    if (cost.exceeded()) {
-      throw new CliError(
-        `ai: cost ceiling $${opts.maxCostUsd} reached after compiling ${where} — the test is only partly compiled (${cost.summaryLine()}).`,
-        1,
-      );
-    }
   }
   if (steps.length === 0) return null;
 
@@ -2166,8 +2179,10 @@ async function compileFromSegments(
  *  file compiles segment-at-a-time first, so shared prose is paid for once across a
  *  suite. The fresh compile is cached right away, so an unchanged test is never
  *  recompiled — even via --show-plan or after a failed run. A green run later
- *  re-persists the healed plan (never a half-healed one). */
-async function obtainPlan(
+ *  re-persists the healed plan (never a half-healed one).
+ *
+ *  Exported solely so the unit suite can reach it. */
+export async function obtainPlan(
   key: CacheKeyInput,
   file: string,
   opts: AiOptions,
@@ -2191,6 +2206,11 @@ async function obtainPlan(
       cachePlan(key, split);
       return { plan: split, cached: false };
     }
+    // The split was dropped — the assembled plan failed the lint, or nothing compiled to a
+    // step. Falling back means a whole-file compile ON TOP of segment calls already billed,
+    // which is the same double-spend the loop refuses; the segment plans stay cached, so a
+    // rerun with a larger ceiling picks up where this left off.
+    assertBudgetForCompile(cost, opts.maxCostUsd, `compiling '${file}' as one instead`);
   }
 
   const seed = findSeed(key);

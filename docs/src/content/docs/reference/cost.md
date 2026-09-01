@@ -143,12 +143,18 @@ test's ceiling, because the check happens after a test finishes rather than mid-
 
 ### When it is checked
 
-The budget is a **pre-spend** gate, tested at three points:
+The budget is a **pre-spend** gate, tested at four points:
 
-1. **Before the lint retry** — non-fatal. It keeps the first plan and carries on rather than paying
+1. **Before each further compile of a multi-chunk test** — fatal. A test built from
+   [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests) fragments
+   compiles a chunk at a time, and falls back to compiling the whole file if the assembled plan
+   fails the lint. Every one of those after the first asks, so a compile cannot quietly cost
+   several times the ceiling. Crossing it on the *last* chunk is not a breach — nothing further
+   is being asked for, so the plan is finished and point 3 declines to run it.
+2. **Before the lint retry** — non-fatal. It keeps the first plan and carries on rather than paying
    for a better one.
-2. **After compile, before the device run** — fatal. The run never starts.
-3. **Before each repair attempt** — fatal.
+3. **After compile, before the device run** — fatal. The run never starts.
+4. **Before each repair attempt** — fatal.
 
 Because the check happens *before* a call rather than during it, the actual spend can overshoot the
 ceiling by up to one call. It is never checked during replay, because replay never spends.
