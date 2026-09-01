@@ -252,14 +252,17 @@ flake.
 ## The plan cache fingerprint
 
 Each cache entry records a **compiler fingerprint** = verikun's version + `GRAMMAR` +
-`REPAIR_GRAMMAR`.
+`REPAIR_GRAMMAR` + `SECTION_NOTE`.
 
 - `readPlan` treats a fingerprint mismatch as a **miss**. So updating verikun — a version
-  bump *or* any grammar/repair-prompt edit — recompiles instead of replaying a plan the old
-  compiler produced.
+  bump *or* any grammar/repair/section-prompt edit — recompiles instead of replaying a plan
+  the old compiler produced.
 - `findSeed` **ignores** the fingerprint. An older plan is still a fine starting point.
 
-The cache is keyed by prose + package + app build. It reads tolerantly (a bad entry is a
+The cache is keyed by prose + package + app build. The prose is the **resolved** text, with
+every [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
+inlined — so editing a fragment invalidates every test that includes it, and each chunk of
+an included test also has its own entry under its own text. It reads tolerantly (a bad entry is a
 miss, not a crash), writes atomically, caches the compile immediately so an unchanged test
 never recompiles and re-persists, and re-persists the healed plan on green.
 

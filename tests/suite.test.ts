@@ -43,6 +43,17 @@ test('listTestFiles: only top-level *.md, sorted, README excluded', () => {
   }
 });
 
+test('listTestFiles: a _-prefixed fragment is shared prose, not a test', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vk-suite-'));
+  try {
+    writeFileSync(join(dir, '01-login.md'), 'x');
+    writeFileSync(join(dir, '_preamble.md'), 'shared steps every test @includes');
+    assert.deepEqual(listTestFiles(dir), ['01-login.md']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- toSuiteResult ----------------------------------------------------------
 
 function step(status: RunStep['status']): RunStep {

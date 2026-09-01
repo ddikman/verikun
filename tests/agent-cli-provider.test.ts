@@ -13,6 +13,8 @@ import {
   schemaInstruction,
 } from '../src/agent/cli-provider';
 import { PLAN_JSON_SCHEMA } from '../src/agent/ir';
+import { compileUserPrompt } from '../src/agent/provider';
+import { SECTION_NOTE } from '../src/agent/grammar';
 import { CliError } from '../src/errors';
 
 // Same idea as agent-openai.test.ts: inject a fake spawn (no real binary, no device) and assert
@@ -278,3 +280,34 @@ function args_prompt(captured: Captured): string {
   const args = captured.args!;
   return args[args.length - 1];
 }
+
+// --- compileUserPrompt (shared by all four providers) -----------------------
+
+test('compileUserPrompt: a whole test is headed NATURAL-LANGUAGE TEST and carries no section note', () => {
+  const prompt = compileUserPrompt({ nl: '1. Tap Login', pkg: 'com.example', platform: 'android' });
+  assert.match(prompt, /App package: com\.example/);
+  assert.match(prompt, /Platform: android/);
+  assert.match(prompt, /NATURAL-LANGUAGE TEST:\n1\. Tap Login/);
+  assert.ok(!prompt.includes(SECTION_NOTE), 'a whole test must not be told it is a section');
+});
+
+test('compileUserPrompt: a SECTION is framed as one, so descriptive prose is not read as an instruction', () => {
+  // Measured, not hypothetical: without this note, the summary paragraph of
+  // example-test-devicestate.md compiled to `device set dark=on font-scale=1.3` +
+  // `screenshot` + `device reset` — three steps the test never asked for.
+  const prompt = compileUserPrompt({ nl: 'Checks the app copes with dark mode.', platform: 'android', section: true });
+  assert.ok(prompt.includes(SECTION_NOTE));
+  assert.match(prompt, /TEST SECTION:\nChecks the app copes with dark mode\./);
+  assert.match(prompt, /emit "steps": \[\]/, 'a section that states no action must be allowed to compile to nothing');
+});
+
+test('compileUserPrompt: retry feedback comes LAST, after the test text', () => {
+  const prompt = compileUserPrompt({ nl: 'x', platform: 'ios', retryFeedback: '- lost the --clear' });
+  assert.ok(prompt.indexOf('REJECTED') > prompt.indexOf('NATURAL-LANGUAGE TEST'));
+});
+
+test('compileUserPrompt: a seed plan comes BEFORE the test, so the test is read last', () => {
+  const seed = { version: 1 as const, steps: [{ type: 'command' as const, command: 'launch', positionals: ['a'], flags: [] }] };
+  const prompt = compileUserPrompt({ nl: 'x', platform: 'android', seed });
+  assert.ok(prompt.indexOf('PRIOR PLAN') < prompt.indexOf('NATURAL-LANGUAGE TEST'));
+});

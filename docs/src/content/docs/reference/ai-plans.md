@@ -238,7 +238,7 @@ ceiling behaves on a breach, see [Cost & budget](/verikun/reference/cost/).
 ## The plan cache
 
 Keyed by the test prose + package + app build, gated by a **compiler fingerprint**
-(verikun's version plus the grammar and repair-prompt text).
+(verikun's version plus the grammar, repair and section prompt text).
 
 - A fingerprint mismatch is treated as a **miss**, so updating verikun recompiles rather than
   replaying a plan an older compiler produced.
@@ -246,5 +246,8 @@ Keyed by the test prose + package + app build, gated by a **compiler fingerprint
 - A green run re-persists the healed plan, so the next run is free again.
 - Seeding from a prior build ignores the fingerprint — an older plan is still a fine
   starting point.
+- A test assembled from [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
+  fragments is keyed on the **resolved** text, and each chunk is additionally cached under
+  its own text — so shared prose is compiled once across a suite.
 
 See [Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint).

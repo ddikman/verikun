@@ -5,7 +5,7 @@ import { CliError } from '../errors';
 import { formatCompact } from '../ui/format';
 import { parsePlan, PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
 import { Usage, ProviderId } from './cost';
-import { AgentProvider, CompileInput, CompileResult, RepairContext, RepairResult } from './provider';
+import { AgentProvider, CompileInput, CompileResult, RepairContext, RepairResult, compileUserPrompt } from './provider';
 import { GRAMMAR, REPAIR_GRAMMAR } from './grammar';
 import { toStrictSchema } from './openai';
 import { runText, TextResult } from '../exec';
@@ -190,26 +190,7 @@ export class CliProvider implements AgentProvider {
   }
 
   async compile(input: CompileInput): Promise<CompileResult> {
-    const parts: string[] = [];
-    if (input.pkg) parts.push(`App package: ${input.pkg}`);
-    parts.push(`Platform: ${input.platform}`);
-    if (input.seed) {
-      parts.push(
-        'A plan compiled for a PREVIOUS build of this app follows. Reuse it where the test still holds; ' +
-          'change only what the test now requires. PRIOR PLAN:\n' +
-          JSON.stringify(input.seed, null, 2),
-      );
-    }
-    parts.push('NATURAL-LANGUAGE TEST:\n' + input.nl);
-    if (input.retryFeedback) {
-      // Last, so it is the freshest thing in context: a previous compile of this same
-      // test lost something the prose stated. Naming it beats hoping the retry differs.
-      parts.push(
-        'YOUR PREVIOUS ATTEMPT AT THIS TEST WAS REJECTED. Fix this and emit the whole plan again:\n' +
-          input.retryFeedback,
-      );
-    }
-    const json = this.call(GRAMMAR, parts.join('\n\n'), PLAN_JSON_SCHEMA);
+    const json = this.call(GRAMMAR, compileUserPrompt(input), PLAN_JSON_SCHEMA);
     // usage:{} — a CLI is billed to the user's subscription, not per token, so cost is $0
     // (documented no-op for --max-cost-usd). The run is still bounded by maxRepairs + --timeout.
     return { plan: parsePlan(json), usage: {} };

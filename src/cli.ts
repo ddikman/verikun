@@ -88,7 +88,8 @@ import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-
 import { AgentProvider } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
-import { Plan } from './agent/ir';
+import { InvalidPlanError, Plan } from './agent/ir';
+import { ResolvedTest, Segment, resolveIncludes, segmentLabel } from './agent/include';
 import { DeviceChange, ErrorDescriptor, ExecBackend, HealthResponse, describeError, rebuildError } from './rpc';
 import { DevicePoolSpec, csvList, parseDevicePool, poolSerials, resolvePoolPlatform } from './device/pool';
 import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
@@ -2018,15 +2019,13 @@ function parseAiOptions(flags: Flags): AiOptions {
   };
 }
 
-function readAiTest(file: string): string {
-  let nl: string;
-  try {
-    nl = readFileSync(resolve(process.cwd(), file), 'utf8');
-  } catch (e) {
-    throw new CliError(`ai: cannot read '${file}' (${(e as Error).message})`, 2);
-  }
-  if (!nl.trim()) throw new CliError(`ai: '${file}' is empty`, 2);
-  return nl;
+/** Read a test and inline every `@include` it names (see agent/include.ts). The returned
+ *  `nl` is the RESOLVED text, so it is what gets hashed into the plan-cache key — editing
+ *  a fragment invalidates every test that includes it. */
+function readAiTest(file: string): ResolvedTest {
+  const resolved = resolveIncludes(file);
+  if (!resolved.nl.trim()) throw new CliError(`ai: '${file}' is empty`, 2);
+  return resolved;
 }
 
 /** The CLI-agent backends, by ProviderId. Adding a CLI provider is one entry here rather than a
@@ -2069,16 +2068,112 @@ function makeProvider(opts: AiOptions): AgentProvider | null {
   return apiKey ? new ClaudeProvider({ model: opts.model, apiKey, effort: opts.effort }) : null;
 }
 
+function cachePlan(key: CacheKeyInput, plan: Plan): void {
+  try {
+    writePlan(key, plan);
+  } catch (e) {
+    err(`[ai] could not cache compiled plan: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Compile a test SEGMENT AT A TIME and concatenate the results — the whole point of
+ * `@include` doing more than a textual paste.
+ *
+ * Each contiguous chunk of prose is compiled and cached under its OWN key, so a preamble
+ * shared by nine tests is compiled once and the other eight get it free. That is what
+ * makes editing a shared fragment cheap: only the fragment misses its key, while every
+ * test's own prose is still cached, instead of nine full recompiles. Splicing at the plan
+ * level is safe because the IR is a flat list of steps (see agent/ir.ts).
+ *
+ * Two segments are legitimately allowed to contribute nothing: a headings-only chunk
+ * (never sent to the model at all) and a chunk of pure rationale the model compiles to
+ * zero steps — `no-steps` is the one InvalidPlanError a caller may swallow.
+ *
+ * Returns null when the split cannot be trusted — an empty result, or a lint finding
+ * against the assembled plan — and the caller falls back to compiling the whole test,
+ * which is exactly the pre-include behaviour. A budget breach mid-way THROWS instead,
+ * because falling back would spend again on top of what is already billed.
+ */
+async function compileFromSegments(
+  segments: Segment[],
+  key: CacheKeyInput,
+  opts: AiOptions,
+  cost: CostTracker,
+  provider: AgentProvider,
+): Promise<Plan | null> {
+  const steps: Plan['steps'] = [];
+  for (const seg of segments) {
+    const where = segmentLabel(seg);
+    // Accounted for out loud: a silently-dropped chunk would look like lost steps.
+    if (!seg.compilable) {
+      err(`[ai] ${where}: headings only — nothing to compile`);
+      continue;
+    }
+    const segKey: CacheKeyInput = { ...key, nl: seg.text };
+    const hit = opts.recompile ? null : readPlan(segKey);
+    if (hit) {
+      err(`[ai] ${where}: cached (${hit.plan.steps.length} step(s))`);
+      steps.push(...hit.plan.steps);
+      continue;
+    }
+    const seed = findSeed(segKey);
+    err(`[ai] ${where}: compiling with ${opts.model}…`);
+    let compiled;
+    try {
+      compiled = await provider.compile({ nl: seg.text, pkg: key.pkg, platform: key.platform, seed: seed?.plan, section: true });
+    } catch (e) {
+      // Prose with no instruction in it (a paragraph explaining WHY the next step exists)
+      // is not an error at segment granularity — it just adds no steps.
+      if (e instanceof InvalidPlanError && e.code === 'no-steps') {
+        err(`[ai] ${where}: no steps`);
+        continue;
+      }
+      throw e;
+    }
+    cost.add(compiled.usage, 'compile');
+    cachePlan(segKey, compiled.plan);
+    err(`[ai] ${where}: ${compiled.plan.steps.length} step(s)`);
+    steps.push(...compiled.plan.steps);
+    // Checked between segments for the same reason the lint retry checks it: the calls so
+    // far are already billed, and the next one is an ADDITIONAL call. Throwing rather than
+    // returning null is deliberate — null means "fall back to a whole-file compile", which
+    // is one more call again, and the partial plan must never be cached or shown as if it
+    // were the test.
+    if (cost.exceeded()) {
+      throw new CliError(
+        `ai: cost ceiling $${opts.maxCostUsd} reached after compiling ${where} — the test is only partly compiled (${cost.summaryLine()}).`,
+        1,
+      );
+    }
+  }
+  if (steps.length === 0) return null;
+
+  const plan: Plan = { version: 1, package: key.pkg, platform: key.platform, steps };
+  // The lint asks whether the ASSEMBLED plan still says what the WHOLE test said, because
+  // that is the question ("does anything launch with --clear?") — a segment cannot answer
+  // it alone. A finding drops the split and lets the whole-file path compile and retry.
+  const findings = lintPlan(key.nl, plan);
+  if (findings.length > 0) {
+    err(`[ai] the assembled plan does not match the test — compiling it as one instead:\n${findings.map((f) => `- ${f.message}`).join('\n')}`);
+    return null;
+  }
+  return plan;
+}
+
 /** Obtain the plan: a cache hit (free) or a compile (pays tokens; may seed from a
- *  prior build's plan to avoid a full recompile). The fresh compile is cached right
- *  away, so an unchanged test is never recompiled — even via --show-plan or after a
- *  failed run. A green run later re-persists the healed plan (never a half-healed one). */
+ *  prior build's plan to avoid a full recompile). A test assembled from more than one
+ *  file compiles segment-at-a-time first, so shared prose is paid for once across a
+ *  suite. The fresh compile is cached right away, so an unchanged test is never
+ *  recompiled — even via --show-plan or after a failed run. A green run later
+ *  re-persists the healed plan (never a half-healed one). */
 async function obtainPlan(
   key: CacheKeyInput,
   file: string,
   opts: AiOptions,
   cost: CostTracker,
   provider: AgentProvider | null,
+  segments: Segment[] = [],
 ): Promise<{ plan: Plan; cached: boolean }> {
   const cached = opts.recompile ? null : readPlan(key);
   if (cached) {
@@ -2088,6 +2183,16 @@ async function obtainPlan(
   if (!provider) {
     throw new CliError(`${providerRequirement(opts.model)} — needed to compile the test (model ${opts.model}).`, 3);
   }
+  if (segments.length > 1) {
+    err(`[ai] '${file}' is assembled from ${segments.length} chunk(s) across ${new Set(segments.map((x) => x.source)).size} file(s)`);
+    const split = await compileFromSegments(segments, key, opts, cost, provider);
+    if (split) {
+      err(`[ai] compiled ${split.steps.length} top-level step(s) · ${cost.summaryLine()}`);
+      cachePlan(key, split);
+      return { plan: split, cached: false };
+    }
+  }
+
   const seed = findSeed(key);
   if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
   err(`[ai] compiling '${file}' with ${opts.model} (effort ${opts.effort ?? 'default'})…`);
@@ -2124,11 +2229,7 @@ async function obtainPlan(
   }
 
   err(`[ai] compiled ${compiled.plan.steps.length} top-level step(s) · ${cost.summaryLine()}`);
-  try {
-    writePlan(key, compiled.plan);
-  } catch (e) {
-    err(`[ai] could not cache compiled plan: ${(e as Error).message}`);
-  }
+  cachePlan(key, compiled.plan);
   return { plan: compiled.plan, cached: false };
 }
 
@@ -2574,13 +2675,13 @@ async function runAiTest(
   platform: Platform,
   device: string | undefined,
 ): Promise<AiRunResult> {
-  const nl = readAiTest(file);
+  const { nl, segments } = readAiTest(file);
   const key: CacheKeyInput = { nl, pkg: opts.pkg, build: opts.build, platform };
   const cost = new CostTracker(opts.price, opts.maxCostUsd);
   const deadline = Date.now() + opts.timeoutMs;
   const provider = makeProvider(opts);
 
-  const { plan, cached } = await obtainPlan(key, file, opts, cost, provider);
+  const { plan, cached } = await obtainPlan(key, file, opts, cost, provider, segments);
 
   // Running needs the provider for repair-on-failure; a cache hit with no key can't repair.
   if (!provider) {
@@ -2733,10 +2834,10 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
 
   // --show-plan: compile (or cache-hit) and print the IR — no device, no backend.
   if (flagBool(flags, 'show-plan')) {
-    const nl = readAiTest(file);
+    const { nl, segments } = readAiTest(file);
     const key: CacheKeyInput = { nl, pkg: opts.pkg, build: opts.build, platform: platformFromFlags(flags) };
     const cost = new CostTracker(opts.price, opts.maxCostUsd);
-    const { plan } = await obtainPlan(key, file, opts, cost, makeProvider(opts));
+    const { plan } = await obtainPlan(key, file, opts, cost, makeProvider(opts), segments);
     json(plan);
     return 0;
   }

@@ -377,6 +377,13 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   directory so it never touches your working tree. Plans are provider-agnostic, so one compiled
   by any model replays for free under a CLI backend; use `--recompile` to force a fresh compile
   when comparing providers.
+- **Share a preamble between tests with `@include <path>`** on its own line. The named file's
+  prose is spliced in where the line sits, so the sign-in-and-land-on-a-known-screen block
+  lives in one file instead of being pasted into every test. Paths are relative to the
+  including file; a fragment may include another. Name a fragment `_something.md` — `vk suite`
+  skips `_`-prefixed files, so a fragment never runs as a test of its own. Each chunk compiles
+  and caches separately, so editing a shared fragment recompiles the fragment, not every test
+  that uses it.
 - The plan expresses **conditions** (`if-present`, for optional interstitials like a
   permission dialog) and **bounded loops** (`repeat … until`, e.g. scroll-until) —
   control flow `vk batch` cannot, so a flaky popup or a scroll-to-find no longer breaks
@@ -419,7 +426,8 @@ vk suite tests/ --app com.example.app        # reset app data between tests
 ```
 
 - Runs every `*.md` in the directory (lexicographic — `01-…`, `02-…` sequences
-  them; `README.md` is skipped) through the `vk ai` engine; all `ai` flags apply.
+  them; `README.md` and `_`-prefixed `@include` fragments are skipped) through the
+  `vk ai` engine; all `ai` flags apply.
 - `--app <id>` clears the app's data before each test (iOS: force-stop only).
   Without it, each test must self-isolate (e.g. start with `launch <pkg> --clear`).
 - A failing test doesn't stop the suite. stdout is the suite directory
