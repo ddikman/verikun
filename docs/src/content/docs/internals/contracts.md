@@ -247,7 +247,44 @@ classifier gibberish and asserting it still moves.
 what makes move-by-default safe — a wrong move costs time, never the diagnosis. A step keeps
 the opposite default (stay unless a re-probe confirms the device is dead), because there exit
 3 is dominated by transient device noise and moving on it would rotate the pool on ordinary
-flake.
+flake. **The re-probe's own error is classified too**: `preflight()` checks the toolchain
+before the phone, so an adb restart fails every probe on the host, and convicting a device for
+that is the upgrade `FailoverVerdict.probe` exists to prevent.
+
+**An install that fails on EVERY device condemns the build, not the pool.** Each per-device
+failover quarantines its own device on the way out, which is right for one device and wrong for
+all of them at once — the fan-out has just proved the artifact is the common factor. Those
+quarantines are rolled back.
+
+## A pool degrades, it does not shrink
+
+A pool's own members are excluded from its failover candidate list, so on `--devices all` —
+where every attached device is already a member — "nothing healthier to move to" is the
+**normal** case, not the exceptional one. Shedding there took a three-device pool to one in two
+failures, and nothing ever called `adopt` again, so it could not grow back.
+
+- **Demote, never shed.** A failing member keeps its worker, its claim and its slot, and is
+  reported as `degraded` rather than `quarantined` — the two are disjoint, because a device the
+  server still serves is not one it has ruled out. Only a device whose worker actually **died**
+  leaves the pool.
+- **Ordering is what makes that safe.** Leases are dealt healthy-first, then
+  least-recently-used. First-fit gave a *broken* device more traffic than a healthy one: it
+  fails fast, so it returns to the free set fastest and is handed straight back out.
+- **Recovery is proven by traffic, not a clock.** Any exec that is not an environment failure
+  (exit 1 is the app's verdict, exit 2 the caller's) or any successful hierarchy read restores
+  the device. That answers the no-TTL objection without a timer: the evidence is work that was
+  going to happen anyway.
+- **A device that left is swept for.** Once a minute a pooled server compares what `--devices`
+  asked for against what is serving and re-adopts the difference — which is why worker death
+  needs no bespoke retry path, and why an unplugged phone, an out-of-band emulator restart and
+  a device attached after startup are all the same case. Starting the worker **is** the probe,
+  each failure doubles the wait to a 30-minute ceiling, and a rejoining device is brought up to
+  the session's last install before it is dealt any work. Single-device servers do not sweep:
+  their binding belongs to `/v1/devices/*` and to failover's rebind.
+- **A worker call is bounded.** With no timeout a wedged thread left its lease permanently
+  in-flight — never idle, never reaped, never taken over — while health kept advertising the
+  device. It is terminated instead, which turns a wedged device into a departed one the sweep
+  can replace.
 
 ## The plan cache fingerprint
 

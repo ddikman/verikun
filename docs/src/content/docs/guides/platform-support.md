@@ -242,6 +242,8 @@ first tap rather than half-way through a half-modified device.
 <tr><td>Device claims (auto-pick a free device)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>vk server</code> failover — unreachable device</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>vk server</code> failover — device cannot serve an install</td><td>✅</td><td>✅</td><td>❌ probe only</td><td>❌ probe only</td></tr>
+<tr><td><code>vk server</code> pool degrade / rejoin sweep</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>vk server --log-file</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 </tbody>
 </table>
 

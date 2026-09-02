@@ -9,15 +9,30 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 - **`@include <path>`** in a `vk ai` test inlines another file's prose, so a shared preamble
   lives in one place. Paths resolve relative to the including file. ([#112])
+- **`vk server --log-file <path|off>`** writes a rotating server log, on by default at
+  `~/.verikun/logs/server-<port>.log`. `VERIKUN_LOG_FILE` sets the same value.
+- **`vk server`** re-adopts pooled devices that come back, sweeping every 60s with backoff.
+- **`/v1/health`** reports `degraded`: pool members still serving but dealt last.
 
 ### Changed
 - **`vk suite`** skips `_`-prefixed `*.md` — those are shared fragments, not tests. ([#112])
 - **`vk ai`** compiles each chunk of an `@include`d test separately and caches it, so shared
   prose is compiled once across a suite. ([#112])
+- **`vk server`** demotes a failing pooled device instead of dropping it, so capacity no
+  longer ratchets down and never recovers.
+- **`vk server`** deals leases healthy-first, then least-recently-used, instead of first-fit.
+- **`vk server`** no longer blames a device when the probe itself fails for a host reason.
+- **`vk server`** keeps the pool intact when an install fails on every device — the build is
+  the suspect, not the phones.
+- **`vk server`** logs error bodies, run tokens, leased serials and every lease eviction.
 - **`vk install`** (Android) removes a differently-signed build of the same package and retries,
   instead of failing. Its app data is lost; stderr says so. ([#96])
 - **`VERIKUN_CLAIM_TTL_MIN`** now also paces a parallel suite's claim heartbeat — a quarter of
   the window, capped at 60s — so a short TTL no longer races it.
+
+### Fixed
+- **`vk server`** terminates a worker that stops answering, instead of holding its lease
+  forever while health still advertises the device.
 
 [#96]: https://github.com/ddikman/verikun/issues/96
 [#112]: https://github.com/ddikman/verikun/issues/112

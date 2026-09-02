@@ -13,6 +13,7 @@ sidebar:
 | `ANDROID_SERIAL` | — | Fallback device serial, **Android only**, checked after `VERIKUN_DEVICE` |
 | `ADB` | `adb` | Path to the `adb` binary |
 | `IDB` | `idb` | Path to the `idb` binary — useful when it lives in a Python virtualenv |
+| `VERIKUN_LOG_FILE` | unset | Where [`vk server`](/verikun/guides/remote-devices-and-ci/) writes its log. A path relocates it; `off` disables the file and leaves stderr. `--log-file` wins over it. Default: `~/.verikun/logs/server-<port>.log`, rotated at 10 MB keeping one previous generation. |
 | `VERIKUN_NO_FAILOVER` | unset | Set to `1` to stop a [`vk server`](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) moving off a device that fails. Wins over `--allow-failover`, and is announced in the server's startup log. |
 | `VERIKUN_NO_CLAIM` | unset | Set to `1` to disable [device claims](/verikun/reference/device-claims/) entirely — no reads, no writes. Restores the older behaviour: more than one attached device exits `2` rather than picking a free one. |
 | `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. It also paces the heartbeat of a job that holds devices without running commands itself (a parallel `vk suite`) — a quarter of the window, capped at 60s. |
