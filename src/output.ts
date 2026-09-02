@@ -22,8 +22,39 @@ export function out(s: string): void {
   process.stdout.write(s + '\n');
 }
 
+/**
+ * A second destination for `err()`, or null.
+ *
+ * Diagnostics are written in ~90 places across `server.ts`, the pool and the drivers, and
+ * every one of them already goes through `err()`. Teeing HERE is what lets `vk server`
+ * capture all of them — including the worker threads, whose prefixed stderr is forwarded
+ * into this process (see `server-worker.ts`) — without editing a single call site, and
+ * without a second "log this too" primitive that new code could forget to use.
+ *
+ * Deliberately NOT applied to `out()`: stdout is the data channel, and a server silences
+ * it entirely (`setOutputQuiet`). A sink on stdout would tee a `--json` payload into a log
+ * file, which is a different thing wearing the same name.
+ */
+let errSink: ((line: string) => void) | null = null;
+
+/** Tee `err()` into `fn` as well as stderr. Pass null to stop. */
+export function setErrSink(fn: ((line: string) => void) | null): void {
+  errSink = fn;
+}
+
 export function err(s: string): void {
   process.stderr.write(s + '\n');
+  // A log sink must never be able to turn a DIAGNOSTIC into a crash: this runs on the
+  // error path of every subsystem, often while something has already gone wrong. A full
+  // disk or a revoked descriptor drops the line and leaves stderr — which is exactly the
+  // pre-sink behaviour — rather than unwinding through a caller's catch block.
+  if (errSink) {
+    try {
+      errSink(s);
+    } catch {
+      /* the log is best-effort; stderr above already carried it */
+    }
+  }
 }
 
 export function json(obj: unknown): void {

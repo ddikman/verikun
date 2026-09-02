@@ -455,38 +455,80 @@ error, never the last — so the real cause stays the headline:
 Failed to install '…apk': adb: device offline
 [failover] no working device remains; ruled out:
   emulator-5554  the device is offline
-[failover] clear one with `vk devices restart <name> --server <url>`, or fix it and restart the server
+[failover] reattach or fix a device and the pool re-adopts it within a minute; an emulator can also be power-cycled with `vk devices restart <name> --server <url>`
 ```
 
 ### Failover on a pool
 
 With [`--devices`](#serving-several-devices-from-one-address) the same machinery keeps the pool
-at **full capacity** rather than moving a single binding: the failed device is quarantined and
-dropped, and a healthy unclaimed one joins in its place. The other devices keep serving
-throughout — a lease on a different phone never notices.
+at **full capacity** rather than moving a single binding. If a healthy unclaimed device is
+attached and not already a member, it joins and the failed one leaves. The other devices keep
+serving throughout — a lease on a different phone never notices.
 
-Two rules make it safe to reason about:
+Usually there is no such spare, because `--devices all` already pooled everything attached.
+Then the failing device is **demoted, not dropped**:
+
+- It keeps its worker, its claim and its place in the pool, and `/v1/health` lists it under
+  `degraded` rather than `quarantined`.
+- Leases are dealt **healthy first, then least-recently-used**, so a demoted device is chosen
+  only when nothing else is free. That is what makes demotion a complete answer to dropping it:
+  the pool stops handing work to a bad phone without losing the capacity.
+- It is **restored by working**, not by a timer — the first step or hierarchy read that
+  succeeds on it puts it back in the healthy rotation.
+
+The alternative, dropping it, is what a pool cannot afford: the members are excluded from their
+own candidate list, so "nothing healthier to move to" is the *normal* case, and shedding there
+took a three-device pool to one in two failures with no way back.
+
+Two rules make the move safe to reason about:
 
 - **The lease follows the move.** The run whose device failed lands on the replacement the
   server just announced, not on some third device its next request happens to draw — and it
   does not lose its place in the queue to a racing job. The failing *step* is still never
   replayed; it keeps the old device's error, and the client seals that run and opens a fresh
   one for the new device, so no report spans two.
-- **The last device is never shed.** A pool of three that loses one becomes a pool of two;
-  a server down to its final device stays on it, because answering `503 no device attached`
-  from then on would replace the real diagnosis — a full disk, say — with a message that names
-  nothing.
+- **The last device is never shed.** A server down to its final device stays on it, because
+  answering `503 no device attached` from then on would replace the real diagnosis — a full
+  disk, say — with a message that names nothing.
+
+### A device that comes back rejoins by itself
+
+A pooled server sweeps once a minute for devices that *should* be serving and are not — one
+whose worker died, a phone unplugged and replugged, an emulator restarted out of band, or (with
+`--devices all`) one attached after startup. An explicit `--devices a,b,c` only ever re-adopts
+from that list.
+
+Rejoining is gated on evidence, never a clock: starting the worker **is** the probe, since it
+only reports ready once its own preflight passed. A device that is still broken simply fails to
+come back, and each failure doubles the wait before the next attempt, up to 30 minutes — so a
+genuinely dead phone costs almost nothing while a transiently absent one is back within a
+minute. Every attempt is logged.
+
+If a build has been installed this session, a rejoining device is brought up to it before it is
+dealt any work; if that install fails, it stays out rather than serve the wrong build.
+
+```
+[server] pool: emulator-5556 left the pool — worker exited with code 1
+[server] reconcile: emulator-5556 should be serving and is not — attempt 1
+[server] reconcile: emulator-5556 did not rejoin — next attempt in 120s
+[server] pool: emulator-5556 joined the pool (2 device(s) serving)
+[server] reconcile: emulator-5556 brought up to the current build
+```
 
 ### What was ruled out, and how to clear it
 
-A quarantine lasts as long as the server process. There is no timer, on purpose: a device that
-ran out of disk ten minutes ago is still out of disk, and silently re-trying it would burn
-another full install on a schedule nobody can see. A successful
-`vk devices restart|start|stop` for that device clears it — power-cycling *is* the fix, and
-doing one is the assertion that it worked.
+A quarantine says "never move *onto* this device". It lasts as long as the server process and
+has no timer, on purpose: a device that ran out of disk ten minutes ago is still out of disk,
+and silently re-trying it would burn another full install on a schedule nobody can see. A
+successful `vk devices restart|start|stop` for that device clears it — power-cycling *is* the
+fix, and doing one is the assertion that it worked. A device that **rejoins** the pool clears
+it too, because coming up is a real probe rather than a guess.
+
+An install that fails on *every* device is read as a bad build, not a bad pool, so the
+quarantines that attempt set are rolled back.
 
 ```sh
-curl -s "$VERIKUN_SERVER/v1/health" | jq '{serial, failoverEnabled, quarantined}'
+curl -s "$VERIKUN_SERVER/v1/health" | jq '{capacity, devices, degraded, quarantined}'
 vk devices --server "$VERIKUN_SERVER"     # a NOTE column shows why each was ruled out
 ```
 
@@ -504,6 +546,21 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 - Restart on failure — the device lock's 5-minute idle takeover means a restart mid-run does
   not permanently wedge anything.
 
+The server writes its own log, so a service unit needs no output redirection: by default
+`~/.verikun/logs/server-<port>.log`, rotated at 10 MB keeping one previous generation. The
+startup banner names the path. `--log-file <path>` moves it (useful when the service runs as a
+user whose `$HOME` is not where you look), and `--log-file off` leaves stderr only.
+
+It records every request with its status, run token and leased device, the reason behind every
+error the client was sent, and every lease, failover and pool change — which is what makes
+"why did capacity drop during last night's run?" answerable after the fact:
+
+```
+2026-09-02T09:14:22.108Z [server] POST /v1/exec run=a1b2c3d4 dev=emulator-5554 → 200 (812ms)
+2026-09-02T09:14:31.744Z [server] pool: emulator-5556 degraded — the device stopped answering (dealt last until it works again)
+2026-09-02T09:14:31.745Z [server] lease: run 9f8e7d6c… evicted from emulator-5556 — emulator-5556 is no longer in the pool
+```
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -515,6 +572,8 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 | `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / `signatures do not match` | The device holds a build of the same package signed by a different key. On Android the server removes it and retries by itself; if it still fails, the message names the package and the `adb uninstall` to run on the host. iOS has no such recovery. |
 | `not enough space` / `INSTALL_FAILED_INSUFFICIENT_STORAGE` | The device's disk is full. With failover on the server moves to another attached device by itself; if it reports `no working device remains`, free space on the named device or `vk devices restart` it. |
 | The suite ran on a device you did not expect | The server failed over. `[verikun] server moved device:` on the client, and `/v1/health`'s `quarantined`, say which device was ruled out and why. |
+| A pool's `capacity` fell during a run | Read the server log (`~/.verikun/logs/server-<port>.log`). A device only leaves the pool when its worker died; one that merely failed is `degraded` and still serving. Anything that left is retried automatically, with the reason and the next attempt logged. |
+| A device never rejoins the pool | Its rejoin attempts are failing — the log names the reason each time. Backoff doubles to a 30-minute ceiling, so check the most recent `reconcile:` line rather than waiting. |
 | Steps take ~2.4s each on Android | The server is on the stock read path. `curl "$VERIKUN_SERVER/v1/health" \| jq .reads` says which, and why — most often `VERIKUN_COMPANION` is set in the **server's** environment, or the [companion](/verikun/guides/companion/) declined on that device. |
 
 More in [Troubleshooting](/verikun/guides/troubleshooting/).

@@ -165,6 +165,13 @@ export interface HealthResponse {
    * which is what makes "is the pool healthy?" answerable without a run token.
    */
   quarantined?: Array<{ serial: string; reason: string }>;
+  /**
+   * Pool members that are SERVING but suspect — one recently failed on them, so the server
+   * deals them last until they do some work again. Disjoint from `quarantined`, which names
+   * devices that are not serving at all. Omitted when empty, so a CI job can assert on its
+   * absence exactly as it can for a quarantine.
+   */
+  degraded?: Array<{ serial: string; reason: string }>;
 }
 
 /** Body of POST /v1/devices/{start,restart,stop}. An empty body is the only form a

@@ -131,7 +131,7 @@ Change the *device* the app runs on, then put it back. Full detail:
 
 | Command | Description |
 |---|---|
-| `server [--bind addr] [--port n] [--auth-key k] [--devices all\|all-android\|all-ios\|a,b] [--allow-install] [--allow-device-control[=names]] [--allow-failover[=serials]\|--no-failover] [--allow-unsafe-anonymous]` | Expose this machine's connected device(s) to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. `--devices` serves a whole pool from one address, leasing one device per run; a device that fails is quarantined and replaced. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
+| `server [--bind addr] [--port n] [--auth-key k] [--devices all\|all-android\|all-ios\|a,b] [--allow-install] [--allow-device-control[=names]] [--allow-failover[=serials]\|--no-failover] [--allow-unsafe-anonymous] [--log-file path\|off]` | Expose this machine's connected device(s) to remote verikun clients (`ai` / `suite` / `install --server`). Auth is mandatory unless explicitly disabled; only verikun's validated command grammar is executable. `--devices` serves a whole pool from one address, leasing one device per run; a device that fails is demoted (dealt last) rather than dropped, and one that comes back is re-adopted. Logs to `~/.verikun/logs/server-<port>.log` unless `--log-file off`. Binds `127.0.0.1:8391` by default. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/). |
 
 Clients pass `--server <url>` (or `VERIKUN_SERVER`) plus `--auth-key` (or
 `VERIKUN_SERVER_AUTH_KEY`) to `ai`, `suite` and `install`. **The server's device and platform

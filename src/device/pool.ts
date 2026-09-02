@@ -90,7 +90,7 @@ export function csvList(raw: string | boolean | undefined): string[] {
  * for that phone, and quietly serving the rest would hand back less capacity than was
  * requested with nothing saying so.
  */
-export function poolSerials(platform: Platform, spec: DevicePoolSpec): string[] {
+export function poolSerials(platform: Platform, spec: DevicePoolSpec, opts: { quiet?: boolean } = {}): string[] {
   const attached = getDriver(platform, undefined).listDevices();
   // `isUsableState`, not a hand-rolled `state === 'device'`: iOS never uses that string —
   // simctl states arrive lowercased as `booted`/`shutdown` — so the naive check made
@@ -107,7 +107,9 @@ export function poolSerials(platform: Platform, spec: DevicePoolSpec): string[] 
     const virtual = usable.filter((d) => d.kind === 'emulator' || d.kind === 'simulator');
     const chosen = virtual.length ? virtual : usable;
     if (!chosen.length) throw new CliError(`--devices: no usable ${platform} device is attached.`, 3);
-    if (virtual.length && virtual.length < usable.length) {
+    // `quiet` is for the server's reconciler, which re-asks this question every minute: the
+    // note is a startup explanation, and repeating it forever would bury the log it shares.
+    if (!opts.quiet && virtual.length && virtual.length < usable.length) {
       err(`[verikun] --devices: pooling the ${virtual.length} virtual device(s); name a serial to pool a physical one.`);
     }
     return chosen.map((d) => d.serial);

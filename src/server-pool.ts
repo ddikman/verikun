@@ -84,6 +84,23 @@ const WORKER_READY_TIMEOUT_MS = 60_000;
 const READS_TTL_MS = 30_000;
 
 /**
+ * How long one worker call may go unanswered before its device is presumed wedged.
+ *
+ * There was no bound at all: only the 60s startup handshake was timed, so a worker whose
+ * event loop stopped (a blocking spawnSync that outlived its own timeout, a companion socket
+ * read that never returned) left its request pending forever. Nothing recovered from that —
+ * the lease's `inFlight` count never dropped, so the lease never went idle, was never reaped
+ * and was never taken over, while `/v1/health` kept advertising the device as capacity. The
+ * client saw 409 for the rest of the server's life.
+ *
+ * Matched to `server.requestTimeout`, deliberately: this is a BACKSTOP for a wedged thread,
+ * not a policy on how long work may take. A 512 MB install over a slow link and a long
+ * `wait` are both legitimate, and cutting one short would be a new failure rather than a
+ * recovery from one.
+ */
+const WORKER_CALL_TIMEOUT_MS = 30 * 60_000;
+
+/**
  * One device's worker thread, with replies correlated by id and commands serialized.
  *
  * The serialization is per DEVICE, which is the whole point of the pool: a phone can
@@ -188,7 +205,25 @@ class WorkerHandle implements DeviceHandle {
     if (this.dead) return Promise.reject(this.dead);
     const id = ++this.seq;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      const timer = setTimeout(() => {
+        // Only if it is still outstanding — a reply that landed first already cleared it.
+        if (!this.pending.delete(id)) return;
+        err(`[server] pool: ${this.serial} did not answer '${req.kind}' in ${WORKER_CALL_TIMEOUT_MS / 60_000}m — terminating its worker`);
+        // Terminating is what makes this a RECOVERY rather than just a rejection: the
+        // 'exit' handler runs `die`, which fails everything else in flight and calls
+        // `forget`, so the device leaves the pool honestly and the reconciler can bring it
+        // back. Leaving the thread alive would keep its device's UiAutomation connection
+        // held with nothing on the host able to say why.
+        void this.worker.terminate();
+        reject(new CliError(`device ${this.serial} stopped responding (no reply to '${req.kind}')`, 3));
+      }, WORKER_CALL_TIMEOUT_MS);
+      // A pending call must not by itself keep the process alive at shutdown.
+      timer.unref?.();
+      const settle = <A>(fn: (a: A) => void) => (a: A): void => {
+        clearTimeout(timer);
+        fn(a);
+      };
+      this.pending.set(id, { resolve: settle(resolve) as (v: unknown) => void, reject: settle(reject) });
       this.worker.postMessage({ ...req, id } as WorkerRequest);
     });
   }
@@ -341,6 +376,11 @@ export class WorkerDevicePool implements DevicePool {
       // against a map it is not in yet (a silent no-op) and then be inserted DEAD — a
       // poisoned slot that health advertises and every lease is handed.
       this.handles.set(serial, await WorkerHandle.start(this.platform, serial, this.forget));
+      // Announced, like the departure in `forget`. Capacity has to be legible in BOTH
+      // directions or a log shows a pool that only ever shrinks: at boot this confirms each
+      // device came up individually rather than as one aggregate banner line, and later it
+      // is how a reconciler's re-adoption is distinguished from a device that never left.
+      err(`[server] pool: ${serial} joined the pool (${this.handles.size} device(s) serving)`);
       return true;
     } catch (e) {
       err(`[server] pool: ${serial} is NOT serving (${(e as Error).message})`);

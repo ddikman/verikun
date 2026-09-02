@@ -52,6 +52,11 @@ function fakeLifecycle(over: Partial<ServerLifecycle> = {}) {
 let server: Server;
 let base: string;
 const madeDrivers: string[] = [];
+
+/** Bring a fake device back from the dead, so a test can assert the reconciler re-adopts it.
+ *  The real thing needs no such hook: `adopt` probes the actual phone, which either answers
+ *  again or does not. Set by `fakePool`. */
+let reviveDevice: (serial: string) => void = () => undefined;
 /** Throwaway $HOME for the host-global claim store — failover claims for real. */
 const claimHome = mkdtempSync(join(tmpdir(), 'vk-server-claims-'));
 
@@ -75,6 +80,7 @@ function fakePool(
   /** Serials whose worker has died: like WorkerHandle's `dead` latch, EVERY later call
    *  on that handle rejects, including the probe failover uses to confirm the death. */
   const deceased = new Set<string>();
+  reviveDevice = (serial: string) => deceased.delete(serial);
   let lossListener: ((serial: string, why: string) => void) | undefined;
   const handleFor = (serial: string): DeviceHandle => {
     const driver = makeDriver({ resolvedSerial: () => serial, ...(fakes[serial] ?? {}) });
@@ -1032,7 +1038,11 @@ test('failover on a pool: the lease follows the move rather than drawing a third
   assert.equal((await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-B' })).status, 409);
 });
 
-test('failover on a pool: with nothing healthier the pool SHRINKS rather than keep a bad device', async () => {
+test('failover on a pool: a device with no replacement is DEGRADED, never shed', async () => {
+  // The pool's own members are excluded from its candidate list, so "nothing healthier to
+  // move to" is the NORMAL case on a full pool, not an exceptional one. Shedding there took
+  // a three-device pool to one in two verdicts and could never grow back. Demotion keeps the
+  // capacity and costs nothing: the device is simply dealt last (see the ordering test).
   const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
   await start({ serials: ['a', 'b'], failover: { allowedTargets: [] }, lifecycle: lc }, { a: deadDevice() });
   const mine = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
@@ -1044,8 +1054,35 @@ test('failover on a pool: with nothing healthier the pool SHRINKS rather than ke
     token,
   });
   const health = (await (await call('/v1/health')).json()) as HealthResponse;
-  assert.deepEqual(health.devices, ['b'], 'a pool of two where one is broken is a coin flip per lease');
-  assert.equal(health.capacity, 1);
+  assert.deepEqual(health.devices, ['a', 'b'], 'capacity is preserved — the bad device stays, demoted');
+  assert.equal(health.capacity, 2);
+  assert.deepEqual(health.degraded?.map((d) => d.serial), ['a'], 'and it is reported as suspect');
+  // Disjoint by construction: a device the server still serves is not "ruled out".
+  assert.equal(health.quarantined?.some((q) => q.serial === 'a') ?? false, false);
+});
+
+test('lease ordering: a degraded device is dealt LAST, and healthy devices round-robin', async () => {
+  // First-fit gave a BROKEN device more traffic than a healthy one: it fails fast, so it is
+  // returned to the free set fastest and handed straight back out.
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start({ serials: ['a', 'b'], failover: { allowedTargets: [] }, lifecycle: lc }, { a: deadDevice() });
+  // Break 'a' so it is demoted.
+  const first = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  const onA = first.serial === 'a' ? 'run-A' : 'run-B';
+  if (first.serial !== 'a') await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-B' });
+  await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: onA,
+  });
+  for (const t of ['run-A', 'run-B']) await call('/v1/release', { method: 'POST', body: '{}', token: t });
+
+  // With both free, the healthy one wins however the pool happens to be ordered.
+  const next = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-C' })).json()) as { serial: string };
+  assert.equal(next.serial, 'b', 'healthy before degraded');
+  // The degraded device is still SERVED when nothing healthy is free — demoted, not removed.
+  const spill = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-D' })).json()) as { serial: string };
+  assert.equal(spill.serial, 'a', 'capacity is still there when it is actually needed');
 });
 
 test('failover: the LAST device is never shed, so its own error survives', async () => {
@@ -1253,12 +1290,14 @@ test('exec: artifacts survive the worker boundary as real base64', async () => {
   assert.deepEqual(Buffer.from(encoded, 'base64'), png, 'the bytes must round-trip exactly');
 });
 
-test('failover: a shed device EVICTS its holder instead of silently moving it', async () => {
-  // With no replacement there is no `deviceChanged` to send, so the client never seals its
-  // run. Quietly handing it another device would produce a run whose early steps ran on
-  // one phone and its later ones on another, with the report naming only the first.
+test('failover: a device that LEFT the pool evicts its holder instead of silently moving it', async () => {
+  // A worker that died takes its device with it, and with no replacement there is no
+  // `deviceChanged` to send — so the client never seals its run. Quietly handing it another
+  // device would produce a run whose early steps ran on one phone and its later ones on
+  // another, with the report naming only the first. (A device that merely FAILED is demoted
+  // instead and keeps its holder — see the degradation test above.)
   const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
-  await start({ serials: ['a', 'b'], failover: { allowedTargets: [] }, lifecycle: lc }, { a: deadDevice() });
+  await start({ serials: ['a', 'b'], failover: { allowedTargets: [] }, lifecycle: lc, dies: 'a' });
   const held: Record<string, string> = {};
   for (const token of ['run-A', 'run-B']) {
     held[token] = ((await (await call('/v1/lease', { method: 'POST', body: '{}', token })).json()) as { serial: string }).serial;
@@ -1266,12 +1305,14 @@ test('failover: a shed device EVICTS its holder instead of silently moving it', 
   const holder = held['run-A'] === 'a' ? 'run-A' : 'run-B';
   const bystander = holder === 'run-A' ? 'run-B' : 'run-A';
 
-  const body = (await (await call('/v1/exec', {
+  // `dies` kills the worker on first use — the case that still sheds, because the device
+  // really is gone rather than merely suspect.
+  const r = await call('/v1/exec', {
     method: 'POST',
     body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
     token: holder,
-  })).json()) as ExecResponse;
-  assert.equal(body.deviceChanged, undefined, 'nothing to move to, so nothing moved');
+  });
+  assert.ok(r.status >= 400, 'the failing step still fails, with this device\'s own error');
 
   const next = await call('/v1/lease', { method: 'POST', body: '{}', token: holder });
   assert.equal(next.status, 409, 'the interrupted run must not continue on another phone');
@@ -1443,4 +1484,148 @@ test('install: an idle lease does not block the server forever', async () => {
   assert.equal((await install('run-B')).status, 409, 'a live run blocks it');
   await new Promise((r) => setTimeout(r, 50));
   assert.equal((await install('run-B')).status, 200, 'a crashed one does not');
+});
+
+// --- reconciliation ---------------------------------------------------------
+//
+// The pool used to be a ratchet: nothing ever called `adopt` again, so every departure was
+// permanent for the server's whole life. These pin the sweep that repairs that.
+
+/** Poll until `probe` is true, or fail the test. Sweeps are timer-driven, so a test that
+ *  slept a fixed amount would be either slow or flaky. */
+async function until(probe: () => Promise<boolean>, what: string, ms = 2000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await probe()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.fail(`timed out waiting for: ${what}`);
+}
+
+const capacity = async (): Promise<number> => ((await (await call('/v1/health')).json()) as HealthResponse).capacity ?? 0;
+
+test('reconcile: a device whose worker died is re-adopted once it answers again', async () => {
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start({
+    serials: ['a', 'b'],
+    poolSpec: { all: false, serials: ['a', 'b'] },
+    reconcileMs: 10,
+    failover: { allowedTargets: [] },
+    lifecycle: lc,
+    dies: 'a',
+  });
+  await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: 'run-A',
+  });
+  await until(async () => (await capacity()) === 1, 'the dead device to leave the pool');
+
+  // While it is still dead the sweep keeps failing — and must not wedge or crash the server.
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(await capacity(), 1, 'a device that is still broken does not come back');
+
+  reviveDevice('a');
+  await until(async () => (await capacity()) === 2, 'the recovered device to rejoin');
+});
+
+test('reconcile: an explicit --devices list never grows beyond the serials named', async () => {
+  // `all` re-enumerates and may legitimately pick up a device attached after startup; a
+  // named list is a promise about which phones this server touches.
+  //
+  // Failover is OFF here so the sweep is the only thing that can change the pool. Failover
+  // moving onto an unnamed spare is a separate, deliberate liberty (`--allow-failover` with
+  // no targets means any attached device) and would otherwise mask what this pins.
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b', 'c') });
+  await start({
+    serials: ['a', 'b'],
+    poolSpec: { all: false, serials: ['a', 'b'] },
+    reconcileMs: 10,
+    lifecycle: lc,
+    dies: 'a',
+  });
+  await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: 'run-A',
+  });
+  await until(async () => (await capacity()) === 1, 'the dead device to leave');
+  reviveDevice('a');
+  await until(async () => (await capacity()) === 2, 'the named device to rejoin');
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.deepEqual(health.devices?.slice().sort(), ['a', 'b'], "'c' was never asked for");
+});
+
+test('reconcile: rejoining clears the quarantine that ruled the device out', async () => {
+  // Adoption IS the probe — a worker only reports ready once its own preflight passed — so
+  // a device that comes back has produced better evidence than any TTL could.
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start(
+    {
+      serials: ['a', 'b'],
+      poolSpec: { all: false, serials: ['a', 'b'] },
+      reconcileMs: 10,
+      failover: { allowedTargets: [] },
+      lifecycle: lc,
+      dies: 'a',
+    },
+    { a: deadDevice() },
+  );
+  await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: 'run-A',
+  });
+  await until(async () => (await capacity()) === 1, 'the dead device to leave');
+  reviveDevice('a');
+  await until(async () => (await capacity()) === 2, 'the device to rejoin');
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(health.quarantined?.some((q) => q.serial === 'a') ?? false, false, 'no longer ruled out');
+});
+
+test('install: a build that fails on EVERY device condemns the build, not the pool', async () => {
+  // Each per-device failover quarantines its own device on the way out, because the install
+  // classifier moves by default on wordings it has never seen. Right for one device; applied
+  // to all of them at once it condemns the whole pool for what is plainly a bad artifact.
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start(
+    { serials: ['a', 'b'], allowInstall: true, failover: { allowedTargets: [] }, lifecycle: lc },
+    { a: installFails('surprising new adb wording'), b: installFails('surprising new adb wording') },
+  );
+  assert.equal((await install()).status, 500);
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(health.quarantined, undefined, 'no device was ruled out for a bad build');
+  assert.equal(health.capacity, 2, 'and the pool kept its capacity');
+});
+
+test('failover: a probe that fails for a HOST reason does not convict the device', async () => {
+  // `preflight()` checks the toolchain before it checks the phone (`probeAdb` shells out to
+  // `adb version` on every call, uncached), so an adb server restart fails BOTH probes a
+  // second apart. That used to read as "the device stopped answering" and demote a healthy
+  // phone — the exact upgrade FailoverVerdict.probe exists to prevent, applied to the
+  // original error but never to the probe's own.
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start(
+    { serials: ['a', 'b'], failover: { allowedTargets: [] }, lifecycle: lc },
+    {
+      a: {
+        // An unrecognised exit 3 — the only verdict that earns a probe at all.
+        getElements: () => {
+          throw new CliError('some wording the classifier has never seen', 3);
+        },
+        preflight: () => {
+          throw new CliError("'adb' was not found on PATH", 3);
+        },
+      },
+    },
+  );
+  const mine = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' })).json()) as { serial: string };
+  const token = mine.serial === 'a' ? 'run-A' : 'run-B';
+  if (mine.serial !== 'a') await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-B' });
+  await call('/v1/elements', { method: 'POST', body: '{}', token });
+
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(health.capacity, 2, 'a broken host toolchain is not evidence against a device');
+  assert.equal(health.degraded, undefined, 'and it is not demoted either');
+  assert.equal(health.quarantined, undefined);
 });
