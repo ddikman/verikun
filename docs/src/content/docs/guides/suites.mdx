@@ -137,6 +137,10 @@ devices buy nothing — the useful number is small, and it rises only as the sui
   test crash isolation and its own active run directory (`./.verikun/run-<lane>/`).
 - **Each row names the device that ran it**, in `index.json` and in the overview table. That
   is what makes "is this device bad, or is this test bad?" answerable.
+- **A shared `@include` fragment is still compiled once on a cold cache**, not once per lane.
+  The lanes share one plan cache, so the first to reach a fragment compiles it and the rest
+  wait for its result — they print `compiled by a concurrent run`. See
+  [the plan cache](/verikun/reference/ai-plans/#the-plan-cache).
 - **Duration splits in two.** `totals.wallClockMs` is how long the gate took;
   `totals.durationMs` keeps its meaning but is now device-seconds across the pool.
 - **`--app` resets inside the test**, on the device that test holds — a reset issued from

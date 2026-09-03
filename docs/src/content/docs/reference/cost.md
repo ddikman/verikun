@@ -150,7 +150,9 @@ The budget is a **pre-spend** gate, tested at four points:
    compiles a chunk at a time, and falls back to compiling the whole file if the assembled plan
    fails the lint. Every one of those after the first asks, so a compile cannot quietly cost
    several times the ceiling. Crossing it on the *last* chunk is not a breach — nothing further
-   is being asked for, so the plan is finished and point 3 declines to run it.
+   is being asked for, so the plan is finished and point 3 declines to run it. A chunk another
+   run compiled while this one waited costs nothing, so it is handed over *before* this check:
+   a ceiling refuses spending, not a free result.
 2. **Before the lint retry** — non-fatal. It keeps the first plan and carries on rather than paying
    for a better one.
 3. **After compile, before the device run** — fatal. The run never starts.

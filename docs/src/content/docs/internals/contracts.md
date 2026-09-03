@@ -303,6 +303,34 @@ an included test also has its own entry under its own text. It reads tolerantly 
 miss, not a crash), writes atomically, caches the compile immediately so an unchanged test
 never recompiles and re-persists, and re-persists the healed plan on green.
 
+## The plan-compile lock
+
+Atomic writes make a *concurrent* write safe; they do not stop two processes doing the same
+work. A pooled `vk suite` is one child process per test sharing one cache, so on a cold cache
+every lane missed the same `@include`d fragment at the same instant and compiled its own — N×
+the tokens, and N different nondeterministic draws of one preamble alive in one suite run.
+
+A **per-key lock** closes it: a compile takes `./.verikun/plan-locks/<key>.lock`, the losers
+wait and re-read the cache under the lock. Four properties are load-bearing.
+
+- **Beside the cache, never inside it.** `.verikun/plans` is the directory CI restores with
+  `actions/cache`; a lock packed into that tarball would come back on a fresh runner as a
+  foreign-host corpse, on exactly the cold-cache run the cache exists to make cheap.
+- **Taken only on a miss.** The steady state is all hits and does no lock I/O.
+- **Liveness is the pid, with an age ceiling.** There is no heartbeat and there cannot be one:
+  a CLI provider compiles inside a blocking `spawnSync`, so a timer in the holder could not
+  fire. Same rule as a device claim's — a live pid always means live.
+- **It can never be a new way to fail.** An unwritable directory, a corrupt lock, or a holder
+  that outlives the wait ceiling all mean *compile anyway* — one duplicate compile, which is
+  the state being improved on. The wait ceiling is derived from `--timeout`, because the run's
+  own deadline starts before the plan is obtained. `VERIKUN_NO_PLAN_LOCK=1` restores the
+  pre-lock behaviour exactly.
+
+Unlike a [device claim](/verikun/reference/device-claims/), a lost race here is cheap — one
+wasted compile, not two jobs driving one phone — so breaking a stale lock is deliberately
+*not* serialised with a takeover token. The two mechanisms share their primitives and nothing
+else.
+
 `VERSION` is generated from `package.json` at build, which is why a rebuild rotates the
 fingerprint automatically.
 

@@ -121,6 +121,18 @@ const DEFAULT_TTL_MIN = 5;
  */
 const PID_TRUST_MAX_MS = 6 * 60 * 60 * 1000;
 
+// --- shared with the plan-compile lock --------------------------------------
+//
+// `pidAlive`, `writeExclusive` and `tmpPath` below are exported for the plan cache and for
+// `agent/plan-lock.ts`, which fences the plan cache the way this file fences devices.
+// Different trust domains (host-global devices vs one working directory's cache), so they
+// stay separate MECHANISMS — but the primitives underneath are the same, and a second copy
+// would fail INVISIBLY. `pidAlive` is eight lines of subtle judgement (EPERM means "exists,
+// someone else's" — alive), and a copy that got it wrong would make the lock either never
+// stale or always stale, with nothing reporting either. `tmpPath`'s own doc comment cites
+// `findSeed`, so the plan cache using anything else would falsify it. Same rule as
+// `--devices` having ONE parser.
+
 // --- process-wide latch -----------------------------------------------------
 
 let processScoped = false;
@@ -246,8 +258,9 @@ export function isMine(c: DeviceClaim, o: ClaimOpts = {}): boolean {
   return c.cwd === (o.cwd ?? process.cwd());
 }
 
-/** Whether a pid is running. EPERM means it exists but belongs to someone else — alive. */
-function pidAlive(pid: number): boolean {
+/** Whether a pid is running. EPERM means it exists but belongs to someone else — alive.
+ *  Shared with `agent/plan-lock.ts` (see the note beside PID_TRUST_MAX_MS). */
+export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -353,9 +366,10 @@ function record(serial: string, platform: Platform, o: ClaimOpts, since?: string
 
 let tmpSeq = 0;
 
-/** A scratch path in the store directory. Never ends in `.json`, so `listClaims` and
- *  `findSeed`-style scans skip it even if one is ever left behind. */
-function tmpPath(p: string): string {
+/** A scratch path beside `p`. Never ends in `.json` or `.lock`, so `listClaims`,
+ *  `findSeed`-style scans and the plan-lock reader skip it even if one is ever left
+ *  behind. Exported for `agent/plan-lock.ts` and the plan cache's own atomic write. */
+export function tmpPath(p: string): string {
   return `${p}.tmp-${process.pid}-${(tmpSeq += 1)}`;
 }
 
@@ -380,8 +394,12 @@ function writeAtomic(p: string, c: DeviceClaim): void {
  * with `wx` under real load (two e2e suites plus an emulator), where six processes racing
  * for one device produced THREE winners. Load is exactly when parallel agents contend, so
  * closing it structurally beats relying on the scheduler.
+ *
+ * The body is `unknown` only so `agent/plan-lock.ts` can publish its own record through the
+ * same primitive — it is JSON-serialised either way, and one implementation of a rule this
+ * hard-won is worth more than a tidy parameter type.
  */
-function writeExclusive(p: string, c: DeviceClaim): boolean {
+export function writeExclusive(p: string, c: unknown): boolean {
   const tmp = tmpPath(p);
   writeFileSync(tmp, JSON.stringify(c, null, 2));
   try {

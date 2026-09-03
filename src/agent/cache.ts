@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { artifactDir, err } from '../output';
+import { tmpPath } from '../device/claims';
 import { VERSION } from '../version';
 import { Plan, parsePlan } from './ir';
 import { GRAMMAR, REPAIR_GRAMMAR, SECTION_NOTE } from './grammar';
@@ -123,7 +124,10 @@ export function writePlan(input: CacheKeyInput, plan: Plan): CacheEntry {
     plan,
   };
   const target = entryPath(planKey(input));
-  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  // pid + a monotonic counter, not pid + a clock: two writes inside one millisecond would
+  // collide on a timestamp, and `tmpPath` is the one place that shape is decided (it also
+  // guarantees the name never ends in `.json`, so `findSeed` skips a stray scratch file).
+  const tmp = tmpPath(target);
   writeFileSync(tmp, JSON.stringify(entry, null, 2));
   renameSync(tmp, target);
   return entry;
