@@ -95,7 +95,8 @@ Repeat until the home tab (`@home`) is showing, tapping past any onboarding card
 - **Each chunk compiles and caches on its own**, and the compiled steps are spliced together.
   A preamble shared by nine tests is compiled once; editing it costs one compile rather than
   nine, because each test's own prose is still cached. Progress names the file and line each
-  chunk came from.
+  chunk came from. "Once" holds across a [parallel suite](/verikun/guides/suites/) too — the
+  lanes share a cache, so the first to reach a fragment compiles it and the rest wait.
 - **A fragment holds steps, not a whole test.** It is compiled knowing it is one section of
   a larger test, so it neither re-launches the app nor adds a teardown the surrounding test
   already owns.

@@ -86,7 +86,8 @@ import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
 import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-provider';
 import { AgentProvider } from './agent/provider';
-import { readPlan, writePlan, findSeed, CacheKeyInput } from './agent/cache';
+import { readPlan, writePlan, findSeed, CacheEntry, CacheKeyInput } from './agent/cache';
+import { takePlanLock, planLockWaitMs } from './agent/plan-lock';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
 import { InvalidPlanError, Plan } from './agent/ir';
 import { ResolvedTest, Segment, resolveIncludes, segmentLabel } from './agent/include';
@@ -2093,6 +2094,36 @@ function cachePlan(key: CacheKeyInput, plan: Plan): void {
 }
 
 /**
+ * When this process started. Derived from `process.uptime()`, which counts from process
+ * start regardless of when this module was loaded or whether the system clock is stepped.
+ */
+const PROCESS_STARTED_MS = Date.now() - Math.round(process.uptime() * 1000);
+
+/**
+ * The cached plan for a segment, honouring `--recompile`.
+ *
+ * `--recompile` means "do not trust what is on disk", and a leftover entry from a previous
+ * run must still be ignored. But three lanes must not each pay for the same shared fragment
+ * either, so an entry written AFTER this process started is accepted: it cannot be a
+ * leftover, it was written by a process racing this one right now.
+ *
+ * Scope, honestly: in a PARALLEL suite that window is one lane child (so `--recompile` still
+ * recompiles a fragment roughly once per test, never more often than today); in a SERIAL
+ * `vk suite`, which runs every test in one process, it is the whole suite. Widening it to
+ * once-per-suite under a pool would need the parent to stamp an epoch into `laneEnv` — a new
+ * env var and a new concept, for a flag whose whole meaning is "do not trust the disk".
+ *
+ * An unparseable `savedAt` is NaN, so the comparison is false and it recompiles.
+ *
+ * Exported solely so the unit suite can reach it.
+ */
+export function cachedSegment(segKey: CacheKeyInput, opts: AiOptions): CacheEntry | null {
+  const hit = readPlan(segKey);
+  if (!hit || !opts.recompile) return hit;
+  return Date.parse(hit.savedAt) >= PROCESS_STARTED_MS ? hit : null;
+}
+
+/**
  * Compile a test SEGMENT AT A TIME and concatenate the results — the whole point of
  * `@include` doing more than a textual paste.
  *
@@ -2112,6 +2143,11 @@ function cachePlan(key: CacheKeyInput, plan: Plan): void {
  * the first go through `assertBudgetForCompile`, so a ceiling crossed part-way stops the
  * spend instead of adding a full compile on top of what is already billed.
  *
+ * "Compiled once" only held for a SERIAL suite until 0.26.0-rc.5: a pooled suite is N child
+ * processes sharing one ./.verikun, so on a cold cache every lane missed the same fragment
+ * at the same instant and compiled its own (issue #117). Each miss now takes a per-key lock
+ * (agent/plan-lock.ts) and re-reads the cache under it.
+ *
  * Exported solely so the unit suite can reach it.
  */
 export async function compileFromSegments(
@@ -2122,6 +2158,11 @@ export async function compileFromSegments(
   provider: AgentProvider,
 ): Promise<Plan | null> {
   const steps: Plan['steps'] = [];
+  // ONE LOCK AT A TIME, ALWAYS. Taking every segment's lock up front would look like an
+  // optimisation (one round trip instead of S) and would DEADLOCK: two tests sharing two
+  // fragments enumerate them in different orders, and each would sit holding the other's
+  // next lock. A process that holds at most one lock cannot hold-and-wait, and that is the
+  // entire deadlock argument for this loop.
   for (const seg of segments) {
     const where = segmentLabel(seg);
     // Accounted for out loud: a silently-dropped chunk would look like lost steps.
@@ -2130,35 +2171,66 @@ export async function compileFromSegments(
       continue;
     }
     const segKey: CacheKeyInput = { ...key, nl: seg.text };
-    const hit = opts.recompile ? null : readPlan(segKey);
+    const hit = cachedSegment(segKey, opts);
     if (hit) {
       err(`[ai] ${where}: cached (${hit.plan.steps.length} step(s))`);
       steps.push(...hit.plan.steps);
       continue;
     }
-    // Asked BEFORE the call, not after it: crossing the ceiling on the LAST segment leaves a
-    // complete plan, which `runAiTest` then declines to run with a proper budget verdict —
-    // far better than throwing away a finished compile. Crossing it earlier means the rest of
-    // the test would go uncompiled, and a partial plan must never be cached or run.
-    assertBudgetForCompile(cost, opts.maxCostUsd, `compiling ${where} — the test is only partly compiled`);
-    const seed = findSeed(segKey);
-    err(`[ai] ${where}: compiling with ${opts.model}…`);
-    let compiled;
+    // A MISS is where a suite piles up: N lanes are N child processes sharing one
+    // ./.verikun, so on a cold cache all N reach this line for the SAME `@include`d fragment
+    // at once and all N call the model (issue #117). Serialise on the key — the first
+    // compiles, the rest wait and take its result. Taken ONLY on a miss, so a green suite
+    // does no lock I/O at all.
+    const lock = await takePlanLock(segKey, { ceilingMs: planLockWaitMs(opts.timeoutMs) });
     try {
-      compiled = await provider.compile({ nl: seg.text, pkg: key.pkg, platform: key.platform, seed: seed?.plan, section: true });
-    } catch (e) {
-      // Prose with no instruction in it (a paragraph explaining WHY the next step exists)
-      // is not an error at segment granularity — it just adds no steps.
-      if (e instanceof InvalidPlanError && e.code === 'no-steps') {
-        err(`[ai] ${where}: no steps`);
-        continue;
+      // Re-read INSIDE the lock. Whoever held it was compiling exactly this key and its
+      // `writePlan` lands before its release, so this is the only point at which the answer
+      // cannot change under us — the same shape as claims.ts re-reading inside its takeover
+      // token. Done unconditionally rather than only when we waited: a holder can finish in
+      // the gap between the read above and our exclusive create. Skipped entirely when the
+      // lock is not held, so a disabled or degraded lock lands on exactly the old path.
+      const shared = lock.held ? cachedSegment(segKey, opts) : null;
+      if (shared) {
+        err(`[ai] ${where}: compiled by a concurrent run${waitNote(lock.waitedMs)} — ${shared.plan.steps.length} step(s)`);
+        steps.push(...shared.plan.steps);
+        continue; // `continue` from inside a try runs the finally first — that releases the lock
       }
-      throw e;
+      // Asked BEFORE the call, not after it: crossing the ceiling on the LAST segment leaves a
+      // complete plan, which `runAiTest` then declines to run with a proper budget verdict —
+      // far better than throwing away a finished compile. Crossing it earlier means the rest of
+      // the test would go uncompiled, and a partial plan must never be cached or run.
+      //
+      // Asked HERE and not before the lock, though: a plan another lane just handed us is
+      // FREE, and refusing it over a ceiling we were never about to spend against would fail
+      // a test for somebody else's tokens.
+      assertBudgetForCompile(cost, opts.maxCostUsd, `compiling ${where} — the test is only partly compiled`);
+      const seed = findSeed(segKey);
+      err(`[ai] ${where}: compiling with ${opts.model}…${lock.degraded ? ` (${lock.degraded})` : ''}`);
+      let compiled;
+      try {
+        compiled = await provider.compile({ nl: seg.text, pkg: key.pkg, platform: key.platform, seed: seed?.plan, section: true });
+      } catch (e) {
+        // Prose with no instruction in it (a paragraph explaining WHY the next step exists)
+        // is not an error at segment granularity — it just adds no steps.
+        if (e instanceof InvalidPlanError && e.code === 'no-steps') {
+          err(`[ai] ${where}: no steps`);
+          continue;
+        }
+        throw e;
+      }
+      cost.add(compiled.usage, 'compile');
+      // INSIDE the lock and before the release: a waiter re-reads the cache the instant the
+      // lock disappears, so releasing first would hand it a miss and buy the second compile
+      // this whole mechanism exists to prevent.
+      cachePlan(segKey, compiled.plan);
+      err(`[ai] ${where}: ${compiled.plan.steps.length} step(s)`);
+      steps.push(...compiled.plan.steps);
+    } finally {
+      // Also the throw path: a compile that fails must never leave a corpse for the next
+      // lane to time out on.
+      lock.release();
     }
-    cost.add(compiled.usage, 'compile');
-    cachePlan(segKey, compiled.plan);
-    err(`[ai] ${where}: ${compiled.plan.steps.length} step(s)`);
-    steps.push(...compiled.plan.steps);
   }
   if (steps.length === 0) return null;
 
@@ -2213,6 +2285,12 @@ export async function obtainPlan(
     assertBudgetForCompile(cost, opts.maxCostUsd, `compiling '${file}' as one instead`);
   }
 
+  // Unlocked, unlike the per-segment compiles above, because this key is uncontended by
+  // construction: `vk suite`'s queue is one `shift()` per lane, so no test file is ever in
+  // flight twice. The one exception is two files whose RESOLVED text is byte-identical (two
+  // copies of a test, or two files each holding only `@include _preamble.md` — which yields
+  // one segment, so the split path never runs). Out of scope on purpose: two identical tests
+  // are already two identical rows in the report, and the cost is one duplicate compile.
   const seed = findSeed(key);
   if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
   err(`[ai] compiling '${file}' with ${opts.model} (effort ${opts.effort ?? 'default'})…`);

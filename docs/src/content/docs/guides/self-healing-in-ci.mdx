@@ -138,6 +138,12 @@ A unique key per run so `save` always writes, with `restore-keys` prefix-matchin
 recent previous entry — the standard rolling-cache shape. Plans are small JSON, so the
 accumulation is immaterial against the repository cache budget.
 
+Cache `.verikun/plans` and nothing beside it. `.verikun/plan-locks/` holds the short-lived
+locks that stop [concurrent runs compiling the same
+chunk](/verikun/reference/ai-plans/#the-plan-cache) twice; a lock restored onto a fresh runner
+names a process on a machine that no longer exists, which is why it lives in its own directory
+rather than among the plans.
+
 **The key does not have to be right.** Every entry is gated on a compiler fingerprint at read
 time, and the filename already folds in the prose, package, build and platform — so a wrong or
 stale restore produces a *miss*, which recompiles. It can never cause a wrong replay. That is

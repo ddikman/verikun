@@ -13,11 +13,15 @@ All notable changes to this project are documented here. The format is based on
   `~/.verikun/logs/server-<port>.log`. `VERIKUN_LOG_FILE` sets the same value.
 - **`vk server`** re-adopts pooled devices that come back, sweeping every 60s with backoff.
 - **`/v1/health`** reports `degraded`: pool members still serving but dealt last.
+- **`VERIKUN_NO_PLAN_LOCK=1`** turns off plan-compile locking, restoring the previous
+  compile-in-parallel behaviour. ([#117])
 
 ### Changed
 - **`vk suite`** skips `_`-prefixed `*.md` — those are shared fragments, not tests. ([#112])
 - **`vk ai`** compiles each chunk of an `@include`d test separately and caches it, so shared
   prose is compiled once across a suite. ([#112])
+- **`vk suite`** lanes now wait for a shared `@include` fragment's first compile instead of
+  each paying for one. ([#117])
 - **`vk server`** demotes a failing pooled device instead of dropping it, so capacity no
   longer ratchets down and never recovers.
 - **`vk server`** deals leases healthy-first, then least-recently-used, instead of first-fit.
@@ -36,6 +40,7 @@ All notable changes to this project are documented here. The format is based on
 
 [#96]: https://github.com/ddikman/verikun/issues/96
 [#112]: https://github.com/ddikman/verikun/issues/112
+[#117]: https://github.com/ddikman/verikun/issues/117
 
 ## [0.26.0] - 2026-08-24
 

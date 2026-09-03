@@ -1,12 +1,12 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { compileFromSegments, obtainPlan, assertBudgetForCompile } from '../src/cli';
+import { compileFromSegments, obtainPlan, assertBudgetForCompile, cachedSegment } from '../src/cli';
 import { CostTracker, Price } from '../src/agent/cost';
 import { Segment } from '../src/agent/include';
-import { CacheKeyInput } from '../src/agent/cache';
+import { CacheKeyInput, planKey, writePlan } from '../src/agent/cache';
 import { AgentProvider, CompileInput, CompileResult, RepairResult } from '../src/agent/provider';
 import { InvalidPlanError, Plan, LeafStep } from '../src/agent/ir';
 import { CliError } from '../src/errors';
@@ -117,6 +117,117 @@ test('compileFromSegments: an identical chunk in a second test is a cache hit, n
   await compileFromSegments([seg(shared, '_p.md'), seg('tap it', 'one.md')], KEY, opts(), new CostTracker(PRICE), provider);
   await compileFromSegments([seg(shared, '_p.md'), seg('swipe it', 'two.md')], KEY, opts(), new CostTracker(PRICE), provider);
   assert.deepEqual(provider.seen, [shared, 'tap it', 'swipe it'], 'the shared preamble was compiled once');
+});
+
+// --- ...and once across CONCURRENT processes too (issue #117) --------------
+//
+// A pooled `vk suite` is N child processes sharing one ./.verikun, so on a cold cache every
+// lane missed the same `@include`d fragment at the same instant and compiled its own — N x
+// the tokens, and N different nondeterministic draws of one preamble alive in one suite run.
+// These pin the caller's half of the fix; tests/agent-compile-lock.test.ts pins the lock.
+//
+// `FakeProvider` throws on any prose it has no answer for, so "the model was not called" is
+// asserted simply by giving it no answer.
+
+const lockDirFor = (): string => join(process.cwd(), '.verikun', 'plan-locks');
+const lockFileFor = (text: string): string => join(lockDirFor(), `${planKey({ ...KEY, nl: text })}.lock`);
+
+/** Plant a lock held by a LIVE pid — this process — so a taker must wait for it. */
+function plantLiveLock(text: string): void {
+  mkdirSync(lockDirFor(), { recursive: true });
+  writeFileSync(
+    lockFileFor(text),
+    JSON.stringify({ key: planKey({ ...KEY, nl: text }), pid: process.pid, host: hostname(), cwd: process.cwd(), startedAt: new Date().toISOString(), version: '0.0.0-test' }),
+  );
+}
+
+test('compileFromSegments: a cache hit takes no lock at all', async () => {
+  // The steady state is all hits, and it must stay free of lock I/O entirely.
+  const provider = new FakeProvider({ 'tap it': planOf('tap') });
+  await compileFromSegments([seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
+  rmSync(lockDirFor(), { recursive: true, force: true });
+  await compileFromSegments([seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
+  assert.equal(existsSync(lockDirFor()), false, 'a warm compile touched the lock directory');
+});
+
+test('compileFromSegments: a chunk another run is compiling is WAITED for, not compiled again', async () => {
+  // The bug, deterministically: a live lock on the shared chunk, released a moment later
+  // with the plan cached — exactly what the lane that won the race does.
+  const shared = 'launch and sign in';
+  plantLiveLock(shared);
+  setTimeout(() => {
+    writePlan({ ...KEY, nl: shared }, planOf('launch'));
+    rmSync(lockFileFor(shared), { force: true });
+  }, 40);
+
+  // No answer for `shared`, so any call to the model throws.
+  const provider = new FakeProvider({ 'tap it': planOf('tap') });
+  const plan = await compileFromSegments([seg(shared, '_p.md'), seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
+  assert.deepEqual(plan?.steps.map((s) => (s as LeafStep).command), ['launch', 'tap']);
+  assert.deepEqual(provider.seen, ['tap it'], 'the shared chunk came from the other run');
+});
+
+test('compileFromSegments: a chunk someone else already compiled is FREE, even past the ceiling', async () => {
+  // The budget gate is asked after the under-lock re-read, not before the lock: refusing a
+  // plan another lane just handed us would fail a test over somebody else's tokens.
+  const shared = 'launch and sign in';
+  writePlan({ ...KEY, nl: shared }, planOf('launch'));
+  const cost = new CostTracker(PRICE, 0.5);
+  cost.add({ input_tokens: 1, output_tokens: 0 }, 'compile'); // $1 > $0.50, already over
+  const provider = new FakeProvider({});
+  const plan = await compileFromSegments([seg(shared, '_p.md')], KEY, opts(0.5), cost, provider);
+  assert.deepEqual(plan?.steps.map((s) => (s as LeafStep).command), ['launch']);
+});
+
+test('compileFromSegments: a waiter that gives up at the ceiling compiles anyway', async () => {
+  // The degrade must be "one duplicate compile", which is today's behaviour — never a
+  // failure. --timeout 200ms gives a 50ms lock ceiling via planLockWaitMs.
+  plantLiveLock('tap it'); // never released
+  const provider = new FakeProvider({ 'tap it': planOf('tap') });
+  const plan = await compileFromSegments([seg('tap it')], KEY, { ...opts(), timeoutMs: 200 }, new CostTracker(PRICE), provider);
+  assert.deepEqual(plan?.steps.map((s) => (s as LeafStep).command), ['tap']);
+  assert.deepEqual(provider.seen, ['tap it']);
+});
+
+test('compileFromSegments: a failed compile releases its lock instead of leaving a corpse', async () => {
+  const provider = new FakeProvider({}); // no answer => throws
+  await assert.rejects(() => compileFromSegments([seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider));
+  assert.equal(existsSync(lockFileFor('tap it')), false, 'the next lane would have timed out on it');
+});
+
+test('compileFromSegments: VERIKUN_NO_PLAN_LOCK restores the pre-lock behaviour exactly', async () => {
+  plantLiveLock('tap it'); // a lock that would otherwise be waited for
+  const provider = new FakeProvider({ 'tap it': planOf('tap') });
+  process.env.VERIKUN_NO_PLAN_LOCK = '1';
+  try {
+    const plan = await compileFromSegments([seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
+    assert.deepEqual(plan?.steps.map((s) => (s as LeafStep).command), ['tap']);
+    assert.deepEqual(provider.seen, ['tap it'], 'the lock was neither taken nor honoured');
+  } finally {
+    delete process.env.VERIKUN_NO_PLAN_LOCK;
+  }
+});
+
+// --- --recompile: ignore the disk, but not a lane racing you right now ------
+
+test('cachedSegment: --recompile ignores a leftover entry from a previous run', () => {
+  const key: CacheKeyInput = { ...KEY, nl: 'tap it' };
+  writePlan(key, planOf('tap'));
+  // Backdate it past this process's start: a genuine leftover.
+  const p = join(process.cwd(), '.verikun', 'plans', `${planKey(key)}.json`);
+  const entry = JSON.parse(readFileSync(p, 'utf8')) as { savedAt: string };
+  writeFileSync(p, JSON.stringify({ ...entry, savedAt: '1970-01-01T00:00:00.000Z' }));
+
+  assert.ok(cachedSegment(key, opts()), 'without --recompile it is still a hit');
+  assert.equal(cachedSegment(key, { ...opts(), recompile: true }), null);
+});
+
+test('cachedSegment: --recompile DOES accept an entry a concurrent run just wrote', () => {
+  // Three lanes must not each pay for the same fragment. An entry written after this process
+  // started cannot be a leftover — it was written by a process racing this one right now.
+  const key: CacheKeyInput = { ...KEY, nl: 'tap it' };
+  writePlan(key, planOf('tap'));
+  assert.ok(cachedSegment(key, { ...opts(), recompile: true }));
 });
 
 // --- the lint still judges the ASSEMBLED plan ------------------------------

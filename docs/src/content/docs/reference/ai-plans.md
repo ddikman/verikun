@@ -249,5 +249,12 @@ Keyed by the test prose + package + app build, gated by a **compiler fingerprint
 - A test assembled from [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
   fragments is keyed on the **resolved** text, and each chunk is additionally cached under
   its own text — so shared prose is compiled once across a suite.
+- **Concurrent runs sharing one cache serialise per key.** A [parallel suite](/verikun/guides/suites/)
+  is one process per test, so on a cold cache every lane would otherwise miss the same
+  fragment at the same instant and compile its own. The first lane compiles; the rest wait
+  and take its result, printing `compiled by a concurrent run (waited 0.5s)`. A hit takes no
+  lock at all. `VERIKUN_NO_PLAN_LOCK=1` turns it off.
+- `--recompile` still takes the lock, and still ignores anything already on disk — but it
+  accepts an entry a run racing this one wrote, so N lanes do not each pay for one fragment.
 
 See [Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint).

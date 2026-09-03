@@ -285,7 +285,8 @@ In your own repository you would install the published package instead —
 A fresh runner has no `./.verikun/plans/`, so **without this every test recompiles on every
 run** and the suite never reaches the near-\$0 steady state. There is a matching
 `actions/cache/save` with `if: always()` after the suite — a failed run's compiles are worth
-keeping too. Why the key does not have to be exact, and the caveats:
+keeping too. Cache `.verikun/plans` only: the sibling `.verikun/plan-locks/` is per-machine
+and must not travel. Why the key does not have to be exact, and the caveats:
 [Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache).
 
 ### Install the app build on the remote device
