@@ -96,6 +96,20 @@ test('matchElements: an out-of-range --index yields no match', () => {
   assert.equal(r.tier, null);
 });
 
+test('matchElements: an out-of-range --index on the text tier does not fall back to desc', () => {
+  // The text tier hits once, so index 1 is out of range there — and that is a definite
+  // (empty) answer. The desc tier has two hits, so falling through to it would wrongly
+  // return the third element.
+  const els = [
+    makeEl({ text: 'Item', desc: '' }),
+    makeEl({ text: '', desc: 'Item' }),
+    makeEl({ text: '', desc: 'Item' }),
+  ];
+  const r = matchElements(els, parseSelector('Item', { index: 1 }));
+  assert.equal(r.matches.length, 0);
+  assert.equal(r.tier, null);
+});
+
 test('matchElements: text selector falls back to desc when no text matches', () => {
   const els = [makeEl({ text: '', desc: 'Close' })];
   const r = matchElements(els, parseSelector('text:Close'));
