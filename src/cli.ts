@@ -3,13 +3,13 @@ import { resolve, basename, sep, join } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
 import { CliError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists, spawnCollect } from './exec';
-import { getDriver, AdbDriver, IdbDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
-import { adbTransport, severanceRisk, avdNameOf, listAvds, lockKindOf } from './drivers/adb';
+import { getDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
+import { adbTransport, severanceRisk, lockKindOf } from './drivers/adb';
 import {
   allLifecycles, assertActionable, chooseTarget, isRunning, lifecycleFor, restartTarget, targetLabel,
   LifecycleTarget, LifecycleVerb,
 } from './drivers/lifecycle';
-import { Bounds, Driver, DeviceInfo, Element, HierarchySource, LockKind, Platform, Point, ToolProbe } from './types';
+import { Bounds, Driver, Element, HierarchySource, LockKind, Platform, Point, ToolProbe } from './types';
 import {
   SETTINGS,
   SETTING_KEYS,
@@ -108,6 +108,8 @@ import {
   waitNote,
   waitWindowMs,
 } from './commands/auto-wait';
+import { tokenizeLine, withBatchGlobals } from './commands/batch';
+import { cmdDevices, formatDeviceTable } from './commands/devices';
 
 // Exported for src/server.ts (which resolves its own platform/device at startup).
 export function platformFromFlags(flags: Flags): Platform {
@@ -353,61 +355,6 @@ async function resolveTappable(ctx: Ctx, sel: Selector, opts: { all?: boolean } 
 // Commands
 // ---------------------------------------------------------------------------
 
-function cmdDevices(flags: Flags): number {
-  const all = flagBool(flags, 'all');
-  const allDevices: DeviceInfo[] = [];
-  try {
-    const android = new AdbDriver().listDevices();
-    // Name each running emulator by its AVD, so the listing shows the token you'd
-    // pass to `vk devices stop|restart`. Best-effort: the console may not answer.
-    for (const d of android) {
-      if (d.kind === 'emulator') d.name = avdNameOf(d.serial) || undefined;
-    }
-    allDevices.push(...android);
-    if (all) {
-      // Startable-but-not-running AVDs have no adb address yet — they are addressed
-      // by name, so `serial` stays empty rather than being invented.
-      const running = new Set(android.map((d) => (d.name ?? '').toLowerCase()).filter(Boolean));
-      for (const name of listAvds()) {
-        if (running.has(name.toLowerCase())) continue;
-        allDevices.push({ serial: '', state: 'shutdown', platform: 'android', kind: 'emulator', name });
-      }
-    }
-  } catch (e) {
-    // adb not on PATH is the common (expected) case, but surface anything else so a real
-    // adb listing failure isn't hidden behind a silently-empty device list.
-    err(`devices: adb backend unavailable (${(e as Error).message})`);
-  }
-  try {
-    // By default only booted simulators (a shutdown one isn't drivable); physical
-    // devices always show (they carry a note). --all lists everything startable.
-    const ios = new IdbDriver().listDevices();
-    allDevices.push(...(all ? ios : ios.filter((d) => d.state === 'booted' || d.note)));
-  } catch (e) {
-    err(`devices: iOS backend unavailable (${(e as Error).message})`);
-  }
-
-  // Who is driving what. Read-only: listing the pool must never claim a device, which is
-  // what makes `vk devices` (and `vk doctor`) safe to run while surveying a busy host.
-  if (claimsEnabled()) {
-    for (const d of allDevices) {
-      const claim = summarize(d.serial);
-      if (claim) d.claim = claim;
-    }
-  }
-
-  if (flagBool(flags, 'json')) {
-    json(allDevices);
-    return 0;
-  }
-  if (!allDevices.length) {
-    err(all ? 'No devices or startable AVDs/simulators found.' : 'No devices found.');
-    return 0;
-  }
-  for (const line of formatDeviceTable(allDevices)) out(line);
-  return 0;
-}
-
 /** Aliases for the lifecycle verbs, mirroring the top-level command aliases. */
 const DEVICE_VERBS: Record<string, LifecycleVerb> = {
   start: 'start',
@@ -537,39 +484,6 @@ async function cmdDeviceLifecycle(
     out(r.serial ?? '');
   }
   return 0;
-}
-
-/**
- * Render the device list as an aligned, headed table (header line first, then one
- * line per device). Optional columns (KIND/NAME/MODEL/PRODUCT/NOTE) are dropped when no
- * device populates them; every shown cell is padded to its column width so columns line up
- * regardless of which cells are empty — the previous `.filter(Boolean).join('\t')`
- * dropped empty cells, sliding later cells into earlier tab stops. Exported for unit
- * testing.
- */
-export function formatDeviceTable(devices: DeviceInfo[]): string[] {
-  const columns: Array<{ header: string; get: (d: DeviceInfo) => string; optional?: boolean }> = [
-    { header: 'PLATFORM', get: (d) => d.platform },
-    { header: 'KIND', get: (d) => d.kind ?? '', optional: true },
-    { header: 'SERIAL', get: (d) => d.serial },
-    { header: 'STATE', get: (d) => d.state },
-    { header: 'NAME', get: (d) => d.name ?? '', optional: true },
-    { header: 'MODEL', get: (d) => d.model ?? '', optional: true },
-    { header: 'PRODUCT', get: (d) => d.product ?? '', optional: true },
-    // Optional like the rest, which is load-bearing twice over: nothing changes for a
-    // single-user host where no device is ever claimed, and `VERIKUN_NO_CLAIM=1` renders
-    // exactly the table it always did.
-    { header: 'USED BY', get: (d) => d.claim?.by ?? '', optional: true },
-    { header: 'NOTE', get: (d) => d.note ?? '', optional: true },
-  ];
-  // Drop optional columns that no device populates (e.g. NOTE for an Android-only list).
-  const shown = columns.filter((c) => !c.optional || devices.some((d) => c.get(d) !== ''));
-  const rows = [shown.map((c) => c.header), ...devices.map((d) => shown.map((c) => c.get(d)))];
-  const widths = shown.map((_, i) => Math.max(...rows.map((r) => r[i].length)));
-  // Pad every cell except the last shown column (no trailing whitespace); join with 2 spaces.
-  return rows.map((r) =>
-    r.map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]))).join('  ').trimEnd(),
-  );
 }
 
 /** Render one shared ToolProbe the way doctor always has: present -> stdout, failure +
@@ -1701,8 +1615,6 @@ function cmdRun(positionals: string[], flags: Flags, platform: Platform, device?
 // would be meaningless ("break on an irrecoverable error"). Device/output globals
 // on the `batch` call are inherited by every line unless the line sets its own.
 
-const BATCH_GLOBALS = ['device', 'platform', 'ios', 'android', 'json'] as const;
-
 /** Read the batch source text: --file if given, else stdin (which must be piped). */
 function readBatchSource(flags: Flags): string {
   const file = flagStr(flags, 'file');
@@ -1729,63 +1641,6 @@ function readBatchSource(flags: Flags): string {
   } catch (e) {
     throw new CliError(`batch: could not read stdin (${(e as Error).message})`, 2);
   }
-}
-
-/**
- * Split a batch line into argv tokens with shell-like single/double quoting and
- * backslash escapes — but WITHOUT a shell: this is pure string scanning, so a line
- * can never spawn a host process or expand a variable (the same no-host-shell rule
- * the rest of the CLI follows). Throws on an unterminated quote.
- */
-export function tokenizeLine(line: string): string[] {
-  const tokens: string[] = [];
-  let cur = '';
-  let started = false; // lets an empty "" / '' still produce a real empty token
-  for (let i = 0; i < line.length; ) {
-    const c = line[i];
-    if (c === '"' || c === "'") {
-      started = true;
-      i++;
-      while (i < line.length && line[i] !== c) {
-        if (c === '"' && line[i] === '\\' && (line[i + 1] === '"' || line[i + 1] === '\\')) {
-          cur += line[i + 1];
-          i += 2;
-        } else {
-          cur += line[i++];
-        }
-      }
-      if (i >= line.length) {
-        throw new CliError(`batch: unterminated ${c === '"' ? 'double' : 'single'} quote in: ${line}`, 2);
-      }
-      i++; // consume the closing quote
-    } else if (c === '\\' && i + 1 < line.length) {
-      cur += line[i + 1];
-      started = true;
-      i += 2;
-    } else if (c === ' ' || c === '\t') {
-      if (started) {
-        tokens.push(cur);
-        cur = '';
-        started = false;
-      }
-      i++;
-    } else {
-      cur += c;
-      started = true;
-      i++;
-    }
-  }
-  if (started) tokens.push(cur);
-  return tokens;
-}
-
-/** Globals on the `batch` call become defaults for each line (the line may override). */
-export function withBatchGlobals(lineFlags: Flags, batchFlags: Flags): Flags {
-  const merged: Flags = { ...lineFlags };
-  for (const k of BATCH_GLOBALS) {
-    if (merged[k] === undefined && batchFlags[k] !== undefined) merged[k] = batchFlags[k];
-  }
-  return merged;
 }
 
 async function cmdBatch(positionals: string[], batchFlags: Flags): Promise<number> {

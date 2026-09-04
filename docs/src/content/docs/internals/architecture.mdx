@@ -50,8 +50,8 @@ they contain zero `adb` or `xcrun` knowledge. **Keep it that way: platform quirk
 `drivers/`.**
 
 `getDriver(platform, device)` in `drivers/index.ts` is the only place a concrete driver is
-constructed. The one exception is `cmdDevices`, which probes both backends directly so it can
-list everything attached.
+constructed. The one exception is `commands/devices.ts` (`vk devices`), which probes both
+backends directly so it can list everything attached.
 
 ## The dispatcher
 
@@ -64,8 +64,9 @@ Adding a command means adding a `case` (plus any aliases) **and** a line in `usa
 and, if it should appear in a test run, an entry in `RECORDABLE` in `run.ts`.
 
 Helpers that outgrow the dispatcher live under `commands/`: `context.ts` holds the `Ctx`
-every handler takes, and `auto-wait.ts` the selector auto-wait. A command module imports
-`Ctx` from there without importing `cli.ts`, which is what keeps further extraction cycle-free.
+every handler takes, `auto-wait.ts` the selector auto-wait, `batch.ts` the batch line
+grammar and `devices.ts` the device listing. They import `Ctx` without importing `cli.ts`,
+which is what keeps further extraction cycle-free.
 
 `run.ts` and `report.ts` sit beside `cli.ts`. They may use the driver, like `cli.ts` does —
 they are not part of the platform-agnostic core. `report.ts` is pure: `RunState` → JUnit/HTML
@@ -136,6 +137,8 @@ so a platform gap can never be documented in one place and forgotten in another.
 | `cli.ts` | Every command handler, `usageText()`, the dispatch switches, `executeOutcome` / `executeParsed` / `executeForServer`, `mapError`, provider selection, and the `ai` / `suite` / `install` orchestration. Still the big file; helpers it has shed live under `commands/`. |
 | `commands/context.ts` | The `Ctx` every command handler takes: driver, platform, device, positionals, flags, and the recorder when the command is part of a test run. |
 | `commands/auto-wait.ts` | Selector auto-wait: the wait window and poll interval, no-window tolerance while polling, and the waiting `resolveOneWaiting` / `matchWaiting` every selector-resolving handler goes through. |
+| `commands/batch.ts` | The batch line grammar: shell-like quoting without a shell, and the globals a `batch` call passes down to every line. |
+| `commands/devices.ts` | `vk devices`: the listing and its aligned table — the one place both driver backends are probed directly. |
 | `args.ts` | Minimal dependency-free argv parser |
 | `errors.ts` | `CliError` plus the exit-code contract, `isEnvError`, `probeFailure`, and the two heal-trigger selector subclasses |
 | `version.ts` | **Generated** from `package.json` by `scripts/gen-version.mjs`. Never hand-edit. |

@@ -3,8 +3,6 @@ import { strict as assert } from 'node:assert';
 import {
   parsePoint,
   evalAssert,
-  tokenizeLine,
-  withBatchGlobals,
   healNote,
   chooseLogOpts,
   confineToCwd,
@@ -20,6 +18,7 @@ import {
   grantLanes,
 } from '../src/cli';
 import { parseDuration, waitNote, waitWindowMs } from '../src/commands/auto-wait';
+import { tokenizeLine, withBatchGlobals } from '../src/commands/batch';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
