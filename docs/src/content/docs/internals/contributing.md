@@ -61,7 +61,7 @@ The **platform-agnostic core** — the layers that never touch `adb` / `xcrun` /
 device is needed: `args.ts`, `ui/selector.ts`, `ui/android-parse.ts`, `ui/ios-parse.ts`,
 `ui/format.ts`, `image.ts`, `report.ts`, `errors.ts`, the whole of `device/` (`claims.ts`,
 `grant.ts`, `settings.ts`, `pool.ts`, `failover.ts`, `prep.ts`), plus pure helpers from
-`cli.ts`, `run.ts` and `drivers/adb.ts`.
+`cli.ts`, `commands/`, `run.ts` and `drivers/adb.ts`.
 
 A handful of those helpers — `escapeText`, `tokenizeLine`, `evalAssert`, `parseDuration`,
 `waitWindowMs`, `parsePoint`, `healNote`, `waitNote`, `withBatchGlobals`, `stepName`,

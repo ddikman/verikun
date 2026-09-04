@@ -1,6 +1,6 @@
-// Time helpers shared across the tree: the selector auto-wait (cli.ts), device lifecycle
-// (drivers/lifecycle.ts), the agent engine's settle waits and the HTTP providers' retry
-// backoff. Pure, platform-agnostic, zero-dep.
+// Time helpers shared across the tree: the selector auto-wait (commands/auto-wait.ts),
+// device lifecycle (drivers/lifecycle.ts), the agent engine's settle waits and the HTTP
+// providers' retry backoff. Pure, platform-agnostic, zero-dep.
 
 /** Poll interval (ms) used by device lifecycle waits. */
 export const DEFAULT_DEVICE_POLL_MS = 1000;

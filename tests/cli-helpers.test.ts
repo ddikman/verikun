@@ -1,14 +1,11 @@
 import { test, before, after } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
-  parseDuration,
-  waitWindowMs,
   parsePoint,
   evalAssert,
   tokenizeLine,
   withBatchGlobals,
   healNote,
-  waitNote,
   chooseLogOpts,
   confineToCwd,
   assertSafeAppId,
@@ -22,6 +19,7 @@ import {
   laneResult,
   grantLanes,
 } from '../src/cli';
+import { parseDuration, waitNote, waitWindowMs } from '../src/commands/auto-wait';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
