@@ -92,7 +92,8 @@ in the same commit: [Contributing](/verikun/internals/contributing/#the-document
 
 ## Versioning
 
-The version is declared once, in `package.json`; `src/version.ts` is generated from it. Any
+The version is declared once, in `package.json`; `src/version.ts` is generated from it (never
+hand-edit it). Any
 behaviour change bumps it and adds a `CHANGELOG.md` line, and the rebuild rotates
 `COMPILER_FINGERPRINT` so a plan an older compiler produced is never replayed:
 [Contributing](/verikun/internals/contributing/#versioning-and-changelog).

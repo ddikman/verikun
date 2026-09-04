@@ -87,7 +87,8 @@ reported "nothing to restore", leaving a phone dark and rotated with nothing tra
 
 So `beginStep` carries unrestored overrides **forward** on a same-device rollover, and on a
 device-change rollover warns loudly with the exact `vk device set … --device <serial>` needed
-to undo it — it cannot drive the old device from a process pointed at the new one.
+to undo it — it cannot drive the old device from a process pointed at the new one, and
+restoring one device's values onto another would be worse than leaving them.
 `tests/run-device-overrides.test.ts` pins both paths.
 
 ## Device overrides: earliest wins
@@ -177,10 +178,13 @@ default.
 
 | Invariant | Why |
 |---|---|
-| **A step is never replayed on the new device.** Only `install` retries; everything else rebinds and returns the **original** device's error, and `/v1/elements` never answers with the new device's hierarchy. | Replaying step 12 on a device that never ran 1–11 is either a false green or a repair against the wrong screen. |
+| **A step is never replayed on the new device.** Only `install` retries (it is idempotent and carries no app session); everything else rebinds and returns the **original** device's error, and `/v1/elements` never answers with the new device's hierarchy. | Replaying step 12 on a device that never ran 1–11 is either a false green or a repair against the wrong screen. |
 | **The install classifier enumerates the FILE, not the device.** The file-attributable set is small and closed; everything else moves. The named device-state strings are a fast path, never the gate. | The device side is open-ended and OEM-specific — the failure that prompted this carried no `INSTALL_FAILED_*` code at all. `tests/failover.test.ts` feeds the classifier gibberish that must still move. |
 | **On exhaustion the client gets the FIRST device's error.** A step keeps the opposite default — stay unless a two-probe re-check confirms the device dead — and the re-probe's **own** error is classified too. | A wrong move costs time, never the diagnosis. Exit 3 on a step is dominated by transient noise, and an adb restart fails every probe on the host. |
 | **An install that fails on EVERY device condemns the build, not the pool**: the per-device quarantines are rolled back. | The fan-out has just proved the artifact is the common factor. |
+
+The failure strings, the two-move cap and the operator's view of a quarantine:
+[When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
 
 ## A pool degrades, it does not shrink
 
@@ -200,6 +204,10 @@ two failures, with nothing to grow it back.
   install before any work. Single-device servers do not sweep.
 - **A worker call is bounded.** A wedged thread used to leave its lease in-flight forever; it is
   terminated instead, which turns a wedged device into a departed one the sweep can replace.
+
+How it looks from the client:
+[Failover on a pool](/verikun/guides/remote-devices-and-ci/#failover-on-a-pool) and
+[A device that comes back rejoins by itself](/verikun/guides/remote-devices-and-ci/#a-device-that-comes-back-rejoins-by-itself).
 
 ## The plan cache fingerprint
 
@@ -252,9 +260,11 @@ fingerprint automatically.
 ## Selector matching stays time-free
 
 Matching is a pure function of one snapshot (`ui/selector.ts`). **Waiting is layered on top in
-`commands/auto-wait.ts`, never in `selector.ts`.** Only an empty match set is retried (a
-present-but-plural match exits `2` at once); bare-index `tap N` and `tap --at x,y` never wait;
-`assert` polls the whole predicate. Route a new selector-resolving command through
+`commands/auto-wait.ts`, never in `selector.ts`.** Only an empty match set is retried — a
+present-but-plural match exits `2` at once, because waiting cannot disambiguate elements that
+are already there; bare-index `tap N` and `tap --at x,y` never wait, because an index names a
+specific prior `ui` dump and a re-capture shifts indices; `assert` polls the whole predicate,
+so `--gone` waits for disappearance. Route a new selector-resolving command through
 `resolveOneWaiting()` / `matchWaiting()`, never a raw `resolveOne` / `matchElements`.
 
 ## State modifiers are exactly one attribute
