@@ -63,10 +63,10 @@ device is needed: `args.ts`, `ui/selector.ts`, `ui/android-parse.ts`, `ui/ios-pa
 `grant.ts`, `settings.ts`, `pool.ts`, `failover.ts`, `prep.ts`), plus pure helpers from
 `cli.ts`, `commands/`, `run.ts` and `drivers/adb.ts`.
 
-A handful of those helpers — `escapeText`, `tokenizeLine`, `evalAssert`, `parseDuration`,
-`waitWindowMs`, `parsePoint`, `healNote`, `waitNote`, `withBatchGlobals`, `stepName`,
+A handful of those helpers — `escapeText`, `evalAssert`, `parsePoint`, `healNote`, `stepName`,
 `rolloverReason`, `grantLanes` — are `export`ed **solely so the suite can reach them**. Keep
-them exported.
+them exported. The `commands/` modules' exports (`parseDuration`, `waitWindowMs`, `waitNote`,
+`tokenizeLine`, `withBatchGlobals`) are ordinary module exports the suite also imports.
 
 The drivers themselves and the `getElements` → `uiautomator` round-trip are intentionally
 **not** unit-tested; that is what `vk doctor` and `vk ui` against a real device cover.

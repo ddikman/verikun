@@ -1,6 +1,6 @@
 // `vk devices`: list what is attached (and, with --all, what is startable), and render it
-// as an aligned table. This is the one place both driver backends are probed directly
-// rather than through getDriver() — listing is the one job that spans platforms.
+// as an aligned table. This is the one place a concrete Driver is constructed outside
+// getDriver() — listing needs both backends at once.
 
 import { Flags, flagBool } from '../args';
 import { claimsEnabled, summarize } from '../device/claims';
