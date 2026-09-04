@@ -24,6 +24,9 @@ adb shell "CLASSPATH=/system/framework/android.test.runner.jar:/system/framework
   app_process / dev.verikun.companion.CompanionApp"
 ```
 
+verikun itself starts it detached (`nohup … app_process … >/dev/null 2>&1 &`), so the shell
+it was launched from can exit.
+
 The protocol is line-in, bytes-out, one request per connection, version `2` on both sides
 (`PROTOCOL_VERSION` here, `COMPANION_PROTOCOL` in `src/companion/protocol.ts`): `ping`,
 `size`, `state`, `claim-calibration`, `calibrated [real|app]`, `release`, `acquire`,
@@ -62,4 +65,4 @@ Gradle: it is one source file with no dependencies beyond the platform.
   screen without failing — hence the calibration handshake, never a hard-coded choice.
 - Holding a connection suppresses the user's accessibility services (accepted: a device
   under test is not running TalkBack), and the companion exits after 15 minutes idle; any
-  read restarts it in ~1.5s.
+  read restarts it — ~1.5s to start, about 2s before the first answer.
