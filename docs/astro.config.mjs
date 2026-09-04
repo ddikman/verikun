@@ -8,6 +8,9 @@ import starlightLinksValidator from 'starlight-links-validator';
 export default defineConfig({
   site: 'https://ddikman.github.io',
   base: '/verikun',
+  // The global-flags page merged into the commands page; its URL is in every README already
+  // published to npm, so the old address keeps working.
+  redirects: { '/reference/global-flags/': '/verikun/reference/commands/#global-flags' },
   integrations: [
     starlight({
       title: 'verikun',

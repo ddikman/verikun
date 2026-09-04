@@ -55,7 +55,8 @@ longest edge so the read stays cheap while text stays legible.
 
 The cost above is about *reading a screenshot back* to decide the next move. One taken purely
 as **report evidence and never read back** costs nothing at runtime — so when driving a flow
-to produce a report, capture around each significant transition and before any risky step,
+to produce a report, capture around each significant transition and before any risky or
+verification step,
 and leave the PNG in the report; a failing step already auto-captures its own screen, and
 [`vk ai`](/verikun/guides/natural-language-tests/) inserts these review screenshots itself.
 

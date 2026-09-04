@@ -232,7 +232,8 @@ caught afterwards from the hierarchy plus `dumpsys trust`: verikun retries and t
 A **swipe** lock is cleared automatically. A **PIN, pattern or password** is not — verikun never
 asks for or stores a device credential — so remove the lock on a test device (*Settings >
 Security*). `vk doctor` lists, per device, whether it is prepared and what kind of lock it has
-(it stays quiet on API 29, where `dumpsys lock_settings` lacks the field).
+(it stays quiet on API 29, where `dumpsys lock_settings` lacks the field — the read-time check
+above still works there).
 
 A prepared device gives the display a **1-minute** timeout, long enough to span the gap
 between two commands of one flow. If you would rather it never slept at all — the right answer
@@ -324,7 +325,8 @@ vk assert @content --wait 10s     # not an immediate tap
 | Exit `3`, unreachable | Network path | Not verikun. Check the tailnet or route is up on the client. |
 | Install rejected | Server lacks `--allow-install` | Restart the server with the flag; a read-only server refuses builds by design. |
 | Device overrides stranded after a crash | Known gap: under `--server` the snapshot lives in the **server's** run file | `vk device reset` from the device box. |
-| The suite ran on a device you did not expect, a step failed naming a device no longer bound, or `[failover] no working device remains` | The server [failed over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) off a bad device (a full disk, most often); a step is never replayed elsewhere, and on exhaustion the error shown is the **first** device's | `[verikun] server moved device:` on the client says which and why; `curl "$VERIKUN_SERVER/v1/health" \| jq .quarantined` says what was ruled out. A successful `vk devices restart <name> --server <url>` clears a quarantine; pin with `--device` to forbid moves. |
+| The suite ran on a device you did not expect, a step failed naming a device no longer bound, or `[failover] no working device remains` | The server [failed over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) off a bad device; a step is never replayed elsewhere, and on exhaustion the error shown is the **first** device's | `[verikun] server moved device:` on the client says which and why; `curl "$VERIKUN_SERVER/v1/health" \| jq .quarantined` says what was ruled out. Re-run the flow from the top — the new device has none of the old one's state. A successful `vk devices restart <name> --server <url>` clears a quarantine; pin with `--device` to forbid moves. |
+| `Requested internal only, but not enough space` | The device's disk is full (it carries no `INSTALL_FAILED_*` code, so it is classified by *not* being a build failure) | With failover on, the server moves to another attached device by itself; otherwise free space on the device, or `vk devices restart` it. |
 
 ## iOS and idb
 

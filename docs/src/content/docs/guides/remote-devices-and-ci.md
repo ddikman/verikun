@@ -479,7 +479,8 @@ worker that died, a phone unplugged and replugged, an emulator restarted out of 
 `--devices all`) one attached after startup; an explicit `--devices a,b,c` only re-adopts from
 that list. Starting the worker **is** the probe, so a device that is still broken simply fails
 to come back; each failure doubles the wait, up to 30 minutes, and every attempt is logged. A
-rejoining device is brought up to the session's last install before it is dealt any work.
+rejoining device is brought up to the session's last install before it is dealt any work, and
+stays out if that install fails.
 
 ```
 [server] pool: emulator-5556 left the pool — worker exited with code 1
@@ -516,9 +517,11 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 - Restart on failure — the device lock's 5-minute idle takeover means a restart mid-run does
   not permanently wedge anything.
 
-The server writes its own log — by default `~/.verikun/logs/server-<port>.log`, rotated at
-10 MB keeping one previous generation and named in the startup banner; `--log-file <path>`
-moves it and `--log-file off` leaves stderr only. It records every request with its status, run
+The server writes its own log, so a service unit needs no output redirection — by default
+`~/.verikun/logs/server-<port>.log`, rotated at 10 MB keeping one previous generation and named
+in the startup banner; `--log-file <path>` moves it (useful when the service runs as a user
+whose `$HOME` is not where you look) and `--log-file off` leaves stderr only. It records every
+request with its status, run
 token and leased device, the reason behind every error the client was sent, and every lease,
 failover and pool change:
 
