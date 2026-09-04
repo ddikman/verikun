@@ -3,7 +3,7 @@
 // (flags → FlagSpec[], artifacts → base64). Transport only — every piece of policy (auth,
 // the grammar gate, leases, failover) stays in server.ts.
 
-import { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { FlagSpec } from './agent/ir';
 import type { DeviceChange } from './rpc';
 
