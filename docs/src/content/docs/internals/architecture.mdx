@@ -179,6 +179,8 @@ so a platform gap can never be documented in one place and forgotten in another.
 | `report.ts` | Pure rendering: `RunState` → JUnit/HTML, `SuiteRun` → `index.json`/`index.html` |
 | `suite.ts` | `vk suite`: enumerate, run the queue across one or more lanes, reset between tests, retries, manifest, the CI-gate exit code. Dependency-injected; imports nothing from `cli.ts`. |
 | `server.ts` | `vk server`: HTTP+JSON with mandatory bearer auth, the `validateNode` gate, leases and failover — every piece of policy stays on the main thread |
+| `server-http.ts` | The transport helpers every handler shares: an error that knows its HTTP status and client exit code, capped body reads, JSON replies, wire-flag and artifact encoding |
+| `server-lifecycle.ts` | The start / restart / stop / list seam `buildServer` is injected with, and its production implementation over `drivers/lifecycle.ts` |
 | `server-pool.ts` | One worker thread per device, replies correlated, one command at a time per device. Mechanism only. |
 | `server-worker.ts` | The device call at the end of that pipeline, on its own thread |
 | `rpc.ts` | The pure wire contract, including the error codec that preserves thrown-error subclass identity |
