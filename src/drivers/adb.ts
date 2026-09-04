@@ -42,7 +42,6 @@ export function probeAdb(): ToolProbe {
   }
 }
 
-
 /**
  * What kind of screen lock a `dumpsys lock_settings` dump describes. Pure, and exported so
  * the two measured rules below are unit-testable without a device.
@@ -273,25 +272,10 @@ export function isSignatureConflict(adbOutput: string): boolean {
 
 /**
  * The package a signature conflict names, or null. PURE — exported for the unit suite.
- *
- * Ask `isSignatureConflict` FIRST — a null here means "no package named", never "not a
- * conflict", and the two need different messages.
- *
- * Android will not update a package across signing keys, so a device already holding a
- * differently-signed build of the same package rejects every install of it. That is a
- * routine state on a shared device (a release build from one job, a debug build from
- * another), and the only way out is to REMOVE the installed build — which `install`
- * does automatically, and needs the package name for.
- *
- * adb names it in the failure itself, in one of two long-stable wordings. Reading it
- * there beats every alternative: `aapt dump badging` needs build-tools that may not be
- * installed, and decoding an APK's binary AndroidManifest is far outside a zero-dep repo.
- *
- * The pattern doubles as the SAFETY GATE. It can only ever yield `[A-Za-z0-9._]+`, so no
- * caller-influenced string reaches a command line — the same closed-alphabet argument
- * `device/settings.ts` makes, rather than a separate `assertSafeAppId` call that a later
- * edit could drop. `adb uninstall` is an adb-level verb anyway, never `adb shell`, so
- * nothing here is re-concatenated into a device-side command line.
+ * Ask `isSignatureConflict` FIRST: a null here means "no package named", never "not a
+ * conflict". Read from adb's own failure text (no aapt, no manifest decoding), and the
+ * pattern doubles as the safety gate — it can only ever yield `[A-Za-z0-9._]+`. Why
+ * `install` removes the blocking build at all: CLAUDE.md, "Extending a platform backend".
  */
 export function blockingPackage(adbOutput: string): string | null {
   // "Existing package com.foo signatures do not match newer version" (current) and

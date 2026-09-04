@@ -1,8 +1,17 @@
 import { CliError } from '../errors';
-import { formatCompact } from '../ui/format';
+import { backoffMs, sleep } from '../wait';
 import { parsePlan, PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
 import { Usage } from './cost';
-import { AgentProvider, CompileInput, CompileResult, RepairContext, RepairResult, compileUserPrompt } from './provider';
+import {
+  AgentProvider,
+  CompileInput,
+  CompileResult,
+  RepairContext,
+  RepairResult,
+  compileUserPrompt,
+  repairDecision,
+  repairUserPrompt,
+} from './provider';
 import { GRAMMAR, REPAIR_GRAMMAR } from './grammar';
 
 // The OpenAI provider: OpenAI's Chat Completions API over Node's built-in fetch — no
@@ -83,9 +92,6 @@ interface ChatResponse {
   };
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const backoffMs = (attempt: number): number => Math.min(1000 * 2 ** (attempt - 1), 15000);
-
 /** Map OpenAI's usage onto the normalized (Anthropic-shaped) Usage the CostTracker
  *  prices. OpenAI's prompt_tokens INCLUDES the cached tokens, so subtract them out:
  *  uncached prompt → input_tokens (full price), cached → cache_read_input_tokens (0.1x).
@@ -154,27 +160,8 @@ export class OpenAiProvider implements AgentProvider {
   }
 
   async repair(ctx: RepairContext): Promise<RepairResult> {
-    const parts: string[] = ['FAILED STEP: ' + JSON.stringify(ctx.failedStep), 'FAILURE: ' + ctx.reason];
-    if (ctx.candidates && ctx.candidates.length) {
-      parts.push(
-        `The selector matched ${ctx.candidates.length} elements (ambiguous) — pick a more specific selector for the SAME intended element, or give_up if none of them is it.`,
-      );
-    }
-    parts.push('CURRENT SCREEN:\n' + formatCompact(ctx.hierarchy));
-
-    const { json, usage } = await this.call(REPAIR_GRAMMAR, parts.join('\n\n'), REPAIR_DECISION_JSON_SCHEMA, 4096);
-    const decision = (json ?? {}) as { decision?: string; step?: unknown; reason?: string };
-    if (decision.decision === 'give_up') {
-      return {
-        replaceStep: null,
-        declineReason: decision.reason?.trim() || 'no element on the current screen matches the step intent',
-        usage,
-      };
-    }
-    // Hand the proposed leaf back UNVALIDATED — engine.ts validates every repair against
-    // the grammar before splicing (it is the execution trust boundary and can't assume a
-    // provider validated). A missing/invalid step is rejected there as a failed repair.
-    return { replaceStep: (decision.step ?? null) as RepairResult['replaceStep'], usage };
+    const { json, usage } = await this.call(REPAIR_GRAMMAR, repairUserPrompt(ctx), REPAIR_DECISION_JSON_SCHEMA, 4096);
+    return repairDecision(json, usage);
   }
 
   private async call(system: string, user: string, schema: unknown, maxTokens: number): Promise<{ json: unknown; usage: Usage }> {

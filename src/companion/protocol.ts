@@ -37,13 +37,6 @@ export function isLiveReply(reply: Buffer): boolean {
   return reply.length > 0;
 }
 
-/** Does this `ping` reply come from a companion we can speak to? */
-export function pingMatches(reply: Buffer): boolean {
-  if (!isLiveReply(reply)) return false;
-  const [name, version] = reply.toString('utf8').trim().split(/\s+/);
-  return name === 'verikun-companion' && version === COMPANION_PROTOCOL;
-}
-
 /** What a live companion reports about itself. */
 export interface CompanionState {
   /** Ours, and speaking our protocol version. A false here means restart it, not talk to it. */

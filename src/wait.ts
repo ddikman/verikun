@@ -9,6 +9,9 @@ export const DEFAULT_STOP_TIMEOUT_MS = 60_000;
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Exponential backoff for an HTTP retry: 1s, 2s, 4s … capped at 15s. */
+export const backoffMs = (attempt: number): number => Math.min(1000 * 2 ** (attempt - 1), 15000);
+
 /**
  * A progress callback that fires at most once per `everyMs`, timed from when it was
  * CREATED. Multi-phase waits (find the serial, then wait for boot) chain several

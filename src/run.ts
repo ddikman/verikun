@@ -4,7 +4,7 @@ import { Driver, Element } from './types';
 import { Selector, MatchTier } from './ui/selector';
 import { formatCompact } from './ui/format';
 import { CliError, isEnvError } from './errors';
-import { artifactDir, err, laneId } from './output';
+import { artifactDir, currentSession, err, laneId } from './output';
 import { toJUnitXml, toHtml } from './report';
 import { capturePng } from './capture';
 
@@ -21,15 +21,9 @@ import { capturePng } from './capture';
 // the element it resolved through are stored so the report doubles as a record
 // of which identifiers worked (reusable next time, instead of re-inspecting).
 //
-// LANES. `VERIKUN_LANE` moves the ACTIVE run to `./.verikun/run-<lane>/`, which is
-// what lets a parallel `vk suite` run several tests at once in one working
-// directory: every test starts its run with force=true, which rm -rf's the active
-// directory, so two concurrent tests sharing one path means the loser's in-flight
-// state and artifacts are deleted under it. Archives still land in the SHARED
-// ./.verikun/runs/<id>/, so the suite index's ../../runs/<id>/report.html links are
-// unchanged and every lane's evidence ends up in one place. Artifact filenames are
-// keyed on step index alone, which is safe precisely because they live inside the
-// (now per-lane) run directory.
+// LANES. `VERIKUN_LANE` moves the ACTIVE run to `./.verikun/run-<lane>/` so a parallel
+// `vk suite` can run several tests at once in one working directory; archives stay in
+// the SHARED ./.verikun/runs/<id>/. Why that split is load-bearing: CLAUDE.md, "Test runs".
 
 export interface RunStep {
   index: number;
@@ -338,13 +332,6 @@ function renameOnto(from: string, to: string): void {
 // An implicit run should not silently swallow unrelated activity. Before adding
 // a step to an existing run we check whether the context still matches; if not,
 // the old run is auto-closed (archived — never discarded) and a fresh one starts.
-
-/** A stable-per-session id, if the environment provides one. Opt-in by design:
- *  in an agent harness each command may be a fresh shell, so we never derive it
- *  from the process tree (that would roll over on every action). */
-function currentSession(): string | undefined {
-  return process.env.VERIKUN_SESSION || process.env.TERM_SESSION_ID || undefined;
-}
 
 /** Idle-timeout in minutes (0 disables). Default 30. */
 function idleMinutes(): number {

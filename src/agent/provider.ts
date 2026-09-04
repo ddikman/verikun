@@ -1,4 +1,5 @@
 import { Element } from '../types';
+import { formatCompact } from '../ui/format';
 import { Plan, LeafStep } from './ir';
 import { Usage } from './cost';
 import { SECTION_NOTE } from './grammar';
@@ -89,6 +90,36 @@ export interface RepairResult {
   /** Why the model gave up, when `replaceStep` is null (surfaced in the failure). */
   declineReason?: string;
   usage: Usage;
+}
+
+/** The user message for a repair. Shared by every provider, like compileUserPrompt. */
+export function repairUserPrompt(ctx: RepairContext): string {
+  const parts: string[] = ['FAILED STEP: ' + JSON.stringify(ctx.failedStep), 'FAILURE: ' + ctx.reason];
+  if (ctx.candidates && ctx.candidates.length) {
+    parts.push(
+      `The selector matched ${ctx.candidates.length} elements (ambiguous) — pick a more specific selector for the SAME intended element, or give_up if none of them is it.`,
+    );
+  }
+  parts.push('CURRENT SCREEN:\n' + formatCompact(ctx.hierarchy));
+  return parts.join('\n\n');
+}
+
+/**
+ * Read the model's repair decision. A give_up is terminal (see RepairResult). A proposed
+ * leaf is handed back UNVALIDATED — engine.ts validates every repair against the grammar
+ * before splicing (it is the execution trust boundary and can't assume a provider
+ * validated); a missing/invalid step is rejected there as a failed repair.
+ */
+export function repairDecision(json: unknown, usage: Usage): RepairResult {
+  const decision = (json ?? {}) as { decision?: string; step?: unknown; reason?: string };
+  if (decision.decision === 'give_up') {
+    return {
+      replaceStep: null,
+      declineReason: decision.reason?.trim() || 'no element on the current screen matches the step intent',
+      usage,
+    };
+  }
+  return { replaceStep: (decision.step ?? null) as RepairResult['replaceStep'], usage };
 }
 
 export interface AgentProvider {
