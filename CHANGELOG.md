@@ -20,6 +20,8 @@ All notable changes to this project are documented here. The format is based on
 - **`vk suite`** skips `_`-prefixed `*.md` — those are shared fragments, not tests. ([#112])
 - **`vk ai`** compiles each chunk of an `@include`d test separately and caches it, so shared
   prose is compiled once across a suite. ([#112])
+- **Contributor docs**: rules stated once, with the history moved to the docs site; the companion
+  notes no longer describe it as a prototype.
 - **`vk suite`** lanes now wait for a shared `@include` fragment's first compile instead of
   each paying for one. ([#117])
 - **`vk server`** demotes a failing pooled device instead of dropping it, so capacity no

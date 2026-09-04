@@ -2,7 +2,8 @@
 // One small JSON file per serial under `~/.verikun/devices/`, HOST-global because a device
 // is a fact about the machine, not about a working directory. The load-bearing properties
 // — one file per serial, write-then-link acquisition, tolerant reads, pid-first liveness
-// and the exact `VERIKUN_NO_CLAIM=1` equivalence — are in CLAUDE.md, "Device claims".
+// and the exact `VERIKUN_NO_CLAIM=1` equivalence — are in CLAUDE.md, "Device claims and
+// grants" and, with the measured races behind them, docs/…/internals/contracts.md.
 // Platform-agnostic, like `device/settings.ts` and `ui/`: it never touches adb/xcrun.
 
 import { createHash } from 'node:crypto';
