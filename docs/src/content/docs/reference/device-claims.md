@@ -8,12 +8,9 @@ sidebar:
 Running two or three agents in parallel against one pool of phones, emulators and simulators,
 the question that matters is *which device is free right now*. verikun answers it itself: the
 first device-touching command **claims** the device it resolves, so a second job picks a
-different one — or is told, in milliseconds, that everything is busy and who has it.
-
-The failure this closes is expensive and misleading. Two jobs on one device clobber each
-other's app — same package, different build — and it surfaces as ordinary assertion failures.
-Nothing says *the app under you changed*, so it reads exactly like a regression until someone
-goes digging, having already spent the run.
+different one — or is told, in milliseconds, that everything is busy and who has it. Without
+that, two jobs on one device clobber each other's app, and it surfaces as ordinary assertion
+failures that read exactly like a regression.
 
 ## What you see
 
@@ -95,21 +92,12 @@ A claim is refreshed between commands, so two signals decide whether it is still
 | Idle time since the last command | Live for **5 minutes** by default |
 | The owning process is **gone**, and it owned the whole job (`ai` / `suite` / `batch` / `server`) | Free **immediately** |
 
-A running process always counts, because the heartbeat can only fire *between* commands: a
-large `install`, a `wait --timeout 600000`, or a model repair round-trip mid-`vk ai` has no
-opportunity to report that it is still working, and a pure timeout would hand the device to
-someone else halfway through.
-
-The third row is the one that saves you waiting. `ai`, `suite`, `batch` and `server` are a
-single process for the entire job, so when that process dies the job is genuinely over — a
-`kill -9` returns the device at once rather than parking it until a timer expires. A one-off
-`vk tap` cannot be read that way: its process exits after every command while the job carries
-on, which is exactly what the idle window is for.
-
-`VERIKUN_CLAIM_TTL_MIN` tunes the one-off window (`0` disables it, making every one-off claim
-expire at once). One minute is usually too tight: an agent that taps, reads a screenshot,
-decides and taps again can easily pause past it, and losing the device mid-flow is worse than
-waiting a little for a crashed one.
+A running process always counts because the heartbeat can only fire *between* commands — a
+large `install` or a model repair round-trip cannot report that it is still working. `ai`,
+`suite`, `batch` and `server` are one process for the whole job, so their death frees the
+device at once; a one-off `vk tap` exits after every command while the job carries on, which is
+what the idle window is for. `VERIKUN_CLAIM_TTL_MIN` tunes it (`0` expires one-off claims at
+once); one minute is usually too tight for an agent that pauses to think between taps.
 
 ## Turning it off
 
@@ -133,36 +121,24 @@ One JSON file per device under `~/.verikun/devices/`:
 ~/.verikun/devices/emulator-5554-3c9a1f04.json
 ```
 
-**Host-global, not per-workspace.** Run state lives in `./.verikun/` because it describes a
-working directory; a device is a fact about the machine, and the jobs that collide are in
-different directories by definition. One file per device rather than one shared index,
-because the whole premise is concurrent writers — separate files make every write atomic.
-
-A claim records the serial and platform, the owning working directory and session, the pid
-and hostname, when it was taken and when it was last seen. Reads are **tolerant**: a corrupt
-or unreadable file counts as unclaimed, so a poisoned file can never brick a device.
+**Host-global, not per-workspace**: a device is a fact about the machine, and the jobs that
+collide are in different directories by definition. One file per device, because the premise is
+concurrent writers. A claim records the serial and platform, the owning working directory and
+session, the pid and hostname, and when it was taken and last seen. Reads are **tolerant**: a
+corrupt or unreadable file counts as unclaimed.
 
 ## What counts as "the same job"
 
 A claim is yours when **either** the session matches (`VERIKUN_SESSION`, else
-`TERM_SESSION_ID`) **or** the working directory does.
-
-Either, not both, deliberately: the only unsafe error here is falsely accusing your own job.
-An agent harness may run every command in a fresh shell with no stable session id, so session
-alone will not do; and two terminals deliberately sharing one checkout are one job, so the
-directory alone will not do either.
+`TERM_SESSION_ID`) **or** the working directory does. Either, not both, deliberately: the only
+unsafe error is falsely accusing your own job, and an agent harness may run every command in a
+fresh shell with no stable session id.
 
 ## Remote devices
 
 Over [`--server`](/verikun/guides/remote-devices-and-ci/) the claim is held by the server
-process, on the host where the devices actually are — a client cannot see the other clients,
-and does not need to. The server also has its own per-run device lock, which is a separate,
-finer-grained mechanism for two clients sharing one server; claims sit beneath it, keeping
-other jobs *on that host* off the server's device.
-
-When a server [fails over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails)
-to another device, the claim moves with the binding — and in that order: it claims the new
-device, probes it, commits, and only then hands the old one back. Releasing first would leave
-the server bound to a device it no longer holds, and a racing job on the same host would take
-it mid-request. A candidate another job already holds is simply skipped, not quarantined: busy
-is not broken.
+process, on the host where the devices are; the server's own per-run lease is the finer
+mechanism for two clients sharing one server, and claims sit beneath it. When a server
+[fails over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails), the claim
+moves with the binding — the new device is claimed, probed and committed before the old one is
+released — and a candidate another job holds is skipped, not quarantined.

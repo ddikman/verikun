@@ -75,10 +75,8 @@ decide which target you should pick:
 
 ## Writing selectors that work on iOS
 
-The advice does not change on iOS: **`@id` first, `text:` second, `desc:` never.** `@id` is
-the only selector that means the same thing on both platforms, and it is the only one that
-survives localisation. The per-kind mapping and the reasoning are in
-[Selectors](/verikun/reference/selectors/#which-selector-to-reach-for).
+The advice does not change on iOS — **`@id` first, `text:` second, `desc:` never**; the
+reasoning is in [Selectors](/verikun/reference/selectors/#which-selector-to-reach-for).
 
 What *is* iOS-specific is where a label ends up. An accessibility label arrives as `desc` on
 Android but as `text` on iOS, so a `desc:` selector written against Android **silently stops
@@ -91,8 +89,7 @@ or action survives in the Android hierarchy and vanishes from the iOS one entire
 anything that has to be findable on both needs a label as well as an id.
 
 `--selected` and `--focused` exit `3` on iOS rather than matching nothing; `--enabled` and
-`--checked` work on both. See
-[Platform support](/verikun/guides/platform-support/#selectors-and-state-modifiers).
+`--checked` work on both — see [Platform support](/verikun/guides/platform-support/#selectors-and-state-modifiers).
 
 ## Measured Flutter facts
 

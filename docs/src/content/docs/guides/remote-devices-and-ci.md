@@ -154,12 +154,10 @@ in (below).
 only single-file `.apk` / `.ipa` uploads, writes to a **server-generated** temp path (never a
 client-supplied one), and verifies a sha256 of the body.
 
-That one flag also authorizes the removal an install sometimes needs. On Android a build signed
-by a different key than the one already installed cannot be updated over, so the server removes
-the installed build and installs again — losing that build's app data, and logging it. There is
-no separate permission, because a server you may hand an arbitrary binary to write is not more
-trusted by also being allowed to delete the build that binary replaces. If you do not want that,
-do not pass `--allow-install`.
+That one flag also authorizes the removal an install sometimes needs: an Android build signed
+by a different key than the installed one cannot be updated over, so the server removes the
+installed build and installs again — losing that build's app data, and logging it. There is no
+separate permission; if you do not want that, do not pass `--allow-install`.
 
 ### Device control is opt-in, and naming is allowlisted
 
@@ -379,11 +377,9 @@ before the first step** — never between tests and never mid-run, so it cannot 
 green. It means "boot something if nothing is usable"; when a device is already available it
 is a no-op and says so, even if you named a different one.
 
-There is deliberately **no** automatic mid-run restart. The most common exit `3` is a failed
-`uiautomator dump` on a busy screen, so rebooting for it would punish a transient with a
-two-minute detour — and a reboot destroys the app session, so the retried step would either
-pass meaninglessly or cascade into confusing failures. Failover, below, is a *lateral* move
-under the same rule: it never reboots, and it never replays a step.
+There is deliberately **no** automatic mid-run restart: a reboot destroys the app session, so
+the retried step would pass meaninglessly or cascade into confusing failures. Failover, below,
+is a *lateral* move under the same rule — it never reboots, and it never replays a step.
 
 ## When the bound device fails
 
@@ -436,21 +432,17 @@ healthy — the next `vk suite` test, or the next `--retries` attempt, with no i
 
 ### Deciding whose fault a failure was
 
-Reachability is not the signal: a phone with a full disk answers `adb get-state` perfectly
-happily. So an install failure is read the other way round — verikun enumerates the failures
-that are provably about the **build** (`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`,
-`_TEST_ONLY`, a `.apk` the server cannot read), and treats **everything else** as the device's
-fault, including wordings nobody has seen before. A broken build fails identically on every
-device, so retrying it elsewhere only burns minutes; anything else might genuinely work next
-door.
+Reachability is not the signal — a phone with a full disk answers `adb get-state` happily. So
+verikun enumerates the install failures that are provably about the **build**
+(`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`, `_TEST_ONLY`, an unreadable `.apk`)
+and treats **everything else** as the device's fault, including wordings nobody has seen
+before: a broken build fails identically everywhere, anything else might work next door.
 
-For a step, the default is the opposite — exit `3` there is dominated by transient device
-noise, so verikun re-probes the device twice a second apart and only moves if it is genuinely
-gone. That is the same distinction `--retries` draws: a flaky device is the test rerun's
-problem, not failover's.
+A step keeps the opposite default — exit `3` there is dominated by transient device noise, so
+verikun re-probes the device twice a second apart and only moves if it is genuinely gone.
 
 At most **two** moves per request, and on exhaustion the client is given the **first** device's
-error, never the last — so the real cause stays the headline:
+error, never the last, so the real cause stays the headline:
 
 ```
 Failed to install '…apk': adb: device offline
@@ -462,51 +454,32 @@ Failed to install '…apk': adb: device offline
 ### Failover on a pool
 
 With [`--devices`](#serving-several-devices-from-one-address) the same machinery keeps the pool
-at **full capacity** rather than moving a single binding. If a healthy unclaimed device is
-attached and not already a member, it joins and the failed one leaves. The other devices keep
-serving throughout — a lease on a different phone never notices.
-
-Usually there is no such spare, because `--devices all` already pooled everything attached.
-Then the failing device is **demoted, not dropped**:
+at **full capacity** rather than moving a single binding: a healthy unclaimed device that is
+attached and not yet a member joins, the failed one leaves, and every other lease keeps
+serving. Usually there is no such spare, because `--devices all` already pooled everything
+attached. Then the failing device is **demoted, not dropped**:
 
 - It keeps its worker, its claim and its place in the pool, and `/v1/health` lists it under
   `degraded` rather than `quarantined`.
 - Leases are dealt **healthy first, then least-recently-used**, so a demoted device is chosen
-  only when nothing else is free. That is what makes demotion a complete answer to dropping it:
-  the pool stops handing work to a bad phone without losing the capacity.
+  only when nothing else is free.
 - It is **restored by working**, not by a timer — the first step or hierarchy read that
   succeeds on it puts it back in the healthy rotation.
 
-The alternative, dropping it, is what a pool cannot afford: the members are excluded from their
-own candidate list, so "nothing healthier to move to" is the *normal* case, and shedding there
-took a three-device pool to one in two failures with no way back.
-
-Two rules make the move safe to reason about:
-
-- **The lease follows the move.** The run whose device failed lands on the replacement the
-  server just announced, not on some third device its next request happens to draw — and it
-  does not lose its place in the queue to a racing job. The failing *step* is still never
-  replayed; it keeps the old device's error, and the client seals that run and opens a fresh
-  one for the new device, so no report spans two.
-- **The last device is never shed.** A server down to its final device stays on it, because
-  answering `503 no device attached` from then on would replace the real diagnosis — a full
-  disk, say — with a message that names nothing.
+**The lease follows the move.** The run whose device failed lands on the replacement the server
+just announced, without losing its place in the queue; the failing *step* is still never
+replayed — the client seals that run and opens a fresh one on the new device, so no report
+spans two. **The last device is never shed**: a server down to its final device stays on it,
+because a bare `503` would replace the real diagnosis with a message that names nothing.
 
 ### A device that comes back rejoins by itself
 
-A pooled server sweeps once a minute for devices that *should* be serving and are not — one
-whose worker died, a phone unplugged and replugged, an emulator restarted out of band, or (with
-`--devices all`) one attached after startup. An explicit `--devices a,b,c` only ever re-adopts
-from that list.
-
-Rejoining is gated on evidence, never a clock: starting the worker **is** the probe, since it
-only reports ready once its own preflight passed. A device that is still broken simply fails to
-come back, and each failure doubles the wait before the next attempt, up to 30 minutes — so a
-genuinely dead phone costs almost nothing while a transiently absent one is back within a
-minute. Every attempt is logged.
-
-If a build has been installed this session, a rejoining device is brought up to it before it is
-dealt any work; if that install fails, it stays out rather than serve the wrong build.
+A pooled server sweeps once a minute for devices that *should* be serving and are not — a
+worker that died, a phone unplugged and replugged, an emulator restarted out of band, or (with
+`--devices all`) one attached after startup; an explicit `--devices a,b,c` only re-adopts from
+that list. Starting the worker **is** the probe, so a device that is still broken simply fails
+to come back; each failure doubles the wait, up to 30 minutes, and every attempt is logged. A
+rejoining device is brought up to the session's last install before it is dealt any work.
 
 ```
 [server] pool: emulator-5556 left the pool — worker exited with code 1
@@ -519,22 +492,18 @@ dealt any work; if that install fails, it stays out rather than serve the wrong 
 ### What was ruled out, and how to clear it
 
 A quarantine says "never move *onto* this device". It lasts as long as the server process and
-has no timer, on purpose: a device that ran out of disk ten minutes ago is still out of disk,
-and silently re-trying it would burn another full install on a schedule nobody can see. A
-successful `vk devices restart|start|stop` for that device clears it — power-cycling *is* the
-fix, and doing one is the assertion that it worked. A device that **rejoins** the pool clears
-it too, because coming up is a real probe rather than a guess.
-
-An install that fails on *every* device is read as a bad build, not a bad pool, so the
-quarantines that attempt set are rolled back.
+has no timer, on purpose — a device that ran out of disk ten minutes ago is still out of disk.
+A successful `vk devices restart|start|stop` for that device clears it, and so does rejoining
+the pool, because coming up is a real probe. An install that fails on *every* device is read
+as a bad build, not a bad pool, so the quarantines that attempt set are rolled back.
 
 ```sh
 curl -s "$VERIKUN_SERVER/v1/health" | jq '{capacity, devices, degraded, quarantined}'
 vk devices --server "$VERIKUN_SERVER"     # a NOTE column shows why each was ruled out
 ```
 
-Failover makes a full disk *survivable*; it does not stop it happening. A long-lived CI device
-accumulates builds and app data from every job pointed at it, so budget for cleaning it up.
+Failover makes a full disk *survivable*, not impossible: a long-lived CI device accumulates
+builds and app data from every job pointed at it, so budget for cleaning it up.
 
 ## Running the server as a long-lived service
 
@@ -547,14 +516,11 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 - Restart on failure — the device lock's 5-minute idle takeover means a restart mid-run does
   not permanently wedge anything.
 
-The server writes its own log, so a service unit needs no output redirection: by default
-`~/.verikun/logs/server-<port>.log`, rotated at 10 MB keeping one previous generation. The
-startup banner names the path. `--log-file <path>` moves it (useful when the service runs as a
-user whose `$HOME` is not where you look), and `--log-file off` leaves stderr only.
-
-It records every request with its status, run token and leased device, the reason behind every
-error the client was sent, and every lease, failover and pool change — which is what makes
-"why did capacity drop during last night's run?" answerable after the fact:
+The server writes its own log — by default `~/.verikun/logs/server-<port>.log`, rotated at
+10 MB keeping one previous generation and named in the startup banner; `--log-file <path>`
+moves it and `--log-file off` leaves stderr only. It records every request with its status, run
+token and leased device, the reason behind every error the client was sent, and every lease,
+failover and pool change:
 
 ```
 2026-09-02T09:14:22.108Z [server] POST /v1/exec run=a1b2c3d4 dev=emulator-5554 → 200 (812ms)

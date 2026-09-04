@@ -37,6 +37,8 @@ All notable changes to this project are documented here. The format is based on
   notes no longer describe it as a prototype.
 - **Docs site**: the contracts, core-principles, plan-engine and AI-plans pages state each rule
   once and link the page that owns the detail.
+- **Docs site**: shorter remote-device, troubleshooting and cost guides; global flags now live on
+  the Commands page — the standalone page is gone.
 
 ### Fixed
 - **`vk server`** terminates a worker that stops answering, instead of holding its lease

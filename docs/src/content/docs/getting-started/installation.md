@@ -68,9 +68,9 @@ Confirm verikun can see it:
 vk devices
 ```
 
-If more than one device is attached, every command needs
-[`--device <serial>`](/verikun/reference/global-flags/) (or the `VERIKUN_DEVICE`
-environment variable) — verikun will not guess which one you meant, and exits `3` instead.
+With more than one device attached, verikun picks one no other job is driving and says which
+on stderr; name one with [`--device <serial>`](/verikun/reference/commands/#global-flags) (or
+the `VERIKUN_DEVICE` environment variable) to choose.
 
 ## Register the skill with your agent
 

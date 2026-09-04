@@ -118,19 +118,11 @@ and [AI plans & models](/verikun/reference/ai-plans/) for the plan grammar.
 
 ## Which selectors to write
 
-This matters more than the format you choose. In order of preference:
-
-1. **`@id`** — a resource-id (Android) or `AXUniqueId` (iOS). The only selector that is not
-   text, so it is the only one that survives **localisation** and copy changes.
-2. **`text:`** — visible text. Portable, and it falls back to the accessibility description
-   when no text matches.
-3. **`desc:`** — accessibility label. Android in practice; it does **not** fall back, and on
-   iOS an accessibility label arrives as `text` instead.
-4. **`class:`** — mostly useless on a cross-platform toolkit; almost every Flutter widget
-   reports as `android.view.View`.
-
-Full detail, including the per-platform matrix, is in
-[Selectors](/verikun/reference/selectors/#which-selector-to-reach-for).
+This matters more than the format you choose. In order of preference: **`@id`** (the only
+selector that survives localisation and copy changes), **`text:`** (falls back to the
+accessibility description), **`desc:`** (Android in practice — on iOS the label arrives as
+`text`), then **`class:`** (mostly useless with Flutter). The reasoning and the per-platform
+matrix: [Selectors](/verikun/reference/selectors/#which-selector-to-reach-for).
 
 ## Make each test self-isolating
 

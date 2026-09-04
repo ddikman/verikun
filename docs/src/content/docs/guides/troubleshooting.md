@@ -105,44 +105,27 @@ reads trustworthy. See [Device state](/verikun/reference/device-state/#preparing
 
 ### Why a test run takes as long as it does
 
-Almost all of it is **reading the UI hierarchy**, and that cost is not verikun's to spend
-differently — it is what `uiautomator dump` costs. Measured end to end on a physical
-SM-A415F (Android 12):
-
-| Stage | Cost | Share |
-|---|--:|--:|
-| ART startup + loading `uiautomator.jar` | ~1.22s | 53% |
-| Connecting to accessibility, waiting for idle, walking + serialising the tree | ~1.10s | 45% |
-| Transferring the XML (11–22 KB) and parsing it | ~0.05s | 2% |
-| **One `vk ui` / one selector lookup** | **~2.4s** | |
-
-The two big terms are **fixed per invocation** — they do not depend on how big the screen's
-tree is. A 57-node home screen and a deep app screen both cost ~2.4s, `--compressed` saves
-~0.1s, writing the dump to `/data/local/tmp` instead of `/sdcard` saves nothing, and bypassing
-the `uiautomator` wrapper script saves nothing. Every read starts a fresh VM and a fresh
-accessibility connection, and that is the bill. **iOS is ~10× cheaper** (`idb` at 0.2–0.4s)
-precisely because `idb` keeps a companion process alive between reads.
+Almost all of it is **reading the UI hierarchy**: a stock `uiautomator dump` costs **~2.4s**
+on a mid-range phone, and that cost is fixed per invocation — a fresh VM and a fresh
+accessibility connection on every read, regardless of how big the tree is. iOS is ~10× cheaper
+(`idb` at 0.2–0.4s) precisely because `idb` keeps a process alive between reads.
 
 **On Android verikun already does this for you.** The
 [companion](/verikun/guides/companion/) keeps one accessibility connection alive on the
-device and answers in **~0.2s**, removing both fixed costs above — so the numbers in the
-table are what you get with it turned *off* (`VERIKUN_COMPANION=0`). It holds the device's
-single `UiAutomation` connection while it runs, which is the one reason you might.
+device and answers in **~0.2s**; the 2.4s figure is what you get with it turned *off*
+(`VERIKUN_COMPANION=0`). It holds the device's single `UiAutomation` connection while it
+runs, which is the one reason you might.
 
 Beyond that, the lever is **how many reads a test makes**, not how fast each one is:
 
-- **Every selector command is one read** — `tap`, `text`, `find`, `assert`, `swipe --on`. A
-  step that has to wait costs one read per poll.
-- **An `if-present` / `while-present` guard that finds nothing costs *two*.** The guard takes a
-  second look before concluding "absent", because a settle window shorter than one dump would
-  otherwise be a silent no-op. On a slow device that makes an absent guard ~4.8s. Set
-  [`VERIKUN_GUARD_SETTLE_MS=0`](/verikun/reference/environment-variables/) to restore the
-  single-shot probe, which roughly halves the cost of a guard-heavy plan — at the price of
-  less patience for a slow screen.
-- **Screenshots are ~1.1s each** and are *not* free, even though they cost no tokens when
-  never read back. See [Screenshots](/verikun/reference/screenshots/).
-- Prefer one `assert` over a `screenshot` you intend to read back: it is cheaper in both
-  wall clock and tokens.
+- **Every selector command is one read** — `tap`, `text`, `find`, `assert`, `swipe --on` — and
+  a step that has to wait costs one read per poll.
+- **A guard that finds nothing costs *two*** (a second look before concluding "absent").
+  [`VERIKUN_GUARD_SETTLE_MS=0`](/verikun/reference/environment-variables/) restores the
+  single-shot probe and roughly halves a guard-heavy plan, at the price of less patience.
+- **Screenshots are ~1.1s each** and are *not* free even when never read back — see
+  [Screenshots](/verikun/reference/screenshots/). Prefer one `assert` over a screenshot you
+  intend to read back.
 
 ### "No window to read" right after `launch`
 
@@ -234,52 +217,26 @@ A claim from a crashed job clears on its own. Full detail:
 
 ### The display went to sleep
 
-The failure here is not the one you would expect. A slept device does **not** reliably fail the
-read — measured on a Pixel 3a (API 32), a `Dozing` device served a perfectly well-formed
-hierarchy of `com.android.systemui`. The dump *succeeds*, and hands back the **lock screen**
-instead of the app.
+A slept device does **not** reliably fail the read: a dozing device serves a well-formed
+hierarchy of `com.android.systemui` — the dump *succeeds* and hands back the **lock screen**
+instead of the app, a false green in which every selector then misses for a reason that has
+nothing to do with your app.
 
-That is a false green, and it is worse than an error: every selector then misses for a reason
-that has nothing to do with your app.
+So before every hierarchy read, screenshot, tap, swipe, keypress or typed text, verikun asks
+whether the display is actually on (`dumpsys power`'s `mWakefulness` — the only signal that
+holds on every device, ~85 ms per read, cached for two seconds). If it is not, it wakes the
+device and tries `wm dismiss-keyguard` first. A device that is awake but behind the keyguard is
+caught afterwards from the hierarchy plus `dumpsys trust`: verikun retries and then exits
+**`3`** naming the lock.
 
-So before every hierarchy read verikun asks whether the display is actually on
-(`dumpsys power`'s `mWakefulness`). If it is not, it wakes the device and tries
-`wm dismiss-keyguard` first, then reads.
+A **swipe** lock is cleared automatically. A **PIN, pattern or password** is not — verikun never
+asks for or stores a device credential — so remove the lock on a test device (*Settings >
+Security*). `vk doctor` lists, per device, whether it is prepared and what kind of lock it has
+(it stays quiet on API 29, where `dumpsys lock_settings` lacks the field).
 
-The same check guards every other path that touches the screen — a screenshot, a tap, a swipe,
-typing, a keypress — because those fail *silently* rather than falsely: `screencap` on a dozing
-device returns the ambient frame into your report, and an injected `input tap` does nothing at
-all while exiting `0` (measured on a Pixel 3a: the tap leaves `mWakefulness=Dozing` untouched).
-One answer is cached for two seconds, so a command that reads and then acts on what it found
-probes once, while a long `wait` or `vk ai` run keeps re-checking.
-
-**Why a round trip rather than inspecting the hierarchy.** The obvious cheap trick — notice
-that everything on screen belongs to `com.android.systemui` — does not generalise. A Motorola
-on API 29 serves its own **vendor always-on display** while dozing (`@clock`, `@date`,
-`@battery_progress`, in a `com.motorola.*` package), which no package heuristic can tell from
-an app. Whether the display is on is the only signal that holds for every device. Measured cost:
-about **85 ms** per read.
-
-A second check still runs on the hierarchy afterwards, for a device that is awake but behind
-the keyguard: if every package-qualified id belongs to the system *and* `dumpsys trust` reports
-the device locked, verikun retries and then exits **`3`** naming the lock. (`android:` framework
-ids are *neutral* there — the lock screen inflates framework notification layouts, so they prove
-nothing either way.)
-
-A **swipe** lock is cleared automatically. A **PIN, pattern or password** is not: clearing one
-needs the credential, and verikun never asks for or stores a device PIN. Remove the lock on a
-test device — *Settings > Security* — and the recovery works from then on.
-
-`vk doctor` also lists, per device, whether it is prepared and what kind of lock it has. That
-advisory needs the `CredentialType` field of `dumpsys lock_settings`, which is present on
-API 32 and API 35 but **absent on API 29** — so on an older device doctor stays quiet about the
-lock rather than guessing. The read-time protection above is unaffected: it keys off
-`dumpsys trust`, which works there.
-
-A prepared device gives the display a **1-minute** timeout, which is long enough to span the
-gap between two commands of one flow. If you would rather it never slept at all — the right
-answer on a device with a PIN or pattern lock, which verikun cannot clear — ask for the other
-policy:
+A prepared device gives the display a **1-minute** timeout, long enough to span the gap
+between two commands of one flow. If you would rather it never slept at all — the right answer
+on a device with a lock verikun cannot clear — ask for the other policy:
 
 ```sh
 vk device prep --device <serial>                          # screen-timeout=1m, and more
@@ -367,10 +324,7 @@ vk assert @content --wait 10s     # not an immediate tap
 | Exit `3`, unreachable | Network path | Not verikun. Check the tailnet or route is up on the client. |
 | Install rejected | Server lacks `--allow-install` | Restart the server with the flag; a read-only server refuses builds by design. |
 | Device overrides stranded after a crash | Known gap: under `--server` the snapshot lives in the **server's** run file | `vk device reset` from the device box. |
-| `Requested internal only, but not enough space` | The device's disk is full. Note it carries no `INSTALL_FAILED_*` code, which is why it is classified by *not* being a build failure | With failover on, the server moves to another attached device by itself. Otherwise free space on the device, or `vk devices restart` it. |
-| `[failover] no working device remains` | Every attached device has been ruled out; the error above it is the **first** device's | The listed reasons say what to fix. A successful `vk devices restart <name> --server <url>` clears that device's quarantine. |
-| The suite ran on a device you did not expect | The server failed over off a bad device | `[verikun] server moved device:` on the client says which and why; `curl "$VERIKUN_SERVER/v1/health" \| jq .quarantined` says what was ruled out. Pin with `--device` to forbid it. |
-| A `--server` step failed with an error about a device that is no longer bound | Expected: a step is never replayed elsewhere, so it fails carrying the old device's error | Re-run the flow from the top; the new device has none of the state it had built up. |
+| The suite ran on a device you did not expect, a step failed naming a device no longer bound, or `[failover] no working device remains` | The server [failed over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) off a bad device (a full disk, most often); a step is never replayed elsewhere, and on exhaustion the error shown is the **first** device's | `[verikun] server moved device:` on the client says which and why; `curl "$VERIKUN_SERVER/v1/health" \| jq .quarantined` says what was ruled out. A successful `vk devices restart <name> --server <url>` clears a quarantine; pin with `--device` to forbid moves. |
 
 ## iOS and idb
 

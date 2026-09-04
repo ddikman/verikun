@@ -160,20 +160,15 @@ compiles you want to keep.
 
 Four things worth knowing before you rely on it:
 
-- **A verikun upgrade invalidates everything.** The fingerprint folds in the version *and* the
-  grammar text, so the first run after an upgrade recompiles every test — deliberately, so a
-  new engine never replays an old compiler's plan. Details in
-  [Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint).
-- **`--app-build $GITHUB_SHA` defeats the exact key.** The build id is part of the cache key, so
-  a per-commit value misses every run. Pass `--app-build` at the granularity you actually want
-  to invalidate at — a release or version string. Even then a restored cache still pays off: a
-  missed key falls back to *seeding* from a prior plan for the same prose and package, which is
-  a cheaper adapt than a cold compile.
-- **A restored cache is not behaviourally inert.** Because seeding ignores the build and the
-  fingerprint, what is on disk can influence what the compiler produces. If a compiled plan
-  looks wrong, clear the directory and re-run with `--recompile` before debugging anything else.
-- **The path is relative to the working directory.** If your suite step sets
-  `working-directory:`, the cache `path:` has to match it.
+- **A verikun upgrade invalidates everything** — the fingerprint folds in the version and the
+  grammar text, so a new engine never replays an old compiler's plan
+  ([Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint)).
+- **`--app-build $GITHUB_SHA` defeats the exact key.** Pass it at the granularity you want to
+  invalidate at; a missed key still *seeds* from a prior plan, which beats a cold compile.
+- **A restored cache is not behaviourally inert**: seeding ignores the build and the
+  fingerprint, so if a compiled plan looks wrong, clear the directory and `--recompile` first.
+- **The path is relative to the working directory.** A `working-directory:` on the suite step
+  means the cache `path:` has to match it.
 
 :::caution
 Caching cuts spend, not the key requirement. A suite that hits the cache 100% of the time

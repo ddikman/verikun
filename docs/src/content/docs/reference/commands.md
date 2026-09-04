@@ -9,7 +9,8 @@ sidebar:
 
 Not every command works everywhere — [Platform support](/verikun/guides/platform-support/) is
 the matrix of what runs on Android and iOS, on physical hardware and on an emulator or
-simulator.
+simulator. The flags every command accepts — `--device`, `--json`, `--server` — are under
+[Global flags](#global-flags) at the end.
 
 ## Inspect
 
@@ -198,3 +199,22 @@ Actions are recorded automatically; a run auto-starts on the first action. Full 
 | `version` / `--version` | Print the version. Exit `0`. |
 
 An unrecognised command exits **`2`**.
+
+## Global flags
+
+Every command accepts these; the environment-variable forms are listed in
+[Environment variables](/verikun/reference/environment-variables/).
+
+| Flag | Meaning |
+|---|---|
+| `-d, --device <serial>` | Target a specific device. Resolution order: `--device`, then `VERIKUN_DEVICE`, then `ANDROID_SERIAL` (Android only). With none set, verikun picks a device **no other job is driving** and says which on stderr; naming a device another job holds, or every device being claimed, is exit `2` — see [Device claims](/verikun/reference/device-claims/). `VERIKUN_NO_CLAIM=1` restores the older behaviour: one attached device auto-resolves, more than one exits `2`. |
+| `-p, --platform <android\|ios>` | Platform, default `android`. `--ios` / `--android` are shortcuts. |
+| `-j, --json` | Machine-readable output — **also serializes errors** as `{error, exitCode, errorKind}` with the exit code unchanged, so one parser handles both outcomes. `errorKind` is the error's class (`SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`, `CliError`, `Error`), so "the app has not drawn yet" and "the device is gone" are told apart without matching on message text. |
+| `--server <url>` | For `ai` / `suite` / `install`: run against a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) (or `VERIKUN_SERVER`). The server's device and platform apply. |
+| `--auth-key <k>` | Key for `--server` (or `VERIKUN_SERVER_AUTH_KEY`, which keeps it out of `ps`). |
+| `--` | End flag parsing, so text may start with `-`: `vk type -- "-50% off"`. |
+
+Globals passed to a [`batch`](/verikun/guides/writing-test-cases/#explicit-steps-vk-batch) call
+carry into every line unless a line overrides them — `--device`, `--platform` / `--ios` /
+`--android`, and `--json` — so `vk batch --ios --file login.flow` runs the whole flow against
+the simulator.
