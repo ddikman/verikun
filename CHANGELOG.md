@@ -35,6 +35,8 @@ All notable changes to this project are documented here. The format is based on
   the window, capped at 60s — so a short TTL no longer races it.
 - **Contributor docs**: rules stated once, with the history left to the docs site; the companion
   notes no longer describe it as a prototype.
+- **Docs site**: the contracts, core-principles and plan-engine pages state each rule once and
+  link the page that owns the detail.
 
 ### Fixed
 - **`vk server`** terminates a worker that stops answering, instead of holding its lease

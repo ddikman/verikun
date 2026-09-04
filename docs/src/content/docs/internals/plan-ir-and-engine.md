@@ -51,20 +51,12 @@ so stdout stays the one final result while progress streams to stderr for CI liv
 
 ## Heal versus terminal
 
-This is the single most load-bearing rule in the agent runner.
-
-| Situation | Behaviour |
-|---|---|
-| Selector **miss** (`SelectorNotFoundError`, exit `1`) | **Heals** via the model |
-| Selector **ambiguity** (`AmbiguousSelectorError`, exit `2`) | **Heals** via the model |
-| **`assert` failure** | **Terminal.** Never healed. |
-| Model returns **`give_up`** | **Terminal.** |
-| Budget or timeout abort | **Terminal.** |
-| Environment error (exit `3`) | **Aborts** — not recorded as a regression |
-
-`assert` **returns** exit `1` rather than throwing, and that is precisely the mechanism that
-makes it unhealable: the engine only heals on a *thrown* selector error. Healing an assertion
-would mask a real regression, which is the worst thing this tool could do.
+A thrown selector miss (exit `1`) or ambiguity (exit `2`) heals via the model; an `assert`
+failure, a model `give_up` and a budget or timeout abort are terminal; an environment error
+(exit `3`) aborts without being recorded as a regression. `assert` **returns** exit `1` rather
+than throwing, and that is the whole mechanism — the engine heals only on a *thrown* selector
+error, so never make `assert` throw. The full matrix and the reasons:
+[Heal vs terminal](/verikun/internals/contracts/#heal-vs-terminal).
 
 ## A repair is a decision, not a forced substitution
 
