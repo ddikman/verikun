@@ -36,26 +36,20 @@ listed there is invisible in every report.
 
 ## A failed run can never archive green
 
-Recording is a side effect of running a *command*. So a failure the **engine** produced — a
-control node giving up, a budget or timeout abort — has no command to attach itself to. Such
-a run used to reach the archive with nothing red in it, and the report, which tallied step
-statuses, declared a failed test `failures="0"`.
+Recording is a side effect of running a *command*, so a failure the **engine** produced — a
+control node giving up, a budget or timeout abort — has no command to attach itself to, and
+such a run used to archive with nothing red in it. Three layers close that:
 
-Three layers close it:
-
-1. `Recorder.recordTerminalFailure(failure, evidence?)` sets `RunState.failure` (the run-level
-   `where` plus reason) and appends **one** synthetic failed step — but **only when no step is
-   already red**, since a leaf failure already has its own testcase and must not be counted
-   twice.
-2. `cli.ts`'s `terminalFailure()` builds that record from the `runPlan` result, composes the
-   reason for budget and timeout aborts (which the engine returns as a bare flag), and is
-   **also** what prints the `[ai] …` verdict — so the archive and the console cannot disagree.
-3. `report.ts`'s `runFailure()` is belt and braces: it trusts `failure` (falling back to
-   `ai.ok`) over the tally, and emits a synthetic failing testcase if a failed run somehow
-   still has no red step.
+1. `Recorder.recordTerminalFailure(failure, evidence?)` sets `RunState.failure` and appends
+   **one** synthetic failed step — only when no step is already red, so a leaf failure is
+   never counted twice.
+2. `cli.ts`'s `terminalFailure()` builds that record from the `runPlan` result **and** prints
+   the `[ai] …` verdict, so the archive and the console cannot disagree.
+3. `report.ts`'s `runFailure()` trusts `failure` (falling back to `ai.ok`) over the tally and
+   emits a synthetic failing testcase if a failed run somehow still has no red step.
 
 Evidence comes from `ExecBackend.captureFailure()` — screenshot plus hierarchy locally,
-hierarchy only over `--server`, which has no screenshot route.
+hierarchy only over `--server`.
 
 ## Run rollover
 
@@ -76,34 +70,25 @@ rollover and `vk run archive`.
 ### One active run per lane
 
 The active run directory is `./.verikun/run/`, or `./.verikun/run-<lane>/` when `VERIKUN_LANE`
-is set. Every test starts its run with `force`, which removes that directory — so two
-concurrent tests sharing one path means the loser's in-flight state and artifacts are deleted
-under it, and the winner's `archive` either ENOENTs or archives the wrong steps. A
-[parallel suite](/verikun/guides/suites/#running-across-several-devices) sets the lane on each
-child process; artifacts are keyed on step index alone, which is safe precisely because they
-live *inside* that directory.
+is set — a [parallel suite](/verikun/guides/suites/#running-across-several-devices) sets the
+lane on each child. Every test starts its run with `force`, which removes that directory, so
+two concurrent tests sharing one path would delete each other's in-flight state; artifacts are
+keyed on step index alone, which is safe only because they live *inside* that directory.
 
-Archives still land in the shared `./.verikun/runs/<id>/`, so every lane's evidence ends up in
-one place and the suite index's links do not change. Two things keep those ids from colliding:
-`runId()` appends the lane (a one-second timestamp alone is not unique across devices), and
-`uniqueDir()` claims its directory with an exclusive `mkdir` rather than an `existsSync` check —
-check-then-act was sound only while one run could be active per working directory.
+Archives still land in the shared `./.verikun/runs/<id>/`, so the suite index's links do not
+change. `runId()` appends the lane (a one-second timestamp is not unique across devices) and
+`uniqueDir()` claims its directory with an exclusive `mkdir`, never an `existsSync` check.
 
 ### Rollover must not strand a device snapshot
 
-Because `deviceOverrides` lives in the run and `rolloverReason` *seals* runs, a rollover used
-to carry the snapshot into the archive while `vk device reset` — which reads the **active**
-run — reported "nothing to restore".
+`deviceOverrides` lives in the run and `rolloverReason` *seals* runs, so a rollover used to
+carry the snapshot into the archive while `vk device reset` — which reads the **active** run —
+reported "nothing to restore", leaving a phone dark and rotated with nothing tracking it.
 
-Measured, not theoretical: two workspaces driving different devices from one working
-directory ping-pong the active run via device-change rollover, and a phone was left dark and
-rotated with nothing tracking it.
-
-So `beginStep` now carries unrestored overrides **forward** on a same-device rollover, and on
-a device-change rollover warns loudly with the exact `vk device set … --device <serial>`
-needed to undo it. It cannot drive the old device from a process pointed at the new one, and
+So `beginStep` carries unrestored overrides **forward** on a same-device rollover, and on a
+device-change rollover warns loudly with the exact `vk device set … --device <serial>` needed
+to undo it — it cannot drive the old device from a process pointed at the new one, and
 restoring one device's values onto another would be worse than leaving them.
-
 `tests/run-device-overrides.test.ts` pins both paths.
 
 ## Device overrides: earliest wins
@@ -127,45 +112,30 @@ already driving". Four properties are load-bearing; user-facing behaviour is
 [Device claims](/verikun/reference/device-claims/).
 
 **Host-global, one file per device.** `~/.verikun/devices/<serial>.json`, not `./.verikun/`:
-run state describes a working directory, but a device is a fact about the machine, and the
-jobs that collide are in different directories by definition. One file *per device* rather
-than one index, because the premise is concurrent writers — separate files make every write
-atomic with no read-modify-write race.
+a device is a fact about the machine, and the jobs that collide are in different directories
+by definition. One file per device, because the premise is concurrent writers — separate
+files make every write atomic with no read-modify-write race.
 
-**Acquisition is an exclusive create, and `ok` means a create actually succeeded.** Publish
-first, judge second: write-then-`link()` (not `writeFileSync(…, {flag:'wx'})`, which creates
-the file empty and fills it a moment later, so a racer reading the gap sees a corrupt claim
-and takes the device too). Success is never returned on the strength of a decision that
-could have gone stale before the write — that is exactly how two jobs end up on one device.
-
-**Replacing a *dead* claim is serialized by a token**, because POSIX has no "remove this file
-only if it is still the one I read". Unlink-then-create is unsound: between reading "dead"
-and unlinking, another taker can publish, and the unlink then deletes a *live* claim.
-Measured — 16 racers over one dead claim produced two winners. So a taker first wins
-`<claim>.takeover` by exclusive create; only the holder writes the claim path, and it
-re-reads *inside* the token before replacing. The token is held across three syscalls and no
-I/O, so its liveness is the owning PID alone — a dead claim is the routine steady state,
-whereas a stranded token needs a crash inside a microsecond window.
+**Acquisition publishes first and judges second; `ok` means a create actually succeeded.**
+Write-then-`link()`, not `writeFileSync(…, {flag:'wx'})`: `wx` creates the file empty and
+fills it a moment later, so a racer reading the gap sees a corrupt claim and takes the device
+too. **Replacing a *dead* claim is serialized by a `<claim>.takeover` token**, because POSIX
+has no "remove this file only if it is still the one I read" — unlink-then-create let 16
+racers over one dead claim produce two winners. Only the token holder writes the claim path,
+and it re-reads *inside* the token; token liveness is the owning PID alone.
 
 **Liveness combines a live pid with an idle TTL**, because a heartbeat can only fire
-*between* commands. A live pid always means live — a ten-minute `install` or a `wait
---timeout 600000` has no chance to report that it is working, so the pid **extends**
-liveness and never shortens it. The one exception is `processScoped` owners
-(`ai`/`suite`/`batch`/`server`), which are a single process for the entire job: there a dead
-pid also means *done*, which is what returns a device the instant a `kill -9` lands instead
-of parking it until a timer expires. A one-off `vk tap` exits after every command while the
-job carries on, so it can only fall back to the TTL. `setProcessScoped()` is the latch that
-distinguishes them, shaped like `setOutputQuiet()` and for the same reason — the claim is
-acquired lazily inside `Driver.resolvedSerial()`, long after dispatch.
+*between* commands. A live pid always means live (a ten-minute `install` cannot report that
+it is working); a dead pid additionally means *done* only for `processScoped` owners
+(`ai`/`suite`/`batch`/`server`), which are one process for the whole job — a one-off
+`vk tap` falls back to the TTL. `setProcessScoped()` is the latch, because the claim is
+acquired lazily inside `Driver.resolvedSerial()`.
 
 **Reads are tolerant; the store may never be a new way to fail.** A corrupt claim reads as
-unclaimed, an unwritable store logs and continues unclaimed. Ownership matches on session
-**or** cwd — forgiving in the only safe direction, since the one unsafe error is falsely
-accusing your own job.
-
-`VERIKUN_NO_CLAIM=1` disables reads and writes and restores the pre-claims behaviour exactly,
-including the old exit-2-on-multiple-devices. Preserve that equivalence: it is what makes the
-mechanism debuggable by bisection.
+unclaimed, an unwritable store logs and continues. Ownership matches on session **or** cwd —
+the one unsafe error is accusing your own job. `VERIKUN_NO_CLAIM=1` disables reads and writes
+and restores the pre-claims behaviour exactly, including exit 2 on multiple devices; preserve
+that equivalence, it is what makes the mechanism debuggable by bisection.
 
 ## Three scopes, one grant
 
@@ -178,113 +148,66 @@ of thing:
 | **Leases** | `server.ts` (`leaseFor`, `/v1/lease`) | the run token every remote backend mints | Which serial does this **server's** run hold? |
 | **Lanes** | `suite.ts` | lane id | Which worker pulls the next test? |
 
-**Claims and leases stay separate implementations.** They are different trust domains: a host
-claim outlives the process that took it and is judged by a pid on that host, while a lease is
-in-memory and judged by a token on the wire. Collapsing one into the other would mean either
-putting host-global files behind an HTTP endpoint, or trusting a client-supplied token to fence
-a machine.
+**Claims and leases stay separate implementations** — different trust domains (a pid on the
+host versus a token on the wire); collapsing them would mean putting host-global files behind
+an HTTP endpoint or trusting a client-supplied token to fence a machine. **What they share is
+a lifecycle, and that is `DeviceGrant`** (`device/grant.ts`): take a device, keep it warm,
+hand it back — `claimGrant` / `requireClaimGrant` over the claim store, `leaseGrant` over a
+server lease, `releaseGrants` as the teardown.
 
-**What they share is a lifecycle, and that is `DeviceGrant`** (`device/grant.ts`): take a
-device, keep it warm, hand it back. `claimGrant` / `requireClaimGrant` wrap the claim store,
-`leaseGrant` wraps a server lease, and `releaseGrants` is the teardown. A caller that needs a
-device gets one contract and never re-derives which mechanism it is on — which is why the
-parallel suite parent no longer keeps a heartbeat timer of its own beside a list of serials.
+**The two acquisition polarities are the whole API.** `claimGrant` returns `null` for a device
+somebody else holds (`--devices all` asked for a *set*); `requireClaimGrant` throws exit `2`
+(a named serial must not be dropped silently). `poolSerials` applies the same polarity to a
+serial that is not attached.
 
-**The two acquisition polarities are the whole API surface.** `claimGrant` returns `null` for a
-device somebody else holds; `requireClaimGrant` throws exit `2`. The difference is whose idea the
-serial was: `--devices all` asked for a *set*, so a busy phone is simply not in it, while a named
-serial was asked for by name and quietly dropping it would hand back less capacity than was
-requested with nothing saying so. `poolSerials` applies the same polarity to a serial that is not
-attached.
-
-**Idle takeover, eviction and affinity are deliberately NOT in the shared contract.** They are
-*pool* policy — "somebody else needs a device, whose may I break?" — and only the server has a
-pool to arbitrate: a local pool is dealt once, up front, and held for the run, so there is no
-second claimant. A shared policy module would be an empty shell with one implementor.
-
-**A lane is not a grant.** It is a scheduler slot. A lane pinned to a local serial runs against
-a grant the suite *parent* holds; a lane pointed at a pooled server holds nothing, because the
-lane's own child leases the device under its own run token.
+**Idle takeover, eviction and affinity are pool policy** and live only in the server, the one
+place with a pool to arbitrate. **A lane is not a grant**: it is a scheduler slot — a lane
+pinned to a local serial runs on a grant the suite *parent* holds, and a lane pointed at a
+pooled server holds nothing, because its child leases under its own run token.
 
 ## Only the server may repoint the server
 
 `vk server` binds a device at startup, and no `/v1/exec` request can change it. Two things
-can, and they are different in kind:
+can: **a client, via `/v1/devices/*`** — gated on `--allow-device-control` and allowlisted by
+name, a privilege granted to a caller and therefore opt-in — and **the server itself, by
+failing over**: never at a client's request, never to a device outside the operator's set,
+never to one that is not already running, and never when `--device` pinned the binding. A
+server started without `--device` already auto-selected a free device, so moving to another
+free, healthy, unclaimed one is that same decision made again — which is why it is on by
+default.
 
-**A client, via `/v1/devices/*`** — gated on `--allow-device-control`, allowlisted by name,
-and able to `--wipe`. That is a *privilege granted to a caller*, so it is opt-in.
+| Invariant | Why |
+|---|---|
+| **A step is never replayed on the new device.** Only `install` retries (it is idempotent and carries no app session); everything else rebinds and returns the **original** device's error, and `/v1/elements` never answers with the new device's hierarchy. | Replaying step 12 on a device that never ran 1–11 is either a false green or a repair against the wrong screen. |
+| **The install classifier enumerates the FILE, not the device.** The file-attributable set is small and closed; everything else moves. The named device-state strings are a fast path, never the gate. | The device side is open-ended and OEM-specific — the failure that prompted this carried no `INSTALL_FAILED_*` code at all. `tests/failover.test.ts` feeds the classifier gibberish that must still move. |
+| **On exhaustion the client gets the FIRST device's error.** A step keeps the opposite default — stay unless a two-probe re-check confirms the device dead — and the re-probe's **own** error is classified too. | A wrong move costs time, never the diagnosis. Exit 3 on a step is dominated by transient noise, and an adb restart fails every probe on the host. |
+| **An install that fails on EVERY device condemns the build, not the pool**: the per-device quarantines are rolled back. | The fan-out has just proved the artifact is the common factor. |
 
-**The server itself, by failing over** — never at a client's request, never to a device
-outside the operator's set, never to one that is not already running, and never when
-`--device` pinned the binding. That is not a privilege granted to anyone, which is why it is
-on by default: a server started *without* `--device` already auto-selected a free device via
-`selectAndClaim`, so moving to another free, healthy, unclaimed one is that same decision made
-again. A server started *with* `--device` had its binding chosen by a human.
-
-Three invariants hold the safety:
-
-**A step is never replayed on the new device.** Only `install` is retried, because it is
-idempotent and carries no app session. Everything else rebinds and returns the **original**
-device's error, so the failing run fails honestly and the *next* one lands healthy. Replaying
-step 12 of a flow on a device that never ran steps 1–11 would either find something matching
-and go green — a false green, the failure mode `REPAIR_DECISION_JSON_SCHEMA`'s `give_up`
-branch also exists to prevent — or wake the repair model against the wrong screen. For the
-same reason `/v1/elements` never answers with the new device's hierarchy: it is the engine's
-guard input and repair context, and a screen from somewhere else is worse than an error.
-
-**The install classifier enumerates the FILE, not the device.** `install X onto Y` has two
-operands, so a failure is about one or the other. The file-attributable set
-(`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`, `_TEST_ONLY`, an unreadable upload) is
-small, closed and decade-stable; the device-attributable set is open-ended and OEM-specific —
-the failure that prompted this carried no `INSTALL_FAILED_*` code at all, just a raw
-`java.io.IOException: Requested internal only, but not enough space`. So the enumerable side is
-the one enumerated and everything else moves, including wordings nobody has seen. The named
-device-state strings are a fast path and documentation, never the gate: deleting one changes
-the reason text, never the decision. `tests/failover.test.ts` pins that by feeding the
-classifier gibberish and asserting it still moves.
-
-**On exhaustion the client gets the FIRST device's error, not the last.** That inversion is
-what makes move-by-default safe — a wrong move costs time, never the diagnosis. A step keeps
-the opposite default (stay unless a re-probe confirms the device is dead), because there exit
-3 is dominated by transient device noise and moving on it would rotate the pool on ordinary
-flake. **The re-probe's own error is classified too**: `preflight()` checks the toolchain
-before the phone, so an adb restart fails every probe on the host, and convicting a device for
-that is the upgrade `FailoverVerdict.probe` exists to prevent.
-
-**An install that fails on EVERY device condemns the build, not the pool.** Each per-device
-failover quarantines its own device on the way out, which is right for one device and wrong for
-all of them at once — the fan-out has just proved the artifact is the common factor. Those
-quarantines are rolled back.
+The failure strings, the two-move cap and the operator's view of a quarantine:
+[When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
 
 ## A pool degrades, it does not shrink
 
-A pool's own members are excluded from its failover candidate list, so on `--devices all` —
-where every attached device is already a member — "nothing healthier to move to" is the
-**normal** case, not the exceptional one. Shedding there took a three-device pool to one in two
-failures, and nothing ever called `adopt` again, so it could not grow back.
+A pool's own members are excluded from its failover candidates, so on `--devices all` "nothing
+healthier to move to" is the **normal** case. Shedding there took a three-device pool to one in
+two failures, with nothing to grow it back.
 
-- **Demote, never shed.** A failing member keeps its worker, its claim and its slot, and is
-  reported as `degraded` rather than `quarantined` — the two are disjoint, because a device the
-  server still serves is not one it has ruled out. Only a device whose worker actually **died**
-  leaves the pool.
-- **Ordering is what makes that safe.** Leases are dealt healthy-first, then
-  least-recently-used. First-fit gave a *broken* device more traffic than a healthy one: it
-  fails fast, so it returns to the free set fastest and is handed straight back out.
-- **Recovery is proven by traffic, not a clock.** Any exec that is not an environment failure
-  (exit 1 is the app's verdict, exit 2 the caller's) or any successful hierarchy read restores
-  the device. That answers the no-TTL objection without a timer: the evidence is work that was
-  going to happen anyway.
-- **A device that left is swept for.** Once a minute a pooled server compares what `--devices`
-  asked for against what is serving and re-adopts the difference — which is why worker death
-  needs no bespoke retry path, and why an unplugged phone, an out-of-band emulator restart and
-  a device attached after startup are all the same case. Starting the worker **is** the probe,
-  each failure doubles the wait to a 30-minute ceiling, and a rejoining device is brought up to
-  the session's last install before it is dealt any work. Single-device servers do not sweep:
-  their binding belongs to `/v1/devices/*` and to failover's rebind.
-- **A worker call is bounded.** With no timeout a wedged thread left its lease permanently
-  in-flight — never idle, never reaped, never taken over — while health kept advertising the
-  device. It is terminated instead, which turns a wedged device into a departed one the sweep
-  can replace.
+- **Demote, never shed.** A failing member keeps its worker, claim and slot and is reported as
+  `degraded` (disjoint from `quarantined`). Only a device whose worker actually **died** leaves.
+- **Ordering makes that safe.** Leases are dealt healthy-first, then least-recently-used —
+  first-fit handed a *broken* device out most often, because it fails fastest.
+- **Recovery is proven by traffic, not a clock.** Any exec that is not an environment failure,
+  or any successful hierarchy read, restores the device.
+- **A device that left is swept for.** Once a minute a pooled server re-adopts whatever
+  `--devices` asked for that is not serving; starting the worker **is** the probe, each failure
+  doubles the wait to a 30-minute ceiling, and a rejoining device gets the session's last
+  install before any work. Single-device servers do not sweep.
+- **A worker call is bounded.** A wedged thread used to leave its lease in-flight forever; it is
+  terminated instead, which turns a wedged device into a departed one the sweep can replace.
+
+How it looks from the client:
+[Failover on a pool](/verikun/guides/remote-devices-and-ci/#failover-on-a-pool) and
+[A device that comes back rejoins by itself](/verikun/guides/remote-devices-and-ci/#a-device-that-comes-back-rejoins-by-itself).
 
 ## The plan cache fingerprint
 
@@ -337,41 +260,28 @@ fingerprint automatically.
 ## Selector matching stays time-free
 
 Matching is a pure function of one snapshot (`ui/selector.ts`). **Waiting is layered on top in
-`commands/auto-wait.ts`, never in `selector.ts`.**
-
-Rules that mirror auto-healing:
-
-- **Only an empty match set is retried.** A present-but-plural match is surfaced immediately
-  via `resolveOne()` (exit `2`) — waiting cannot disambiguate, and the elements are already
-  there.
-- **Bare-index `tap N` and `tap --at x,y` never wait.** An index refers to a specific prior
-  `ui` dump, so polling — which re-captures and shifts indices — would be wrong.
-- **`assert` polls the whole predicate**, so `--gone` waits for disappearance.
-
-When you add a selector-resolving command, route it through `resolveOneWaiting()` /
-`matchWaiting()` rather than a raw `resolveOne` / `matchElements`, so it inherits auto-wait.
+`commands/auto-wait.ts`, never in `selector.ts`.** Only an empty match set is retried — a
+present-but-plural match exits `2` at once, because waiting cannot disambiguate elements that
+are already there; bare-index `tap N` and `tap --at x,y` never wait, because an index names a
+specific prior `ui` dump and a re-capture shifts indices; `assert` polls the whole predicate,
+so `--gone` waits for disappearance. Route a new selector-resolving command through
+`resolveOneWaiting()` / `matchWaiting()`, never a raw `resolveOne` / `matchElements`.
 
 ## State modifiers are exactly one attribute
 
-Each state predicate tests exactly one attribute and nothing else. **Do not strengthen one
-with a conjunct the platform reports unreliably** — that mistake once turned `--enabled` into
-phantom "not found" misses.
-
-`stateFromFlags()` must leave an absent flag `undefined` rather than passing a `false`
-through, or every selector on every command silently gains "must be disabled, unselected,
-unchecked and unfocused".
+Each state predicate tests one attribute and nothing else — strengthening one with a conjunct
+the platform reports unreliably once turned `--enabled` into phantom misses. `stateFromFlags()`
+must leave an absent flag `undefined`, or every selector silently gains "must be disabled,
+unselected, unchecked and unfocused".
 
 ## Auto-scroll: measured constants
 
 - **Pace the swipe by distance** (~0.75 px/ms). The same 1118px swipe over 400ms took the app
-  off the screen entirely on emulator API 34; over 1500ms it scrolled cleanly. A fast swipe
-  also flings past the target.
-- **The platform is the first filter.** Android's dumper drops nodes it considers invisible
-  and clips the rest, so `Element.offscreen` is mostly an iOS signal. Do not assume it fires
-  on Android.
-- **Refusing to act** is reserved for an element with **no** on-screen pixel (exit `1`).
-  Occlusion only ever produces a stderr warning — it is an ordering heuristic, and a wrong
-  refusal would be worse than the tap it prevents.
+  off the screen entirely on emulator API 34; over 1500ms it scrolled cleanly.
+- **The platform is the first filter.** Android's dumper drops invisible nodes and clips the
+  rest, so `Element.offscreen` is mostly an iOS signal.
+- **Refusing to act** is reserved for an element with **no** on-screen pixel (exit `1`);
+  occlusion only ever warns, because a wrong refusal is worse than the tap it prevents.
 
 ## Secrets
 

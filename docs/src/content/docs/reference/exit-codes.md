@@ -12,7 +12,7 @@ parsing prose, so they are stable and deliberate.
 |---|---|
 | `0` | success / found / assertion passed |
 | `1` | not found / assertion failed / wait timeout |
-| `2` | usage error, or **ambiguous selector** (the caller must refine) |
+| `2` | usage error, **ambiguous selector** (the caller must refine), or a device another job is driving |
 | `3` | environment error — `adb`/`idb`/`simctl` missing, no usable device, dump failed |
 
 Over [`--server`](/verikun/guides/remote-devices-and-ci/), a server that failed over does not

@@ -10,66 +10,39 @@ kind of bug that ships.
 
 ## Exit codes are an API
 
-`0` ok · `1` not found / assertion failed / wait timeout · `2` usage error or ambiguous
-selector · `3` environment error.
-
-They are carried by `CliError(message, exitCode)` in `src/errors.ts` and thrown from
-anywhere. The single `try`/`catch` in `run()` is the **only** place that maps an error to a
-process exit code. A non-`CliError` throw becomes exit `3`.
-
-**When you add logic, throw `CliError` with the right code** rather than printing and
-returning.
-
-Full contract: [Exit codes](/verikun/reference/exit-codes/).
+`0` ok · `1` not found / assertion failed / wait timeout · `2` usage error, ambiguous
+selector, or a device another job holds · `3` environment error. They are carried by
+`CliError(message, exitCode)` (`src/errors.ts`) and mapped to a process exit in exactly one
+place, the `try`/`catch` in `run()`; a non-`CliError` throw becomes `3`. **Throw `CliError`
+with the right code rather than printing and returning.** Full contract:
+[Exit codes](/verikun/reference/exit-codes/).
 
 ## stdout is data; stderr is diagnostics
 
-`out()` → stdout, `err()` → stderr, both in `src/output.ts`.
-
-Healed-match notes, "tapped …" confirmations, and warnings all go to **stderr**, so stdout
-stays parseable. An agent piping stdout into a parser must never have to strip a
-confirmation line out of it.
+`out()` → stdout, `err()` → stderr (`src/output.ts`). Confirmations, healed-match notes and
+warnings all go to **stderr**, so a caller parsing stdout never has to strip one out.
 
 ## `--json` everywhere, including errors
 
-When `--json` is set, the catch in `run()` emits `{error, exitCode, errorKind}` as JSON.
-New commands should honour `--json` for their success output too.
-
-The point is that a caller sets `--json` once and parses both outcomes the same way.
-`errorKind` carries the error's **class** — `SelectorNotFoundError`,
-`AmbiguousSelectorError`, `NoWindowError`, `CliError`, `Error` — so a caller can tell
-"the app has not drawn yet" from "the device is gone" without matching on message text,
-which is the same job `rpc.ts`'s codec does across the HTTP boundary.
+With `--json`, the catch in `run()` emits `{error, exitCode, errorKind}`. `errorKind` is the
+error's **class** — `SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`,
+`CliError`, `Error` — so a caller can tell "the app has not drawn yet" from "the device is
+gone" without matching on message text. New commands honour `--json` for success output too.
 
 ## No host shell, ever
 
-`exec.ts` runs everything with an **args array** — no `shell: true` — so host-side
-injection is impossible. Almost all of it is `spawnSync`; the two exceptions are
-`spawnDetached` (the emulator must outlive the CLI) and `spawnCollect` (a parallel suite
-must not block on its lane children), and both take the same args array.
-
-*Device-side* shell escaping (for `adb shell input text …`) is the driver's job: see
-`escapeText()` in `drivers/adb.ts`. The allowlist is: backslash-escape **all** ASCII
-punctuation, leave alphanumerics and non-ASCII alone, then convert space to `%s`.
-
-**Add new device-shell arguments through that**, not by string-concatenating into a command.
+`exec.ts` runs everything with an **args array** — no `shell: true`. `spawnDetached` (the
+emulator must outlive the CLI) and `spawnCollect` (a parallel suite must not block on its
+children) are the only non-`spawnSync` paths, and take the same args array. *Device-side*
+escaping is the driver's job: add device-shell arguments through `escapeText()` in
+`drivers/adb.ts`, never by string-concatenating into a command.
 
 ## Zero runtime dependencies is a design constraint
 
-The XML parser (`ui/android-parse.ts`), the argument parser (`args.ts`) and the PNG
-downscaler (`image.ts` — decode, box-resample, encode over `node:zlib` only) are hand-rolled
-on purpose.
-
-Do not add an npm runtime dependency without a deliberate decision. **Reach for a Node
-builtin first.**
-
-The only dev dependencies are `typescript` and `@types/node`. Even the test runner is Node's
-built-in `node:test`.
-
-:::note
-This constraint governs the **published CLI package**. This documentation site has its own
-`docs/package.json` and its own dependency tree, which never enters the npm tarball.
-:::
+The XML parser, the argument parser and the PNG downscaler are hand-rolled on purpose; the
+only dev dependencies are `typescript` and `@types/node`, and the test runner is `node:test`.
+**Reach for a Node builtin first.** This governs the published CLI package — the docs site has
+its own dependency tree, which never enters the tarball.
 
 ## Pure layers stay pure
 
@@ -87,22 +60,14 @@ caused a real bug:
 
 ## Inspection has no side effects
 
-`ui`, `find` and `assert` never scroll, never tap, and never hide an element. Only *actions*
-move the screen.
-
-An element that is off-screen still matches, is still listed, and is simply marked
-`offscreen`. This is what lets an agent inspect freely without changing what it is
-inspecting.
+`ui`, `find` and `assert` never scroll, never tap, and never hide an element; an off-screen
+element still matches and is simply marked `offscreen`. Only *actions* move the screen.
 
 ## Every unknown degrades to the permissive answer
 
-If `driver.viewport()` returns null, there is no scrolling and no `offscreen` marking — which
-is exactly the behaviour before that feature existed. `Element.offscreen` is optional and
-negative for the same reason: an element from an older `vk server` must not read as
-unreachable.
-
-Refusing to act is reserved for cases where acting would be **wrong**, not merely
-unverifiable.
+No screen size means no scrolling and no `offscreen` marking; `Element.offscreen` is optional
+and negative so an element from an older `vk server` never reads as unreachable. Refusing to
+act is reserved for cases where acting would be **wrong**, not merely unverifiable.
 
 ## Refuse rather than report a false positive
 
@@ -121,19 +86,14 @@ A false green is worse than a failure, because nobody investigates a green run.
 
 ## Documentation is part of the change
 
-`SKILL.md` is the agent-facing contract and `src/agent/grammar.ts` is its compact runtime
-copy — **keep them in sync**.
-
-If you change CLI behaviour (commands, selectors, exit codes, flags), update `SKILL.md`,
-`README.md` **and this documentation site** in the same change. They are documentation an
-agent relies on, not just prose.
+`SKILL.md` is the agent-facing contract and `src/agent/grammar.ts` its compact runtime copy —
+keep them in sync — and every behaviour change updates `SKILL.md`, `README.md` and this site
+in the same commit: [Contributing](/verikun/internals/contributing/#the-documentation-site).
 
 ## Versioning
 
-The version is declared once, in `package.json`. `src/version.ts` is **generated from it at
-build** — never hand-edit it.
-
-Any change that affects behaviour bumps the version and adds a `CHANGELOG.md` entry under
-`## [Unreleased]`. A rebuild rotates `COMPILER_FINGERPRINT`, so every cached `vk ai` plan
-recompiles against the new build. That is intended: never replay a plan an older verikun
-produced.
+The version is declared once, in `package.json`; `src/version.ts` is generated from it (never
+hand-edit it). Any
+behaviour change bumps it and adds a `CHANGELOG.md` line, and the rebuild rotates
+`COMPILER_FINGERPRINT` so a plan an older compiler produced is never replayed:
+[Contributing](/verikun/internals/contributing/#versioning-and-changelog).
