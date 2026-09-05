@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { formatDeviceTable } from '../src/cli';
+import { formatDeviceTable } from '../src/commands/devices';
 import type { DeviceInfo } from '../src/types';
 
 // --- formatDeviceTable (vk devices aligned/headed output) ------------------
