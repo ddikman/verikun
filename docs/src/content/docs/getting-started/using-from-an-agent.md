@@ -53,17 +53,12 @@ longest edge so the read stays cheap while text stays legible.
 
 ### Two uses of a screenshot — keep them apart
 
-The cost above is about *reading a screenshot back into context* to decide the next move.
-That is what to avoid.
-
-A screenshot taken purely as **report evidence and never read back** costs nothing at
-runtime. So when driving a flow to produce a report, **do** capture around each significant
-transition and before any risky or verification step — then leave the PNG in the report
-without reading it. A visual trail makes post-run review far easier, and a failing step
-already auto-captures its own screen.
-
-[`vk ai`](/verikun/guides/natural-language-tests/) inserts these review screenshots
-automatically.
+The cost above is about *reading a screenshot back* to decide the next move. One taken purely
+as **report evidence and never read back** costs nothing at runtime — so when driving a flow
+to produce a report, capture around each significant transition and before any risky or
+verification step,
+and leave the PNG in the report; a failing step already auto-captures its own screen, and
+[`vk ai`](/verikun/guides/natural-language-tests/) inserts these review screenshots itself.
 
 ## Remember identifiers across runs
 

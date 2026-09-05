@@ -81,22 +81,15 @@ cache_read       0 tok
 = $0.0570
 ```
 
-Four things about that formula are worth knowing, and none of them are visible from the outside:
+Four things about that formula are not visible from the outside:
 
-- **Cache write is `1.25 ×` the input rate, and is *added to* normal input — not substituted for
-  it.** The large, stable part of the prompt (the grammar) is cached so that repeat calls read it
-  cheaply, but the call that *writes* the cache pays a surcharge. Caching only pays off from the
-  second call onward, and compile and repair use **different** prefixes, so a compile's cache write
-  does not serve a later repair.
-- **Cache read is `0.1 ×` the input rate** for every model except `gpt-4.1`, which bills it at
-  `0.25 ×`.
-- **`--effort` raises cost through the *output* rate.** Reasoning models bill their reasoning
-  tokens as completion tokens, so a higher effort is a bigger output bill, not a bigger input one.
-  It has no effect on `gpt-4.1` (non-reasoning) or on the CLI backends.
-- **It is an estimate, and it under-counts.** Usage is only recorded from a *successful* response,
-  so an attempt that was rate-limited and retried contributes nothing to the number, and a response
-  that arrives without a usage block is counted as zero. The repair cap and `--timeout` are what
-  keep that bounded.
+- **Cache write is `1.25 ×` the input rate and is *added to* normal input**, so caching pays off
+  only from the second call — and compile and repair use **different** prefixes.
+- **Cache read is `0.1 ×` the input rate**, except `gpt-4.1` at `0.25 ×`.
+- **`--effort` raises cost through the *output* rate** (reasoning tokens bill as completion
+  tokens); it has no effect on `gpt-4.1` or the CLI backends.
+- **It is an estimate, and it under-counts**: a retried attempt and a response without a usage
+  block both count as zero. The repair cap and `--timeout` keep that bounded.
 
 ## Where the rates come from
 
@@ -145,21 +138,17 @@ test's ceiling, because the check happens after a test finishes rather than mid-
 
 The budget is a **pre-spend** gate, tested at four points:
 
-1. **Before each further compile of a multi-chunk test** — fatal. A test built from
-   [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests) fragments
-   compiles a chunk at a time, and falls back to compiling the whole file if the assembled plan
-   fails the lint. Every one of those after the first asks, so a compile cannot quietly cost
-   several times the ceiling. Crossing it on the *last* chunk is not a breach — nothing further
-   is being asked for, so the plan is finished and point 3 declines to run it. A chunk another
-   run compiled while this one waited costs nothing, so it is handed over *before* this check:
-   a ceiling refuses spending, not a free result.
-2. **Before the lint retry** — non-fatal. It keeps the first plan and carries on rather than paying
-   for a better one.
+1. **Before each further compile of a multi-chunk test** — fatal, so a test built from
+   [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
+   fragments cannot quietly cost several times the ceiling. Crossing it on the *last* chunk is
+   not a breach (nothing further is asked for; point 3 then declines to run), and a chunk
+   another run compiled while this one waited costs nothing.
+2. **Before the lint retry** — non-fatal: it keeps the first plan rather than paying for a better one.
 3. **After compile, before the device run** — fatal. The run never starts.
 4. **Before each repair attempt** — fatal.
 
-Because the check happens *before* a call rather than during it, the actual spend can overshoot the
-ceiling by up to one call. It is never checked during replay, because replay never spends.
+The check happens *before* a call, so the actual spend can overshoot the ceiling by up to one
+call. It is never checked during replay, because replay never spends.
 
 ### What a breach looks like
 
