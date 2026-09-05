@@ -34,12 +34,23 @@ function seg(text: string, source = 'a.md', startLine = 1, compilable = true): S
 
 const leaf = (command: string): LeafStep => ({ type: 'command', command, positionals: ['@x'], flags: [] });
 
-/** A provider that answers from a scripted table keyed by the prose it is handed. */
+/** A provider that answers from a scripted table keyed by the prose it is handed.
+ *  `retryAnswers` lets a GUIDED recompile of the same prose answer differently, which is the
+ *  only way to exercise "the second attempt fixed it" — the whole point of retryFeedback. */
 class FakeProvider implements AgentProvider {
   readonly seen: string[] = [];
-  constructor(private readonly answers: Record<string, Plan | 'no-steps'>) {}
+  readonly feedback: (string | undefined)[] = [];
+  readonly seeds: (Plan | undefined)[] = [];
+  constructor(
+    private readonly answers: Record<string, Plan | 'no-steps'>,
+    private readonly retryAnswers: Record<string, Plan> = {},
+  ) {}
   async compile(input: CompileInput): Promise<CompileResult> {
     this.seen.push(input.nl);
+    this.feedback.push(input.retryFeedback);
+    this.seeds.push(input.seed);
+    const retry = input.retryFeedback ? this.retryAnswers[input.nl] : undefined;
+    if (retry) return { plan: retry, usage: ONE_DOLLAR };
     const answer = this.answers[input.nl];
     if (answer === undefined) throw new Error(`fake provider has no answer for ${JSON.stringify(input.nl)}`);
     if (answer === 'no-steps') throw new InvalidPlanError('plan: has no steps', 'no-steps');
@@ -299,4 +310,113 @@ test('obtainPlan: with budget left, a dropped split DOES fall back to compiling 
   // lint-guided retry included, not a stripped-down one.
   assert.deepEqual(provider.seen, ['a', 'b', key.nl, key.nl]);
   assert.equal(plan.steps.length, 2);
+});
+
+// --- coverage: a compile that does not cover its test (issue #127) ----------
+//
+// The failure mode these pin is a compile that produces a PLAUSIBLE PREFIX. It runs, passes
+// (having asserted nothing), and is cached green — so the cache write is as important to
+// test as the rejection.
+
+/** Prose in the shape a real test is written in. Zero-padded ids so `row_01` is not a
+ *  substring of `row_19`; coverage matching is deliberately forgiving. */
+const rowId = (i: number): string => `row_${String(i).padStart(2, '0')}`;
+const LONG = Array.from({ length: 20 }, (_, i) => `${i + 1}. Tap the row (\`${rowId(i + 1)}\`).`).join('\n');
+const fullPlan = (): Plan => ({
+  version: 1,
+  steps: Array.from({ length: 20 }, (_, i) => ({ type: 'command', command: 'tap', positionals: [`@${rowId(i + 1)}`], flags: [] })),
+});
+const cached = (key: CacheKeyInput): boolean => existsSync(join('.verikun', 'plans', `${planKey(key)}.json`));
+
+test('obtainPlan: a plan that does not cover the test is rejected, and never cached', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: LONG };
+  const provider = new FakeProvider({ [LONG]: planOf('tap') }); // truncated, both times
+  await assert.rejects(
+    () => obtainPlan(key, 't.md', opts(100), new CostTracker(PRICE, 100), provider, []),
+    (e: unknown) => e instanceof CliError && e.exitCode === 1 && /does not cover 't\.md'/.test(e.message),
+  );
+  // Exactly one guided recompile: the model gets the finding handed back once, and a plan
+  // that is still short after that is the model failing twice, not one unlucky draw.
+  assert.deepEqual(provider.seen, [LONG, LONG]);
+  assert.match(provider.feedback[1] ?? '', /only the beginning of it was compiled/);
+  assert.equal(cached(key), false, 'a rejected plan must not be replayable');
+});
+
+test('obtainPlan: a guided recompile that DOES cover the test is accepted and cached', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: LONG };
+  const provider = new FakeProvider({ [LONG]: planOf('tap') }, { [LONG]: fullPlan() });
+  const { plan } = await obtainPlan(key, 't.md', opts(100), new CostTracker(PRICE, 100), provider, []);
+  assert.equal(plan.steps.length, 20);
+  assert.equal(cached(key), true);
+});
+
+test('obtainPlan: a prior plan that does not cover the test is not used as a seed', async () => {
+  // findSeed ignores the compiler fingerprint, so one truncated compile on disk keeps being
+  // handed to the model as "adapt this" — which is how a single bad draw outlives the version
+  // bump that invalidated its own entry.
+  writePlan({ ...KEY, nl: LONG, build: 'old' }, planOf('tap'));
+  const key: CacheKeyInput = { ...KEY, nl: LONG, build: 'new' };
+  const provider = new FakeProvider({ [LONG]: fullPlan() });
+  await obtainPlan(key, 't.md', opts(100), new CostTracker(PRICE, 100), provider, []);
+  assert.equal(provider.seeds[0], undefined);
+});
+
+test('obtainPlan: a prior plan that DOES cover the test still seeds', async () => {
+  writePlan({ ...KEY, nl: LONG, build: 'old' }, fullPlan());
+  const key: CacheKeyInput = { ...KEY, nl: LONG, build: 'new' };
+  const provider = new FakeProvider({ [LONG]: fullPlan() });
+  await obtainPlan(key, 't.md', opts(100), new CostTracker(PRICE, 100), provider, []);
+  assert.equal(provider.seeds[0]?.steps.length, 20);
+});
+
+test('compileFromSegments: a section that states instructions and compiles to NOTHING drops the split', async () => {
+  // The reported shape: the shared preamble compiles fine, the BODY of the test is dropped,
+  // and the assembled plan passes having exercised nothing.
+  const body = '1. Tap the Load button (`vk_load`).\n2. Confirm the spinner (`vk_spinner`) is gone.\n';
+  const provider = new FakeProvider({ 'launch it': planOf('launch'), [body]: 'no-steps' });
+  assert.equal(await compileFromSegments([seg('launch it'), seg(body)], KEY, opts(), new CostTracker(PRICE), provider), null);
+});
+
+test('compileFromSegments: a section compiled far short of its own prose is not cached', async () => {
+  // The worst version of the bug: a truncated FRAGMENT is keyed on its own text, so every
+  // test that includes it replays the short plan. Caching it is what makes one bad draw a
+  // suite-wide problem, so the check has to come before the write.
+  const segKey: CacheKeyInput = { ...KEY, nl: LONG };
+  const provider = new FakeProvider({ [LONG]: planOf('tap'), 'tap it': planOf('tap') });
+  assert.equal(await compileFromSegments([seg(LONG), seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider), null);
+  assert.equal(cached(segKey), false);
+});
+
+test('compileFromSegments: a section that DOES cover its prose is cached as before', async () => {
+  const segKey: CacheKeyInput = { ...KEY, nl: LONG };
+  const provider = new FakeProvider({ [LONG]: fullPlan(), 'tap it': planOf('tap') });
+  const plan = await compileFromSegments([seg(LONG), seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
+  assert.equal(plan?.steps.length, 21);
+  assert.equal(cached(segKey), true);
+});
+
+test('compileFromSegments: one rationale line that happens to open with a verb is still swallowed', async () => {
+  // The boundary. Rationale prose legitimately compiles to nothing, and treating it as a
+  // dropped section would buy a full whole-file compile every time — the exact cost @include
+  // exists to avoid.
+  const note = 'Wait times on this screen vary by device and build.';
+  const provider = new FakeProvider({ [note]: 'no-steps', 'tap it': planOf('tap') });
+  const plan = await compileFromSegments([seg(note), seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
+  assert.equal(plan?.steps.length, 1);
+});
+
+test('obtainPlan: VERIKUN_NO_COMPILE_CHECK=1 accepts and caches the short plan, as before', async () => {
+  const prev = process.env.VERIKUN_NO_COMPILE_CHECK;
+  process.env.VERIKUN_NO_COMPILE_CHECK = '1';
+  try {
+    const key: CacheKeyInput = { ...KEY, nl: LONG };
+    const provider = new FakeProvider({ [LONG]: planOf('tap') });
+    const { plan } = await obtainPlan(key, 't.md', opts(100), new CostTracker(PRICE, 100), provider, []);
+    assert.equal(plan.steps.length, 1);
+    assert.deepEqual(provider.seen, [LONG], 'no recompile either — the rule is off, not lenient');
+    assert.equal(cached(key), true);
+  } finally {
+    if (prev === undefined) delete process.env.VERIKUN_NO_COMPILE_CHECK;
+    else process.env.VERIKUN_NO_COMPILE_CHECK = prev;
+  }
 });

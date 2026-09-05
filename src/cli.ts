@@ -80,7 +80,7 @@ import { Recorder, isRecordable, loadRunState, RunStep, archiveLogWindow, wantsA
 import { capturePng } from './capture';
 import { Companion, companionEnabled } from './companion/manager';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
-import { lintPlan } from './agent/lint';
+import { LintFinding, coverageChecksEnabled, instructionUnits, lintPlan, looksTruncated } from './agent/lint';
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
 import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-provider';
@@ -1842,6 +1842,49 @@ function cachePlan(key: CacheKeyInput, plan: Plan): void {
 }
 
 /**
+ * Refuse a plan that does not COVER the test it was compiled from (issue #127).
+ *
+ * A truncated compile is the one compiler failure that presents as a green run: the short
+ * plan asserts nothing, so it fails nothing, and it is then cached as a pass and replayed
+ * against every later build. Both compile attempts have already been made by the time this
+ * is asked — the second with the finding handed back as feedback — so a fatal finding here
+ * is the model failing twice at the same thing, not a single unlucky draw.
+ *
+ * Exit **1**: this is a test failure, which is what it is. Deliberately not `2` (which
+ * `laneResult` reads as a usage error and `vk suite` therefore never retries) and not `3`
+ * (which a lane reads as an environment failure, probes the device over, and may retire a
+ * perfectly healthy phone for a problem that was entirely model-side). Nothing is cached,
+ * so a retry recompiles rather than replaying the plan that was just rejected.
+ */
+function assertPlanCoversTest(findings: LintFinding[], file: string): void {
+  const fatal = findings.filter((f) => f.fatal);
+  if (fatal.length === 0) return;
+  throw new CliError(
+    `ai: the compiled plan does not cover '${file}' — refusing to run it, because it would report a pass ` +
+      `for work it never did.\n${fatal.map((f) => `  - ${f.message}`).join('\n')}\n` +
+      '  The plan was not cached; rerunning compiles it again. VERIKUN_NO_COMPILE_CHECK=1 runs it anyway.',
+    1,
+  );
+}
+
+/**
+ * `findSeed`, minus a prior plan that is itself truncated.
+ *
+ * `findSeed` deliberately ignores the compiler fingerprint, so a bad compile already on disk
+ * keeps being handed to the model as "adapt this" — which is how ONE truncation propagates
+ * across builds and long outlives the version bump that invalidated its exact-key entry.
+ * Cheap to check and self-healing: the poisoned entry simply stops seeding.
+ */
+function seedPlan(key: CacheKeyInput, where: string): CacheEntry | null {
+  const seed = findSeed(key);
+  if (seed && looksTruncated(key.nl, seed.plan)) {
+    err(`[ai] ${where}: ignoring a prior plan that does not cover the test (${seed.plan.steps.length} step(s)) — compiling fresh`);
+    return null;
+  }
+  return seed;
+}
+
+/**
  * When this process started. Derived from `process.uptime()`, which counts from process
  * start regardless of when this module was loaded or whether the system clock is stepped.
  */
@@ -1870,6 +1913,10 @@ export function cachedSegment(segKey: CacheKeyInput, opts: AiOptions): CacheEntr
   if (!hit || !opts.recompile) return hit;
   return Date.parse(hit.savedAt) >= PROCESS_STARTED_MS ? hit : null;
 }
+
+/** Instructions a section must state before compiling to ZERO steps reads as a dropped
+ *  section rather than as rationale prose. One would catch "Wait times vary by device." */
+const SEGMENT_MIN_UNITS = 2;
 
 /**
  * Compile a test SEGMENT AT A TIME and concatenate the results — the whole point of
@@ -1953,7 +2000,7 @@ export async function compileFromSegments(
       // FREE, and refusing it over a ceiling we were never about to spend against would fail
       // a test for somebody else's tokens.
       assertBudgetForCompile(cost, opts.maxCostUsd, `compiling ${where} — the test is only partly compiled`);
-      const seed = findSeed(segKey);
+      const seed = seedPlan(segKey, where);
       err(`[ai] ${where}: compiling with ${opts.model}…${lock.degraded ? ` (${lock.degraded})` : ''}`);
       let compiled;
       try {
@@ -1961,13 +2008,31 @@ export async function compileFromSegments(
       } catch (e) {
         // Prose with no instruction in it (a paragraph explaining WHY the next step exists)
         // is not an error at segment granularity — it just adds no steps.
+        //
+        // But a section that STATES instructions and compiles to none is issue #127 at its
+        // widest: the preamble compiles, the BODY of the test is dropped, and the assembled
+        // plan passes having exercised nothing. Two units, not one, so a lone verb-initial
+        // rationale line ("Wait times vary by device.") stays swallowed as it always was.
         if (e instanceof InvalidPlanError && e.code === 'no-steps') {
+          if (coverageChecksEnabled() && instructionUnits(seg.text) >= SEGMENT_MIN_UNITS) {
+            err(`[ai] ${where}: compiled to NO steps, but its prose states instructions — the section was dropped; compiling the test as one instead`);
+            return null; // `return` from inside a try runs the finally first — that releases the lock
+          }
           err(`[ai] ${where}: no steps`);
           continue;
         }
         throw e;
       }
       cost.add(compiled.usage, 'compile');
+      // A truncated FRAGMENT is the worst version of issue #127: cached under its own key, it
+      // is spliced into every test that includes it, so one bad draw of a shared preamble
+      // shortens a whole suite. Asked BEFORE the cache write, and answered the same way as a
+      // section that compiled to nothing — drop the split, compile the test whole. A false
+      // positive here costs one whole-file compile, never a rejected test.
+      if (looksTruncated(seg.text, compiled.plan)) {
+        err(`[ai] ${where}: the compiled section does not cover its prose (${compiled.plan.steps.length} step(s)) — not caching it; compiling the test as one instead`);
+        return null; // the finally below releases the lock
+      }
       // INSIDE the lock and before the release: a waiter re-reads the cache the instant the
       // lock disappears, so releasing first would hand it a miss and buy the second compile
       // this whole mechanism exists to prevent.
@@ -2039,7 +2104,7 @@ export async function obtainPlan(
   // copies of a test, or two files each holding only `@include _preamble.md` — which yields
   // one segment, so the split path never runs). Out of scope on purpose: two identical tests
   // are already two identical rows in the report, and the cost is one duplicate compile.
-  const seed = findSeed(key);
+  const seed = seedPlan(key, `'${file}'`);
   if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
   err(`[ai] compiling '${file}' with ${opts.model} (effort ${opts.effort ?? 'default'})…`);
 
@@ -2047,12 +2112,13 @@ export async function obtainPlan(
   cost.add(compiled.usage, 'compile');
 
   // Compilation is nondeterministic: the same prose has produced `launch --clear` on one
-  // run and plain `launch` on the next, silently dropping something the test stated. One
-  // guided retry is much cheaper than discovering it as a device-run failure several steps
-  // later. Budget is re-checked HERE because the first attempt has already been billed.
-  const findings = lintPlan(key.nl, compiled.plan);
-  if (findings.length > 0) {
-    const feedback = findings.map((f) => `- ${f.message}`).join('\n');
+  // run and plain `launch` on the next, silently dropping something the test stated — and
+  // sometimes only the test's opening compiles at all. One guided retry is much cheaper
+  // than discovering it as a device-run failure several steps later, or (worse, for a
+  // truncation) as a pass. Budget is re-checked HERE: the first attempt is already billed.
+  let remaining = lintPlan(key.nl, compiled.plan);
+  if (remaining.length > 0) {
+    const feedback = remaining.map((f) => `- ${f.message}`).join('\n');
     err(`[ai] compiled plan does not match the test — recompiling once:\n${feedback}`);
     if (cost.exceeded()) {
       err('[ai] cost ceiling reached — keeping the first plan rather than paying for a retry');
@@ -2067,12 +2133,21 @@ export async function obtainPlan(
       cost.add(retry.usage, 'compile');
       const still = lintPlan(key.nl, retry.plan);
       // Keep the retry either way: it was compiled with strictly more information. If it
-      // still trips the lint, say so rather than pretending the plan is clean.
-      if (still.length > 0) err(`[ai] the retry still does not match the test — running it anyway:\n${still.map((f) => `- ${f.message}`).join('\n')}`);
-      else err('[ai] recompile matches the test');
+      // still trips the lint, say so rather than pretending the plan is clean — and for a
+      // coverage finding, do not claim it will run, because the gate below rejects it.
+      if (still.length > 0) {
+        const anyway = still.some((f) => f.fatal) ? '' : ' — running it anyway';
+        err(`[ai] the retry still does not match the test${anyway}:\n${still.map((f) => `- ${f.message}`).join('\n')}`);
+      } else err('[ai] recompile matches the test');
       compiled = retry;
+      remaining = still;
     }
   }
+
+  // Asked AFTER the retry (so the model has had the finding handed back to it once) but
+  // BEFORE the cache write, because a truncated plan that reaches the cache is replayed
+  // as a pass against every later build.
+  assertPlanCoversTest(remaining, file);
 
   err(`[ai] compiled ${compiled.plan.steps.length} top-level step(s) · ${cost.summaryLine()}`);
   cachePlan(key, compiled.plan);
@@ -2545,6 +2620,7 @@ async function runAiTest(
       costLine: cost.summaryLine(),
       modelRepairs: 0,
       improvements: [],
+      planSteps: plan.steps.length,
       runDir: '',
       reportHtml: '',
       junitXml: '',
@@ -2659,6 +2735,7 @@ async function runAiTest(
     costLine,
     modelRepairs: result.modelRepairs,
     improvements: result.improvements,
+    planSteps: plan.steps.length,
     runDir: dir,
     reportHtml: htmlPath,
     junitXml: xmlPath,
@@ -2719,6 +2796,7 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
       costUsd: result.costUsd,
       modelRepairs: result.modelRepairs,
       improvements: result.improvements,
+      planSteps: result.planSteps,
       report: result.reportHtml,
       junit: result.junitXml,
       runDir: result.runDir,
@@ -3062,6 +3140,9 @@ export function laneResult(
     improvements: Array.isArray(parsed?.improvements)
       ? (parsed.improvements as unknown[]).filter((s): s is string => typeof s === 'string')
       : [],
+    // Unlike the step tally (read back off the archived run), the plan's SIZE is nowhere
+    // on disk — the run file records what executed. So this one has to travel on the wire.
+    ...(num('planSteps') === undefined ? {} : { planSteps: num('planSteps') }),
     runDir: str('runDir') ?? '',
     reportHtml: str('report') ?? '',
     junitXml: str('junit') ?? '',

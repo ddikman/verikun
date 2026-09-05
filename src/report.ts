@@ -295,6 +295,16 @@ export interface SuiteTestResult {
   steps: number;
   passedSteps: number;
   failedSteps: number;
+  /**
+   * Top-level steps in the plan that ran — what `[ai] compiled N top-level step(s)` reports.
+   *
+   * Distinct from `steps`, which counts steps EXECUTED, and that distinction is the point:
+   * a failed test stops early, so `steps` reads short for every failure and a genuinely
+   * truncated compile drowns among them. Comparing THIS across runs of the same unchanged
+   * test is how a truncation is spotted by eye (issue #127). Absent when the run never
+   * reached a plan (an errored row), and on rows produced by a pre-0.26.0-rc.6 lane.
+   */
+  planSteps?: number;
   modelRepairs: number;
   /** Terminal failure summary when not ok (assert failure, drift, budget/timeout abort). */
   failure?: string;

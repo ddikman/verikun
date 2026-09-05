@@ -638,6 +638,14 @@ test('laneResult: the EXIT CODE is the verdict, the JSON only adds detail', () =
   assert.equal(laneResult(1, { ok: true }, 'assert failed', { id: 'd1' }).ok, false);
 });
 
+test('laneResult: the plan SIZE travels on the wire, unlike the step tally', () => {
+  // steps/passedSteps are read back off the archived run; the plan's size is nowhere on disk
+  // (the run file records what EXECUTED), so it has to come across in the child's JSON.
+  assert.equal(laneResult(0, { ok: true, planSteps: 37 }, '', { id: 'd1' }).planSteps, 37);
+  // Absent from a pre-0.26.0-rc.6 child, and absent is not zero: the row must simply omit it.
+  assert.equal(laneResult(0, { ok: true }, '', { id: 'd1' }).planSteps, undefined);
+});
+
 test('laneResult: exit 3 and a failed spawn both read as an environment problem', () => {
   assert.equal(laneResult(3, { ok: false, abortedForEnv: true }, '', { id: 'd1' }).abortedForEnv, true);
   // 127: the child never started. Same class of problem — the suite should probe the

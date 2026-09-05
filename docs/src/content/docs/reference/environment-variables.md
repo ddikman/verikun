@@ -76,6 +76,7 @@ needs step detail to return to the client, which splices it into the client's ru
 | `VERIKUN_SHOT_MAX_EDGE` | `700` | Default screenshot longest-edge cap in pixels. Ignored unless finite and ≥ 1. |
 | `VERIKUN_COMPANION` | on | The [Android companion](/verikun/guides/companion/) is used by default; `0` (or `false`/`off`/`no`) turns it off. It makes hierarchy reads ~0.2s instead of ~2.4s, at the cost of holding the device's single `UiAutomation` connection while it runs. Under `--server` it is read in the **server's** environment, since that is where reads execute — a client cannot set it across the wire. |
 | `VERIKUN_GUARD_SETTLE_MS` | — | `vk ai` `if-present` guard settle window. `0` restores the old single-shot probe. |
+| `VERIKUN_NO_COMPILE_CHECK` | unset | Set to `1` to stop `vk ai` checking that a fresh compile [covers its test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test). Restores the older behaviour: a plan that covers only the start of the test is run and cached like any other. |
 
 Screenshot precedence is `--full` > `--max <px>` > `--more` > `VERIKUN_SHOT_MAX_EDGE` > the
 default. See [Screenshots](/verikun/reference/screenshots/).

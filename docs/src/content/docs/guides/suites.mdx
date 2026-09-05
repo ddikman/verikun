@@ -87,6 +87,11 @@ survives the health probe usually needs seconds, not milliseconds) and each one 
   spent twice
 - a **usage error** (exit `2`) — an unreadable test file, a payload the server refuses
 
+A retry cannot launder a bad **compile** into a pass. A plan that
+[does not cover its test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) is
+rejected before it runs and is never cached, so the retry compiles again — and only a plan
+that does cover the test can produce the green.
+
 ### When a broken environment does stop the suite
 
 If a test dies from an environment error (exit `3` — tool gone, device unplugged, server

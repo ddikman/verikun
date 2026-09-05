@@ -159,6 +159,36 @@ worse than a failure:
 - Translate literally and minimally. The one exception is `screenshot`, inserted liberally —
   free on replay, and it never affects the result.
 
+## The compile must cover the test
+
+Compilation is nondeterministic, and its worst outcome is not a bad plan — it is a **short**
+one. A plan that stops part-way through the test asserts nothing after that point, so it
+fails nothing: it runs green, is cached as a pass, and replays against every later build. A
+test exercising none of its subject then reports success.
+
+So a fresh compile is checked against the prose it came from, on two independent signals:
+
+- **size** — the plan has far fewer steps than the test states instructions
+- **the ending** — the plan never references what the test's closing instructions name
+
+Either one buys **one guided recompile**, with the specific finding handed back to the model.
+A plan that still trips a check after that is **rejected**: `vk ai` exits `1`, the plan is
+**not cached**, and rerunning compiles again rather than replaying it. Under `vk suite` the
+test goes red; `--retries` recompiles, so a retry can only pass by producing a plan that does
+cover the test.
+
+The same check disqualifies a **seed**: a cached plan that does not cover its own prose is
+not offered to the model as a starting point, so one bad compile cannot propagate.
+
+Both checks are deliberately generous — a wrongly rejected test is a worse defect than the
+truncation it guards against. Set `VERIKUN_NO_COMPILE_CHECK=1` to turn them off entirely and
+restore the previous behaviour.
+
+To see a compile's size directly, `vk ai` prints `compiled N top-level step(s)` on stderr,
+`vk ai --json` reports it as `planSteps`, and a suite manifest row carries the same number.
+Unlike `steps`, which counts what *executed*, it is comparable across a pass and a failure —
+which is what makes an outlier visible when comparing runs of the same unchanged test.
+
 ## Repair
 
 When a step's selector stops resolving, the model gets the live screen and a strict two-way
@@ -233,10 +263,12 @@ Keyed by the test prose + package + app build, gated by a **compiler fingerprint
 
 - A fingerprint mismatch is treated as a **miss**, so updating verikun recompiles rather than
   replaying a plan an older compiler produced.
-- The compile is cached immediately, so an unchanged test never recompiles.
+- The compile is cached immediately, so an unchanged test never recompiles — unless it was
+  [rejected for not covering the test](#the-compile-must-cover-the-test), which is never
+  written.
 - A green run re-persists the healed plan, so the next run is free again.
 - Seeding from a prior build ignores the fingerprint — an older plan is still a fine
-  starting point.
+  starting point, provided it covers its own prose.
 - A test assembled from [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
   fragments is keyed on the **resolved** text, and each chunk is additionally cached under
   its own text — so shared prose is compiled once across a suite.

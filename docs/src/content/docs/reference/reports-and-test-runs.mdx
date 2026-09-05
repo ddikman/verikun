@@ -178,6 +178,7 @@ upload plugins.
 | `server` | `--server` runs only: `{url, verikun, reads}` — which server drove the device, on which version, and whether it read the hierarchy via the [companion](/verikun/guides/companion/) or the stock dump |
 | `tests[]` | Per-test: pass/fail, step count, cost, duration, run id |
 | `tests[].modelRepairs` | How many steps the model repaired. `0` on a clean replay — gate on it to [fail a build that needed healing](/verikun/guides/self-healing-in-ci/#if-you-want-the-strict-gate-anyway) |
+| `tests[].planSteps` | Top-level steps in the plan that ran — the **compile's** size, unlike `steps`, which counts what executed. Comparable across a pass and a failure, so a compile that came out unusually short is visible when diffing runs of the same unchanged test |
 | `tests[].flaky` / `.attempts` | Present when `--retries` recovered the test |
 | `tests[].device` | Which device ran this test. Set on a [parallel suite](/verikun/guides/suites/), where the assignment is dynamic — and where, against a pooled server, only the lease ever knew the answer |
 | `concurrency` | How many devices ran the suite at once. Absent (or `1`) for a serial suite |
@@ -191,8 +192,8 @@ On an abort, the not-run tests get **no rows and no place in `totals`**, so
 `passed + failed === tests` still holds and nothing downstream mistakes a skipped test for a
 regression.
 
-`concurrency`, `wallClockMs`, `tests[].device` and `aborted.kind` are all additive, so
-`schemaVersion` stays `1`. A manifest written before they existed simply omits them — treat a
+`concurrency`, `wallClockMs`, `tests[].device`, `tests[].planSteps` and `aborted.kind` are all
+additive, so `schemaVersion` stays `1`. A manifest written before they existed simply omits them — treat a
 missing `concurrency` as `1`, where `durationMs` and elapsed time were the same number.
 
 ## Disabling recording
