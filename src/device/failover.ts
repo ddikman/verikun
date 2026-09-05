@@ -1,32 +1,8 @@
 // Should `vk server` move off the device it is bound to, and which device next?
-//
-// PURE — no fs, no spawn, no timers, no Driver. It classifies strings some driver has
-// already produced and filters a list somebody else enumerated, so the whole matrix is
-// unit-testable with no device. Platform-agnostic by design, like `device/settings.ts`
-// and `device/claims.ts`; the probing and the rebinding live in `server.ts`.
-//
-// THE POLARITY IS THE DESIGN, so read this before touching the tables.
-//
-// `install X onto Y` has exactly two operands, so a failure is about the FILE or about
-// the DEVICE — there is no third thing. The file-attributable set is small, closed and
-// decade-stable (a parser's verdict on a byte sequence is identical on every device).
-// The device-attributable set is open-ended, OEM-specific and unknowable in advance —
-// the failure that prompted this (issue #99) carried no `INSTALL_FAILED_*` code at all,
-// just a raw `java.io.IOException: Requested internal only, but not enough space`.
-//
-// So the ENUMERABLE side is the one we enumerate, and the default falls the other way:
-// an install failure moves unless it matches the artifact denylist. The named
-// device-state strings below are a FAST PATH and documentation, never the gate —
-// deleting one changes the reason text, never the decision. That is what makes this
-// survive phrasings nobody has met yet, and it is the property `tests/failover.test.ts`
-// pins by feeding the classifier pure gibberish and asserting it still moves.
-//
-// `exec`/`elements` keep the OPPOSITE default, and that asymmetry is deliberate rather
-// than sloppy: it is the same "which operand is at fault?" question with a different
-// answer. There the operand is the app under test, and the exit-3 population is
-// dominated by transient device noise (a flaky uiautomator dump, NoWindowError, a
-// keyguard read). Moving on those would rotate the pool on ordinary flake, so that arm
-// moves only on an unreachable device or one a probe confirms is dead.
+// PURE — no fs, no spawn, no timers, no Driver — so the whole matrix is unit-testable
+// with no device; the probing and the rebinding live in `server.ts`. THE POLARITY IS THE
+// DESIGN: an install failure moves unless it names the FILE (the enumerable side), while
+// `exec`/`elements` keep the opposite default. Why: CLAUDE.md, "Server device failover".
 
 import { CliError, NoWindowError } from '../errors';
 import type { DeviceInfo } from '../types';

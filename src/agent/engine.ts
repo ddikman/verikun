@@ -3,6 +3,7 @@ import { Element, Platform } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
 import { assertStateSupported } from '../ui/state-support';
 import { SelectorNotFoundError, AmbiguousSelectorError, isEnvError } from '../errors';
+import { sleep } from '../wait';
 import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
 import { AgentProvider } from './provider';
@@ -165,8 +166,6 @@ function isHealable(outcome: ExecOutcome): boolean {
 
 /** Default wall-clock ceiling for a whole `vk ai` run (overridable via --timeout). */
 export const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000;
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** How long a CONDITIONAL guard (`if-present`) waits for its selector to show up
  *  before concluding "absent". Interstitials animate in: a permission dialog or promo

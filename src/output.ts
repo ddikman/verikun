@@ -82,6 +82,16 @@ export function laneId(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * A stable-per-session id, if the environment provides one — the identity run rollover
+ * and device claims share. Opt-in by design: in an agent harness each command may be a
+ * fresh shell, so it is never derived from the process tree (that would roll over on
+ * every action).
+ */
+export function currentSession(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.VERIKUN_SESSION || env.TERM_SESSION_ID || undefined;
+}
+
+/**
  * The default `vk screenshot` destination, per lane.
  *
  * Lane-scoped for the same reason the active run directory is: `vk ai`'s grammar tells

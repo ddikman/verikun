@@ -1,37 +1,8 @@
 // A run-scoped hold on ONE device: which serial am I on, who keeps it warm, and who
-// hands it back.
-//
-// verikun coordinates devices at three scopes, and only two of them are the same KIND of
-// thing:
-//
-//   * CLAIMS (device/claims.ts) fence one HOST's jobs off from each other. Host-global
-//     JSON files under `~/.verikun/devices/`; identity is cwd / session / pid.
-//   * LEASES (server.ts) fence one SERVER's runs off from each other. In-memory, keyed on
-//     the run token every remote backend already mints.
-//   * LANES (suite.ts) are a scheduler slot — which worker pulls the next test — and are
-//     deliberately NOT a hold on anything. A lane may run against a pinned local serial
-//     (whose grant the suite parent holds) or against a pooled server URL (whose grant the
-//     lane's own child takes when it leases). Conflating the two is what made the parallel
-//     suite need a device story of its own.
-//
-// Claims and leases are different TRUST DOMAINS and must stay separate implementations: a
-// host claim outlives the process that took it and is judged by a pid on that host, while
-// a lease is in-memory and judged by a token on the wire. Collapsing one into the other
-// would mean either putting host-global files behind an HTTP endpoint or trusting a
-// client-supplied token to fence a machine. What they DO share is a lifecycle — take a
-// device, keep it warm while the work runs, hand it back when it stops — and every caller
-// used to spell it out for itself: `resolveBackend` took the lease while `close()` gave it
-// back three functions away, and the parallel suite ran a `setInterval` over a list of
-// serials with `releaseOwnClaims()` in a `finally`. `DeviceGrant` is that lifecycle, named
-// once, so a caller that needs a device never has to know which kind it got.
-//
-// What is deliberately NOT here: idle takeover, eviction and affinity. Those are a POOL
-// policy — "somebody else needs a device, whose may I break?" — and only the server has a
-// pool to arbitrate. A local pool is dealt once, up front, and held for the run; there is
-// no second claimant to arbitrate against. A shared policy module would therefore be an
-// empty shell with one implementor, which is a worse lie than two honest ones.
-//
-// Platform-agnostic, like claims.ts and settings.ts: it never touches adb/xcrun.
+// hands it back. Claims (host), leases (server) and lanes (suite) are three different
+// scopes; why claims and leases stay separate implementations, what a grant shares, and
+// what deliberately is NOT here (idle takeover, eviction, affinity) is in CLAUDE.md,
+// "Device grants". Platform-agnostic, like claims.ts and settings.ts: no adb/xcrun.
 
 import {
   ClaimOpts,

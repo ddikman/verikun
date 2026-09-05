@@ -1,5 +1,6 @@
-// Time helpers shared by the selector auto-wait (cli.ts) and device lifecycle
-// (drivers/lifecycle.ts). Pure, platform-agnostic, zero-dep.
+// Time helpers shared across the tree: the selector auto-wait (cli.ts), device lifecycle
+// (drivers/lifecycle.ts), the agent engine's settle waits and the HTTP providers' retry
+// backoff. Pure, platform-agnostic, zero-dep.
 
 /** Poll interval (ms) used by device lifecycle waits. */
 export const DEFAULT_DEVICE_POLL_MS = 1000;
@@ -8,6 +9,9 @@ export const DEFAULT_BOOT_TIMEOUT_MS = 180_000;
 export const DEFAULT_STOP_TIMEOUT_MS = 60_000;
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Exponential backoff for an HTTP retry: 1s, 2s, 4s … capped at 15s. */
+export const backoffMs = (attempt: number): number => Math.min(1000 * 2 ** (attempt - 1), 15000);
 
 /**
  * A progress callback that fires at most once per `everyMs`, timed from when it was

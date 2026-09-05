@@ -1,41 +1,16 @@
 // The device claim store — "which attached device is another job already driving?".
-//
-// Parallel agents (separate worktrees of one repo) share one pool of phones, emulators
-// and simulators. Nothing coordinated the assignment, so two jobs would land on the same
-// device and BOTH die: one `install` of the same package with a different build silently
-// replaces the app under the other's feet, and it presents as an ordinary assertion
-// failure, indistinguishable from a real regression until someone goes digging.
-//
-// A claim is a small JSON file per device under `~/.verikun/devices/`, saying who is
-// driving it and when they were last seen. HOST-global, not workspace-local: run state
-// lives in `./.verikun/` because it describes a working directory, but a device is a fact
-// about the machine, and the jobs that collide are in DIFFERENT directories by definition.
-//
-// Load-bearing properties, each of which has a failure mode behind it:
-//
-//   * ONE FILE PER SERIAL, never one shared map. The whole premise is concurrent writers;
-//     independent files make every write atomic with no read-modify-write race.
-//   * ACQUISITION IS `wx`. An exclusive create is the only way two agents starting at the
-//     same instant don't both pick the first free device. Losing that race is not an
-//     error — the caller just moves to the next candidate.
-//   * READS ARE TOLERANT. An unreadable or corrupt claim reads as UNCLAIMED (same posture
-//     as run.ts's loadState and the plan cache): a poisoned file must never be able to
-//     brick a device permanently.
-//   * LIVENESS IS PID-FIRST WHERE IT CAN BE. See `isLive` — a timeout alone is either too
-//     short (steals a device mid-run) or too long (parks a crashed job's phone).
-//   * `VERIKUN_NO_CLAIM=1` DISABLES READS AND WRITES, restoring the pre-claim behaviour
-//     exactly — including the old exit-2-on-multiple-devices — and making this job
-//     invisible to others. That equivalence is the thing to preserve when debugging.
-//
-// Platform-agnostic by design, like `device/settings.ts` and `ui/`: it never touches
-// adb/xcrun. The drivers know which devices exist; this knows which are taken.
+// One small JSON file per serial under `~/.verikun/devices/`, HOST-global because a device
+// is a fact about the machine, not about a working directory. The load-bearing properties
+// — one file per serial, write-then-link acquisition, tolerant reads, pid-first liveness
+// and the exact `VERIKUN_NO_CLAIM=1` equivalence — are in CLAUDE.md, "Device claims".
+// Platform-agnostic, like `device/settings.ts` and `ui/`: it never touches adb/xcrun.
 
 import { createHash } from 'node:crypto';
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname, homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { CliError } from '../errors';
-import { err } from '../output';
+import { currentSession, err } from '../output';
 import type { Platform } from '../types';
 import { VERSION } from '../version';
 
@@ -236,11 +211,6 @@ function pathFor(serial: string, o: ClaimOpts): string {
 }
 
 // --- identity ---------------------------------------------------------------
-
-/** Session identity, same source `run.ts` uses for rollover. Absent in a fresh shell. */
-function currentSession(env: NodeJS.ProcessEnv): string | undefined {
-  return env.VERIKUN_SESSION || env.TERM_SESSION_ID || undefined;
-}
 
 /**
  * Is this claim the current job's?

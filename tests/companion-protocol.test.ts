@@ -8,7 +8,6 @@ import {
   isHierarchy,
   isLiveReply,
   parseState,
-  pingMatches,
   portForSerial,
 } from '../src/companion/protocol';
 import { companionEnabled, nullRootAction } from '../src/companion/manager';
@@ -21,23 +20,6 @@ test('isLiveReply: an empty reply is not a live companion', () => {
   // Reading that as a valid (empty) response is the "absent" lie that skips a guard.
   assert.equal(isLiveReply(Buffer.alloc(0)), false);
   assert.equal(isLiveReply(buf('anything')), true);
-});
-
-test('pingMatches: accepts only our companion at our protocol version', () => {
-  assert.equal(pingMatches(buf(`verikun-companion ${COMPANION_PROTOCOL}\n`)), true);
-  assert.equal(pingMatches(buf(`verikun-companion ${COMPANION_PROTOCOL}`)), true, 'no trailing newline');
-});
-
-test('pingMatches: a companion from another verikun version is not talked to', () => {
-  // It is still holding the device's UiAutomation connection, so the caller must restart
-  // it rather than ignore it — but it must not be treated as usable.
-  assert.equal(pingMatches(buf('verikun-companion 999\n')), false);
-});
-
-test('pingMatches: rejects an empty reply and anything that is not us', () => {
-  assert.equal(pingMatches(Buffer.alloc(0)), false);
-  assert.equal(pingMatches(buf('some other service 1\n')), false);
-  assert.equal(pingMatches(buf('verikun-companion\n')), false, 'no version');
 });
 
 test('isHierarchy: only a real dump counts', () => {

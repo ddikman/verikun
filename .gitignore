@@ -32,3 +32,6 @@ npm-debug.log*
 .verikun/
 tmp/
 .gstack/
+
+# Written by .github/workflows/publish.yml at release time (the GitHub release body)
+release-notes.md

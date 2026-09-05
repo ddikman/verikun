@@ -221,10 +221,12 @@ function tiers(sel: Selector): Matcher[] {
   return sel.contains ? list.filter((t) => t.tier !== 'exact') : list;
 }
 
-export function matchElements(elements: Element[], sel: Selector): MatchResult {
-  // Applied BEFORE the tier ladder, not after: filtering the candidate pool keeps a
-  // disabled exact match from shadowing an enabled partial one.
-  elements = filterByState(elements, sel);
+/**
+ * Walk the tier ladder: the first tier with any hit wins. Null when no tier hit at all —
+ * distinct from an out-of-range `--index` on a tier that DID hit, which is a definite
+ * (empty) result and must not fall through to the next ladder.
+ */
+function matchLadder(elements: Element[], sel: Selector): MatchResult | null {
   for (const { tier, test } of tiers(sel)) {
     const found = elements.filter(test);
     if (found.length === 0) continue;
@@ -234,22 +236,21 @@ export function matchElements(elements: Element[], sel: Selector): MatchResult {
     }
     return { matches: found, tier };
   }
+  return null;
+}
 
-  // For text: selectors, if no text matches found, fall back to desc
-  if (sel.kind === 'text') {
-    const descSel = { ...sel, kind: 'desc' as const };
-    for (const { tier, test } of tiers(descSel)) {
-      const found = elements.filter(test);
-      if (found.length === 0) continue;
-      if (sel.index !== undefined) {
-        const picked = found[sel.index];
-        return picked ? { matches: [picked], tier } : { matches: [], tier: null };
-      }
-      return { matches: found, tier };
+export function matchElements(elements: Element[], sel: Selector): MatchResult {
+  // Applied BEFORE the tier ladder, not after: filtering the candidate pool keeps a
+  // disabled exact match from shadowing an enabled partial one.
+  elements = filterByState(elements, sel);
+  return (
+    matchLadder(elements, sel) ??
+    // For text: selectors, if no text matches found, fall back to desc
+    (sel.kind === 'text' ? matchLadder(elements, { ...sel, kind: 'desc' as const }) : null) ?? {
+      matches: [],
+      tier: null,
     }
-  }
-
-  return { matches: [], tier: null };
+  );
 }
 
 /** Resolve to exactly one element (with the tier it matched), or throw. */

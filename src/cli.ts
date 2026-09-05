@@ -313,7 +313,7 @@ const NO_PROGRESS_PX = 8;
 const NO_PROGRESS_STRIKES = 2;
 
 /** A short note appended to action output when the target had to be scrolled to. */
-export function scrollNote(swipes: number): string {
+function scrollNote(swipes: number): string {
   return swipes > 0 ? ` (scrolled into view: ${swipes} swipe${swipes === 1 ? '' : 's'})` : '';
 }
 
@@ -1060,8 +1060,8 @@ function shotMaxEdge(): number {
 /** How long a `vk ai` `if-present` guard waits for its selector before deciding the
  *  optional UI is absent. `VERIKUN_GUARD_SETTLE_MS` overrides the engine default so the
  *  window can be tuned against a real app without a rebuild (0 restores the old
- *  single-shot probe). Exported for unit tests. */
-export function guardSettleMs(): number {
+ *  single-shot probe). */
+function guardSettleMs(): number {
   const env = process.env.VERIKUN_GUARD_SETTLE_MS;
   if (env !== undefined && env !== '') {
     const n = Number(env);
@@ -2382,9 +2382,9 @@ interface ResolvedBackend {
   moves: DeviceChange[];
 }
 
-/** The `--server` URL, or VERIKUN_SERVER. Exported-shape helper so `resolveBackend`
- *  and `vk devices --server` can never disagree about what "remote" means. */
-export function serverFromFlags(flags: Flags): string | undefined {
+/** The `--server` URL, or VERIKUN_SERVER. One helper, so `resolveBackend` and
+ *  `vk devices --server` can never disagree about what "remote" means. */
+function serverFromFlags(flags: Flags): string | undefined {
   return flagStr(flags, 'server') || process.env.VERIKUN_SERVER || undefined;
 }
 
@@ -2394,9 +2394,9 @@ function remoteOptsFrom(url: string, flags: Flags): RemoteOpts {
 
 /**
  * `--ensure-device[=<target>]` — the requested target, or `undefined` for the bare
- * form, or `null` when the flag is absent. Exported for unit tests.
+ * form, or `null` when the flag is absent.
  */
-export function ensureDeviceTarget(flags: Flags): string | undefined | null {
+function ensureDeviceTarget(flags: Flags): string | undefined | null {
   const raw = flags['ensure-device'];
   if (raw === undefined || raw === false) return null;
   if (raw === true || raw === 'true') return undefined;
@@ -3112,7 +3112,6 @@ export function laneEnv(lane: LaneTarget, env: NodeJS.ProcessEnv = process.env):
   return child;
 }
 
-/** Comma-separated flag value → trimmed, de-duplicated entries. */
 /** A short, stable label for a server lane: the host:port, not the whole URL. */
 function serverLabel(url: string): string {
   try {
@@ -3756,6 +3755,17 @@ function mapError(e: unknown, flags: Flags): number {
   return 3;
 }
 
+/** The driver's serial, or undefined when it cannot be resolved — the command handler is
+ *  what surfaces that failure with the real message; callers here only need the serial
+ *  to stamp the device claim and the recorded step. */
+function tryResolvedSerial(driver: Driver): string | undefined {
+  try {
+    return driver.resolvedSerial();
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Execute one (non-meta) command and return its RAW outcome — the exit code, and
  * the thrown error if any, WITHOUT mapping it to a printed exit. The agent engine
@@ -3787,13 +3797,8 @@ async function executeOutcome(
     if (!driver) driver = getDriver(platform, device);
     if (recordable) {
       // Resolve the serial up front (cheap; the driver caches it) so the run can
-      // detect a device change. Tolerate failure — the handler raises the real error.
-      let serial: string | undefined;
-      try {
-        serial = driver.resolvedSerial();
-      } catch {
-        /* surfaced by the command handler below */
-      }
+      // detect a device change.
+      const serial = tryResolvedSerial(driver);
       // Keep this job's device claim alive. Deliberately NOT gated on the recorder:
       // `Recorder.beginStep` returns null under VERIKUN_NO_RUN=1 (which the e2e suite
       // sets), and hanging the heartbeat off it would silently stop claims from being
@@ -3843,12 +3848,7 @@ export async function executeForServer(
   driver: Driver,
   platform: Platform,
 ): Promise<{ code: number; error?: Error; step?: RunStep; artifacts?: Record<string, Buffer>; logStart?: string }> {
-  let serial: string | undefined;
-  try {
-    serial = driver.resolvedSerial();
-  } catch {
-    /* surfaced by the command handler below */
-  }
+  const serial = tryResolvedSerial(driver);
   // A server holds one device for its whole life, but its claim still has to look alive
   // to everyone else on the host — refresh it per request, the same as a local step.
   if (serial) touchClaim(serial, platform);

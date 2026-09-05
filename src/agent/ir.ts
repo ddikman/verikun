@@ -152,6 +152,31 @@ export const KNOWN_COMMANDS: ReadonlySet<string> = new Set([
 
 export const DEFAULT_LOOP_CAP = 25;
 
+// The two SIMPLE control nodes appear at every unrolled level (see innerControls), so
+// their shape is written once. Key order is the wire format — keep it.
+const ifPresentSchema = (body: object) => ({
+  type: 'object',
+  additionalProperties: false,
+  required: ['type', 'selector', 'body'],
+  properties: {
+    type: { type: 'string', enum: ['if-present'] },
+    selector: { type: 'string' },
+    body,
+  },
+});
+const whilePresentSchema = (body: object) => ({
+  type: 'object',
+  additionalProperties: false,
+  required: ['type', 'selector', 'cap', 'body'],
+  properties: {
+    type: { type: 'string', enum: ['while-present'] },
+    selector: { type: 'string' },
+    bind: { type: 'string' },
+    cap: { type: 'integer' },
+    body,
+  },
+});
+
 /**
  * JSON Schema for `output_config.format` so the model returns a guaranteed-valid
  * Plan. Deliberately NON-RECURSIVE: instead of a `Plan -> node -> Plan` cycle
@@ -162,16 +187,7 @@ const stepItems = (bodyItems: object) => ({
   anyOf: [
     leafSchema(),
     readSchema(),
-    {
-      type: 'object',
-      additionalProperties: false,
-      required: ['type', 'selector', 'body'],
-      properties: {
-        type: { type: 'string', enum: ['if-present'] },
-        selector: { type: 'string' },
-        body: { type: 'array', items: bodyItems },
-      },
-    },
+    ifPresentSchema({ type: 'array', items: bodyItems }),
     {
       type: 'object',
       additionalProperties: false,
@@ -201,18 +217,7 @@ const stepItems = (bodyItems: object) => ({
         body: { type: 'array', items: bodyItems },
       },
     },
-    {
-      type: 'object',
-      additionalProperties: false,
-      required: ['type', 'selector', 'cap', 'body'],
-      properties: {
-        type: { type: 'string', enum: ['while-present'] },
-        selector: { type: 'string' },
-        bind: { type: 'string' },
-        cap: { type: 'integer' },
-        body: { type: 'array', items: bodyItems },
-      },
-    },
+    whilePresentSchema({ type: 'array', items: bodyItems }),
   ],
 });
 
@@ -238,30 +243,7 @@ const stepItems = (bodyItems: object) => ({
  *  here is what would actually cost the schema. */
 const innerControls = () => {
   const leafBody = { type: 'array', items: { anyOf: [leafSchema(), readSchema()] } } as const;
-  return [
-    {
-      type: 'object',
-      additionalProperties: false,
-      required: ['type', 'selector', 'body'],
-      properties: {
-        type: { type: 'string', enum: ['if-present'] },
-        selector: { type: 'string' },
-        body: leafBody,
-      },
-    },
-    {
-      type: 'object',
-      additionalProperties: false,
-      required: ['type', 'selector', 'cap', 'body'],
-      properties: {
-        type: { type: 'string', enum: ['while-present'] },
-        selector: { type: 'string' },
-        bind: { type: 'string' },
-        cap: { type: 'integer' },
-        body: leafBody,
-      },
-    },
-  ];
+  return [ifPresentSchema(leafBody), whilePresentSchema(leafBody)];
 };
 
 const LEAF_ONLY_ITEMS = { anyOf: [leafSchema(), readSchema(), ...innerControls()] };

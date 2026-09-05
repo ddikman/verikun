@@ -18,7 +18,6 @@ export class CliError extends Error {
 }
 
 export const usageError = (m: string) => new CliError(m, 2);
-export const notFound = (m: string) => new CliError(m, 1);
 export const envError = (m: string) => new CliError(m, 3);
 
 /**

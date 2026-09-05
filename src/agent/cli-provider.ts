@@ -2,10 +2,18 @@ import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CliError } from '../errors';
-import { formatCompact } from '../ui/format';
 import { parsePlan, PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
 import { Usage, ProviderId } from './cost';
-import { AgentProvider, CompileInput, CompileResult, RepairContext, RepairResult, compileUserPrompt } from './provider';
+import {
+  AgentProvider,
+  CompileInput,
+  CompileResult,
+  RepairContext,
+  RepairResult,
+  compileUserPrompt,
+  repairDecision,
+  repairUserPrompt,
+} from './provider';
 import { GRAMMAR, REPAIR_GRAMMAR } from './grammar';
 import { toStrictSchema } from './openai';
 import { runText, TextResult } from '../exec';
@@ -197,25 +205,8 @@ export class CliProvider implements AgentProvider {
   }
 
   async repair(ctx: RepairContext): Promise<RepairResult> {
-    const parts: string[] = ['FAILED STEP: ' + JSON.stringify(ctx.failedStep), 'FAILURE: ' + ctx.reason];
-    if (ctx.candidates && ctx.candidates.length) {
-      parts.push(
-        `The selector matched ${ctx.candidates.length} elements (ambiguous) — pick a more specific selector for the SAME intended element, or give_up if none of them is it.`,
-      );
-    }
-    parts.push('CURRENT SCREEN:\n' + formatCompact(ctx.hierarchy));
-    const json = this.call(REPAIR_GRAMMAR, parts.join('\n\n'), REPAIR_DECISION_JSON_SCHEMA);
-    const decision = (json ?? {}) as { decision?: string; step?: unknown; reason?: string };
-    if (decision.decision === 'give_up') {
-      return {
-        replaceStep: null,
-        declineReason: decision.reason?.trim() || 'no element on the current screen matches the step intent',
-        usage: {},
-      };
-    }
-    // Hand the proposed leaf back UNVALIDATED — engine.ts validates every repair against the
-    // grammar before splicing (it is the execution trust boundary), exactly like the API providers.
-    return { replaceStep: (decision.step ?? null) as RepairResult['replaceStep'], usage: {} };
+    // usage:{} for the same reason as compile — billed to the subscription, not per token.
+    return repairDecision(this.call(REPAIR_GRAMMAR, repairUserPrompt(ctx), REPAIR_DECISION_JSON_SCHEMA), {});
   }
 
   /** Spawn the CLI once and return the parsed JSON object it produced. Synchronous (spawnSync);
