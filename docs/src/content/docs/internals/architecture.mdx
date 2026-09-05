@@ -57,11 +57,15 @@ list everything attached.
 
 `cli.ts` is the dispatcher:
 
-- `run(argv)` parses arguments and builds a `Ctx { driver, platform, device, positionals, flags, record? }`.
+- `run(argv)` parses arguments and builds a `Ctx { driver, platform, device, positionals, flags, record? }` (`commands/context.ts`).
 - `executeCommand(command, ctx)` is the `switch` to each `cmdX(ctx)` handler.
 
 Adding a command means adding a `case` (plus any aliases) **and** a line in `usageText()` —
 and, if it should appear in a test run, an entry in `RECORDABLE` in `run.ts`.
+
+Helpers that outgrow the dispatcher live under `commands/`: `context.ts` holds the `Ctx`
+every handler takes, and `auto-wait.ts` the selector auto-wait. A command module imports
+`Ctx` from there without importing `cli.ts`, which is what keeps further extraction cycle-free.
 
 `run.ts` and `report.ts` sit beside `cli.ts`. They may use the driver, like `cli.ts` does —
 they are not part of the platform-agnostic core. `report.ts` is pure: `RunState` → JUnit/HTML
@@ -129,7 +133,9 @@ so a platform gap can never be documented in one place and forgotten in another.
 | File | Purpose |
 |---|---|
 | `bin/verikun.ts` | The `#!/usr/bin/env node` shim. Calls `run()` and exits with its code, or prints `Fatal:` and exits `3`. |
-| `cli.ts` | Every command handler, `usageText()`, the dispatch switches, `executeOutcome` / `executeParsed` / `executeForServer`, `mapError`, provider selection, and the `ai` / `suite` / `install` orchestration. The one big file. |
+| `cli.ts` | Every command handler, `usageText()`, the dispatch switches, `executeOutcome` / `executeParsed` / `executeForServer`, `mapError`, provider selection, and the `ai` / `suite` / `install` orchestration. Still the big file; helpers it has shed live under `commands/`. |
+| `commands/context.ts` | The `Ctx` every command handler takes: driver, platform, device, positionals, flags, and the recorder when the command is part of a test run. |
+| `commands/auto-wait.ts` | Selector auto-wait: the wait window and poll interval, no-window tolerance while polling, and the waiting `resolveOneWaiting` / `matchWaiting` every selector-resolving handler goes through. |
 | `args.ts` | Minimal dependency-free argv parser |
 | `errors.ts` | `CliError` plus the exit-code contract, `isEnvError`, `probeFailure`, and the two heal-trigger selector subclasses |
 | `version.ts` | **Generated** from `package.json` by `scripts/gen-version.mjs`. Never hand-edit. |

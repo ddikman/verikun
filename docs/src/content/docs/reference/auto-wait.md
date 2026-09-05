@@ -110,7 +110,7 @@ scroll and does not mark anything.
 
 ## Where this is implemented
 
-Matching is a pure function of one snapshot (`src/ui/selector.ts`). Waiting and scrolling are
-layered on top in `src/cli.ts`, and the geometry is pure in `src/ui/viewport.ts` — no device,
-no time. Keeping the time out of the matcher is deliberate; see
+Matching is a pure function of one snapshot (`src/ui/selector.ts`). Waiting is layered on top
+in `src/commands/auto-wait.ts`, scrolling in `src/cli.ts`, and the geometry is pure in
+`src/ui/viewport.ts` — no device, no time. Keeping the time out of the matcher is deliberate; see
 [Core principles](/verikun/internals/core-principles/).

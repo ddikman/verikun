@@ -170,7 +170,7 @@ export const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000;
 /** How long a CONDITIONAL guard (`if-present`) waits for its selector to show up
  *  before concluding "absent". Interstitials animate in: a permission dialog or promo
  *  panel typically lands a few hundred ms after the transition that triggers it. Every
- *  selector-resolving leaf command already auto-waits ~5s (cli.ts resolveOneWaiting),
+ *  selector-resolving leaf command already auto-waits ~5s (commands/auto-wait.ts),
  *  so before this window existed a guard was strictly LESS patient than a bare `tap` —
  *  and an optional dialog could be missed by the very construct meant to catch it.
  *  Kept far below the leaf 5s because an ABSENT guard pays this window, every time, and

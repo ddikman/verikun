@@ -78,7 +78,7 @@ caused a real bug:
 
 | Layer | Must not know about |
 |---|---|
-| `ui/selector.ts` | **time** — matching is a pure function of one snapshot; waiting is layered on in `cli.ts` |
+| `ui/selector.ts` | **time** — matching is a pure function of one snapshot; waiting is layered on in `commands/auto-wait.ts` |
 | `ui/viewport.ts` | **the device** — it is geometry; the orchestration lives in `cli.ts` |
 | `image.ts` | **device I/O** — it is image maths |
 | `report.ts` | **the filesystem and the driver** — `RunState` in, strings out |

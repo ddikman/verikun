@@ -337,7 +337,7 @@ fingerprint automatically.
 ## Selector matching stays time-free
 
 Matching is a pure function of one snapshot (`ui/selector.ts`). **Waiting is layered on top in
-`cli.ts`, never in `selector.ts`.**
+`commands/auto-wait.ts`, never in `selector.ts`.**
 
 Rules that mirror auto-healing:
 

@@ -151,6 +151,6 @@ measured on real hardware, is in
 ## Where this is implemented
 
 `src/ui/selector.ts` is pure and **time-free** — matching is a function of one snapshot.
-Waiting is layered on top in `cli.ts`; see [Auto-wait](/verikun/reference/auto-wait/).
+Waiting is layered on top in `src/commands/auto-wait.ts`; see [Auto-wait](/verikun/reference/auto-wait/).
 `src/ui/state-support.ts` is the platform gate that refuses a modifier the backend cannot
 report.
