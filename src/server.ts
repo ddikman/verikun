@@ -45,13 +45,14 @@ import { releaseCompanionOn } from './companion/manager';
 import { ClaimOpts, claimDevice, claimsEnabled, releaseClaim, setProcessScoped, summarize } from './device/claims';
 import { classifyFailure, classifyInstallFailure, failoverCandidates, FailoverVerdict } from './device/failover';
 import { csvList, poolSerials, resolvePoolPlatform, type DevicePoolSpec } from './device/pool';
-import { assertActionable, chooseTarget, lifecycleFor, restartTarget } from './drivers/lifecycle';
 import { err, setErrSink, setOutputQuiet } from './output';
+import { HttpError, encodeArtifacts, firstLine, flagsToSpecs, readBody, sendJson } from './server-http';
+import { LifecycleOpts, ServerLifecycle, realLifecycle } from './server-lifecycle';
 import { LOG_OFF, openServerLog, resolveLogPath, type ServerLog } from './server-log';
 import { DeviceInfo, HierarchySource, Platform } from './types';
 import { DeviceHandle, DevicePool, WorkerDevicePool } from './server-pool';
 import type { WorkerExecResult } from './server-worker';
-import { FlagSpec, InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
+import { InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
 import {
   rebuildError, DeviceChange, DeviceListResponse, DeviceOpRequest, DeviceOpResponse,
   ExecRequest, ExecResponse, HealthResponse, InstallResponse, LeaseResponse, LogsRequest,
@@ -77,7 +78,6 @@ async function safeReads(handle: DeviceHandle | undefined, opts: { fresh?: boole
     return null;
   }
 }
-
 
 const DEFAULT_PORT = 8391;
 const EXEC_BODY_CAP = 1024 * 1024; // 1 MB of JSON is far beyond any leaf command
@@ -132,21 +132,6 @@ export interface FailoverPolicy {
   allowedTargets: string[];
 }
 
-/** The lifecycle operations the server needs, injected so buildServer is testable
- *  without a device (mirrors SuiteDeps / EngineDeps). */
-export interface ServerLifecycle {
-  start(platform: Platform, target: string, opts: LifecycleOpts): Promise<{ serial: string; started: boolean }>;
-  restart(platform: Platform, target: string, opts: LifecycleOpts): Promise<{ serial: string }>;
-  stop(platform: Platform, target: string, opts: LifecycleOpts): Promise<void>;
-  list(platform: Platform): DeviceInfo[];
-}
-
-export interface LifecycleOpts {
-  timeoutMs: number;
-  wipe?: boolean;
-  onProgress?: (message: string) => void;
-}
-
 export interface ServerConfig {
   // --- startup policy: never written after buildServer ---
   platform: Platform;
@@ -185,117 +170,6 @@ export interface ServerConfig {
    *  minutes away and would go unpinned. */
   idleMs?: number;
 }
-
-/** An error that already knows its HTTP status + the client-side exit code. */
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly exitCode: number = status === 400 || status === 404 || status === 413 ? 2 : 3,
-    /** Set when this request moved the server's device before failing — the client
-     *  needs to know the ground shifted even though the answer is an error. */
-    readonly deviceChanged?: DeviceChange,
-  ) {
-    super(message);
-    this.name = 'HttpError';
-  }
-}
-
-/** Errors here are multi-line (detail + hint); logs and reasons want the headline. */
-const firstLine = (m: string): string => m.split('\n')[0].trim();
-
-function sendJson(res: ServerResponse, status: number, payload: unknown): void {
-  const body = JSON.stringify(payload);
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
-  res.end(body);
-}
-
-function readBody(req: IncomingMessage, cap: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on('data', (c: Buffer) => {
-      size += c.length;
-      if (size > cap) {
-        reject(new HttpError(413, `request body exceeds ${cap} bytes`));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}
-
-/** Wire flags → FlagSpec[] for validateNode. Primitives are coerced to strings
- *  (a boolean flag travels as "true"); anything structured is rejected. */
-function flagsToSpecs(flags: unknown): FlagSpec[] {
-  if (flags === undefined || flags === null) return [];
-  if (typeof flags !== 'object' || Array.isArray(flags)) throw new HttpError(400, 'flags must be an object');
-  return Object.entries(flags as Record<string, unknown>).map(([name, value]) => {
-    if (typeof value === 'string') return { name, value };
-    if (typeof value === 'number' || typeof value === 'boolean') return { name, value: String(value) };
-    throw new HttpError(400, `flag '${name}' must be a string`);
-  });
-}
-
-function encodeArtifacts(artifacts: Record<string, Buffer>): Record<string, string> {
-  const out: Record<string, string> = {};
-  // `Buffer.from` before `toString`, ALWAYS. These bytes crossed a worker boundary, and
-  // structured clone downgrades a Buffer to a plain Uint8Array whose `toString` ignores
-  // its encoding argument — so a direct `.toString('base64')` yields "137,80,78,71,…",
-  // ships with a 200, and archives an unopenable screenshot. TypeScript cannot catch it:
-  // the declared type is still Buffer.
-  for (const [rel, buf] of Object.entries(artifacts)) {
-    // `isBuffer` rather than an unconditional `Buffer.from`: these are megabyte-scale
-    // full-resolution failure screenshots and the pool has already normalised them.
-    out[rel] = (Buffer.isBuffer(buf) ? buf : Buffer.from(buf as Uint8Array)).toString('base64');
-  }
-  return out;
-}
-
-/** The production lifecycle, over drivers/lifecycle.ts. Every path re-resolves the
- *  target against the LIVE device list rather than trusting the current binding —
- *  both drivers accept a pinned `--device` without probing, so "bound" never implies
- *  "alive". `started: false` is therefore the lifecycle layer's verdict, not a
- *  serial comparison the server makes. */
-const realLifecycle: ServerLifecycle = {
-  async start(platform, target, opts) {
-    const lc = lifecycleFor(platform);
-    const chosen = chooseTarget(lc.targets(), target, { prefer: 'startable' });
-    assertActionable(chosen, 'start', { wipe: opts.wipe });
-    const r = await lc.boot(chosen, { timeoutMs: opts.timeoutMs, wait: true, wipe: !!opts.wipe, onProgress: opts.onProgress });
-    if (!r.serial) throw new CliError(`'${target}' started but reported no serial`, 3);
-    return { serial: r.serial, started: r.started };
-  },
-  async restart(platform, target, opts) {
-    const lc = lifecycleFor(platform);
-    const chosen = chooseTarget(lc.targets(), target, { prefer: 'running' });
-    assertActionable(chosen, 'restart', { wipe: opts.wipe });
-    const r = await restartTarget(lc, chosen, { timeoutMs: opts.timeoutMs, wait: true, wipe: !!opts.wipe, onProgress: opts.onProgress });
-    if (!r.serial) throw new CliError(`'${target}' restarted but reported no serial`, 3);
-    return { serial: r.serial };
-  },
-  async stop(platform, target, opts) {
-    const lc = lifecycleFor(platform);
-    const chosen = chooseTarget(lc.targets(), target, { prefer: 'running' });
-    assertActionable(chosen, 'stop');
-    await lc.shutdown(chosen, { timeoutMs: opts.timeoutMs, onProgress: opts.onProgress });
-  },
-  list(platform) {
-    return lifecycleFor(platform)
-      .targets()
-      .map((t) => ({
-        serial: t.serial,
-        state: t.state,
-        platform: t.platform,
-        kind: t.kind,
-        name: t.name || undefined,
-        product: t.runtime,
-      }));
-  },
-};
 
 export function buildServer(config: ServerConfig): Server {
   const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest();
@@ -660,7 +534,6 @@ export function buildServer(config: ServerConfig): Server {
    * only reports ready once its OWN `preflight()` has passed, so starting the worker IS
    * the probe, run on the thread that will go on to use it.
    */
-
   const pickFailoverDeviceLocked = async (failed: string, reason: string): Promise<string | null> => {
     const policy = config.failover;
     if (!policy) return null;
