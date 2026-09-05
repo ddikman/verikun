@@ -44,6 +44,9 @@ export interface AiRunResult {
   costLine: string;
   modelRepairs: number;
   improvements: string[];
+  /** Top-level steps in the plan that ran — the compile's size, as opposed to how much of
+   *  it executed. Undefined when no plan was obtained (a compile that threw). */
+  planSteps?: number;
   /** Archived run directory ('' when the run never started, e.g. budget hit at compile). */
   runDir: string;
   reportHtml: string;
@@ -268,6 +271,7 @@ export function toSuiteResult(file: string, r: AiRunResult, durationMs: number):
     steps: steps.length,
     passedSteps,
     failedSteps: steps.length - passedSteps,
+    ...(r.planSteps === undefined ? {} : { planSteps: r.planSteps }),
     modelRepairs: r.modelRepairs,
     ...(r.ok ? {} : { failure: failure ?? 'failed' }),
   };
