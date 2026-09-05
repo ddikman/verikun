@@ -217,7 +217,12 @@ Each cache entry records a **compiler fingerprint** = verikun's version + `GRAMM
 - `readPlan` treats a fingerprint mismatch as a **miss**. So updating verikun — a version
   bump *or* any grammar/repair/section-prompt edit — recompiles instead of replaying a plan
   the old compiler produced.
-- `findSeed` **ignores** the fingerprint. An older plan is still a fine starting point.
+- `findSeed` **ignores** the fingerprint. An older plan is still a fine starting point —
+  unless it does not cover its own prose, because a truncated plan handed to the model as
+  "adapt this" is how one bad compile outlives the bump that invalidated its own entry.
+- A plan that [does not cover its test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test)
+  is **never written**. Caching is what turns one truncated compile into a pass replayed
+  against every later build, so the rejection has to happen before the write, not after.
 
 The cache is keyed by prose + package + app build. The prose is the **resolved** text, with
 every [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)

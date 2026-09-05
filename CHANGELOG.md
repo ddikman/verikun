@@ -6,7 +6,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-05
+
+Runs a suite across a pool of devices, and shares prose between tests with `@include`.
+
 ### Added
+- **`vk suite --devices a,b` / `--servers u1,u2`**: run tests across a device pool, next free
+  device takes the next test. One merged report. ([#39])
+- **`vk suite --server`**: sizes itself automatically from a pooled server's capacity — one URL,
+  one secret, unchanged CI line. ([#39])
+- **`vk server --devices all | all-android | all-ios | a,b`**: serve several devices from one
+  address, one lease per run. ([#39])
+- **`vk suite --devices all | all-android | all-ios`**: same spelling as `vk server --devices`. ([#39])
+- **`vk suite --concurrency n`**: cap how many devices run at once, below the pool's size. ([#39])
+- **`vk suite --max-suite-cost-usd n`**: stop the suite once total model spend crosses it
+  (exit `1`). Off by default. ([#39])
+- **`vk ai --reset-app <id>`**: clear (iOS: force-stop) the app before the first step, on the run's
+  own device.
+- **`VERIKUN_LANE`**: moves the active run to `./.verikun/run-<lane>/` so concurrent tests in one
+  working directory don't delete each other's state.
+- **`POST /v1/lease`** and `capacity` / `devices` on `/v1/health`: which device a run token holds,
+  and how many the server has.
 - **`@include <path>`** in a `vk ai` test inlines another file's prose, so a shared preamble
   lives in one place. Paths resolve relative to the including file. ([#112])
 - **`vk server --log-file <path|off>`** writes a rotating server log, on by default at
@@ -15,8 +35,31 @@ All notable changes to this project are documented here. The format is based on
 - **`/v1/health`** reports `degraded`: pool members still serving but dealt last.
 - **`VERIKUN_NO_PLAN_LOCK=1`** turns off plan-compile locking, restoring the previous
   compile-in-parallel behaviour. ([#117])
+- **`VERIKUN_NO_COMPILE_CHECK=1`** turns off the `vk ai` compile-coverage check, restoring
+  the previous accept-anything behaviour. ([#127])
+- **`planSteps`** in a suite manifest row and `vk ai --json`: the plan's compiled size, next
+  to `steps` (what executed). ([#127])
 
 ### Changed
+- **Suite manifest**: adds `totals.wallClockMs`, `concurrency` and a per-test `device`.
+  `totals.durationMs` is unchanged but is now labelled device time. `schemaVersion` stays `1`.
+- **`vk install --server`** installs on **every** device of a pooled server, not one.
+- **Release workflow**: a prerelease tag takes its GitHub release notes from the version it is a candidate for (`v1.0.0-rc.1` → `## [1.0.0]`).
+- **`vk suite --devices`**: file order no longer sequences tests, and longest-first ordering is
+  taken from the previous run's manifest. A serial suite is unchanged. ([#39])
+- **`vk server --devices`**: `/v1/devices/{start,restart,stop}` answer `403` on a pool — there is
+  no single device to act on. `--ensure-device` is likewise refused with `--devices`.
+- **`vk suite --devices` with `--server`** is a usage error (exit `2`): it would have tested local
+  devices and reported green.
+- **`vk suite --servers u1,u2`**: opens one lane per device each server has, not one per URL.
+- **`vk server`**: a lease is broken only when another run needs that device, so a paused run
+  keeps its own phone.
+- **`--json` errors** carry `errorKind`, the error's class, so a caller need not match on message
+  text.
+- **`vk server --devices all`** and failover prefer virtual devices, so neither enlists an attached
+  phone unasked.
+- **`vk server` failover on a pool**: a failed device is quarantined and a healthy one takes its
+  place, so capacity holds. ([#39], [#99])
 - **`vk suite`** skips `_`-prefixed `*.md` — those are shared fragments, not tests. ([#112])
 - **`vk ai`** compiles each chunk of an `@include`d test separately and caches it, so shared
   prose is compiled once across a suite. ([#112])
@@ -41,60 +84,20 @@ All notable changes to this project are documented here. The format is based on
   the Commands page — the standalone page is gone.
 
 ### Fixed
-- **`vk server`** terminates a worker that stops answering, instead of holding its lease
-  forever while health still advertises the device.
-
-[#96]: https://github.com/ddikman/verikun/issues/96
-[#112]: https://github.com/ddikman/verikun/issues/112
-[#117]: https://github.com/ddikman/verikun/issues/117
-
-## [0.26.0] - 2026-08-24
-
-### Added
-- **`vk suite --devices a,b` / `--servers u1,u2`**: run tests across a device pool, next free
-  device takes the next test. One merged report. ([#39])
-- **`vk suite --server`**: sizes itself automatically from a pooled server's capacity — one URL,
-  one secret, unchanged CI line. ([#39])
-- **`vk server --devices all | all-android | all-ios | a,b`**: serve several devices from one
-  address, one lease per run. ([#39])
-- **`vk suite --devices all | all-android | all-ios`**: same spelling as `vk server --devices`. ([#39])
-- **`vk suite --concurrency n`**: cap how many devices run at once, below the pool's size. ([#39])
-- **`vk suite --max-suite-cost-usd n`**: stop the suite once total model spend crosses it
-  (exit `1`). Off by default. ([#39])
-- **`vk ai --reset-app <id>`**: clear (iOS: force-stop) the app before the first step, on the run's
-  own device.
-- **`VERIKUN_LANE`**: moves the active run to `./.verikun/run-<lane>/` so concurrent tests in one
-  working directory don't delete each other's state.
-- **`POST /v1/lease`** and `capacity` / `devices` on `/v1/health`: which device a run token holds,
-  and how many the server has.
-
-### Changed
-- **Suite manifest**: adds `totals.wallClockMs`, `concurrency` and a per-test `device`.
-  `totals.durationMs` is unchanged but is now labelled device time. `schemaVersion` stays `1`.
-- **`vk install --server`** installs on **every** device of a pooled server, not one.
-- **Release workflow**: a prerelease tag takes its GitHub release notes from the version it is a candidate for (`v1.0.0-rc.1` → `## [1.0.0]`).
-- **`vk suite --devices`**: file order no longer sequences tests, and longest-first ordering is
-  taken from the previous run's manifest. A serial suite is unchanged. ([#39])
-- **`vk server --devices`**: `/v1/devices/{start,restart,stop}` answer `403` on a pool — there is
-  no single device to act on. `--ensure-device` is likewise refused with `--devices`.
-- **`vk suite --devices` with `--server`** is a usage error (exit `2`): it would have tested local
-  devices and reported green.
-- **`vk suite --servers u1,u2`**: opens one lane per device each server has, not one per URL.
-- **`vk server`**: a lease is broken only when another run needs that device, so a paused run
-  keeps its own phone.
-- **`--json` errors** carry `errorKind`, the error's class, so a caller need not match on message
-  text.
-- **`vk server --devices all`** and failover prefer virtual devices, so neither enlists an attached
-  phone unasked.
-- **`vk server` failover on a pool**: a failed device is quarantined and a healthy one takes its
-  place, so capacity holds. ([#39], [#99])
-
-### Fixed
 - **`--server` runs no longer fail with `fetch failed`** when a step follows a pause longer
   than 5s, such as a cold compile.
 - **`--server` screenshots and failure evidence** are no longer corrupted in the archived report.
+- **`vk ai`** rejects a compile that covers only the start of its test, instead of caching
+  and replaying the short plan as a pass. Exit `1`. ([#127])
+- **`vk ai`** no longer seeds a new compile from a cached plan that is itself truncated. ([#127])
+- **`vk server`** terminates a worker that stops answering, instead of holding its lease
+  forever while health still advertises the device.
 
 [#39]: https://github.com/ddikman/verikun/issues/39
+[#96]: https://github.com/ddikman/verikun/issues/96
+[#112]: https://github.com/ddikman/verikun/issues/112
+[#117]: https://github.com/ddikman/verikun/issues/117
+[#127]: https://github.com/ddikman/verikun/issues/127
 
 ## [0.25.1] - 2026-08-21
 

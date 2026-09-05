@@ -122,13 +122,43 @@ differ only in how they send it.
 
 ## Compile-fidelity lint
 
-`lint.ts` catches two specific compile failures and hands the finding back to the model:
+`lint.ts` catches four specific compile failures and hands the finding back to the model:
 
 - a directive in the prose silently **dropped** from the plan
 - conditional prose compiled to an **unconditional** step
+- the plan is far **shorter** than the number of instructions the prose states *(fatal)*
+- the plan never references what the prose's **closing** instructions name *(fatal)*
 
-Both produce a plan that runs and looks fine while testing something other than what was
-written.
+All four produce a plan that runs and looks fine while testing something other than what was
+written. Each buys one guided recompile, with the finding handed back as `retryFeedback`.
+
+The two coverage rules are **fatal**: a plan that still trips one after that recompile is
+rejected rather than run, because a truncated plan does not fail — it asserts nothing, so it
+passes, and a pass is then cached and replayed against every later build. An ~85-step test
+compiled to 13 and reported success for exactly that reason. See
+[AI plans & models](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) for the
+user-facing contract.
+
+There are two of them because the two observed truncations clear one check each. The floor
+sits at **0.35** of the prose's instruction count: the truncations ran ~85% short, while the
+widest ordinary variation between two passing runs of the same test was ~20%, and a healthy
+plan normally sits at or above 1.0. But a plan that stops after a long shared preamble is not
+obviously short at all — it just cannot name what the test's closing instructions name, which
+is what the tail-anchor rule asks. Both counters are biased to **undercount** the prose
+(several sentences on one line count once; unordered bullets never count), because an
+undercount only weakens detection while an overcount would reject a correct test — the worse
+defect of the two.
+
+Two supporting details live outside `lint.ts`, both in `cli.ts`:
+
+- an `@include` section that does not cover its own prose — zero steps where the prose states
+  two or more instructions, or a plan that trips a coverage rule — is **not cached** and drops
+  the split, so the test is recompiled whole rather than assembled with its body missing. A
+  fragment is keyed on its own text, so caching a short one shortens every test that includes
+  it. A single rationale line that happens to open with a verb is still tolerated.
+- `findSeed` ignores the compiler fingerprint by design, so a truncated plan already on disk
+  would keep being handed to the model as "adapt this". A seed that trips a coverage rule
+  against its own prose is discarded.
 
 ## Before trusting seeding or shallow-IR depth
 

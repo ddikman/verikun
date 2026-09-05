@@ -58,6 +58,7 @@ prints an out-of-date CLI or plugin, and the command that fixes it, then still e
 | `wait` timed out | `1` |
 | Element has no reachable on-screen pixel | `1` |
 | `run archive` where the run contained failures | `1` |
+| A `vk ai` compile that does not cover its test | `1` |
 | Tool missing, no usable device, dump/screencap failed | `3` |
 | `devices start`/`restart` where the device did not finish booting in time | `1` |
 | `devices start`/`stop`/`restart` naming a device that does not exist | `1` |
@@ -96,9 +97,14 @@ harness that asserts on the code.
 |---|---|
 | Plan ran green | `0` |
 | A step failed, a control node gave up, the model gave up | `1` |
+| The compile [did not cover the test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) | `1` |
 | Environment aborted (`abortedForEnv`) | `3` |
 
 The `3` for an environment abort is deliberate: it must not be confused with a regression.
+
+A rejected compile is `1` for the mirror-image reason: `2` would make `vk suite` treat it as a
+usage error and never retry it, and `3` would make a lane probe the device and possibly retire
+a perfectly healthy phone for a problem that was entirely model-side.
 
 ## `vk suite`
 

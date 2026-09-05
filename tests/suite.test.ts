@@ -108,6 +108,17 @@ test('toSuiteResult: tallies steps and derives the id from the run dir', () => {
   assert.equal(r.failure, undefined, 'a green test carries no failure');
 });
 
+test('toSuiteResult: planSteps records the COMPILE size, next to the executed tally', () => {
+  // The two are different questions, and conflating them is what made a truncated compile
+  // undetectable by eye: `steps` reads short for every FAILURE, so a genuinely short plan
+  // drowns among them (issue #127).
+  const r = toSuiteResult('t.md', aiResult({ planSteps: 40 }), 1);
+  assert.equal(r.planSteps, 40);
+  assert.equal(r.steps, 3, 'still what executed');
+  // Omitted, not zeroed, when no plan was ever obtained — a compile that threw.
+  assert.equal(Object.hasOwn(toSuiteResult('t.md', aiResult(), 1), 'planSteps'), false);
+});
+
 test('toSuiteResult: a failing test carries the engine failure summary', () => {
   const r = toSuiteResult('t.md', aiResult({ ok: false, failure: { where: 'steps[2]', reason: 'assert failed' } }), 1);
   assert.equal(r.ok, false);
