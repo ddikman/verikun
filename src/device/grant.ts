@@ -2,7 +2,7 @@
 // hands it back. Claims (host), leases (server) and lanes (suite) are three different
 // scopes; why claims and leases stay separate implementations, what a grant shares, and
 // what deliberately is NOT here (idle takeover, eviction, affinity) is in CLAUDE.md,
-// "Device grants". Platform-agnostic, like claims.ts and settings.ts: no adb/xcrun.
+// "Device claims and grants". Platform-agnostic, like claims.ts and settings.ts: no adb/xcrun.
 
 import {
   ClaimOpts,

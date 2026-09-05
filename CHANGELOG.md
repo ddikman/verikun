@@ -33,6 +33,8 @@ All notable changes to this project are documented here. The format is based on
   instead of failing. Its app data is lost; stderr says so. ([#96])
 - **`VERIKUN_CLAIM_TTL_MIN`** now also paces a parallel suite's claim heartbeat — a quarter of
   the window, capped at 60s — so a short TTL no longer races it.
+- **Contributor docs**: rules stated once, with the history left to the docs site; the companion
+  notes no longer describe it as a prototype.
 
 ### Fixed
 - **`vk server`** terminates a worker that stops answering, instead of holding its lease
