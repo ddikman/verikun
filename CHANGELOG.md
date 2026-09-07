@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-09-07
+
+Fixes a `vk ai` run dying when the app is redrawing at the moment a guard checks the screen.
+
 ### Added
 - **`errorKind` on every `vk server` error response**: a device error keeps its class over the
   wire, not only on `/v1/exec`. Absent from older servers. ([#80])
