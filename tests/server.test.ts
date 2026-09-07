@@ -21,7 +21,7 @@ import type { DeviceInfo, Driver } from '../src/types';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CliError } from '../src/errors';
+import { CliError, NoWindowError } from '../src/errors';
 import { makeDriver } from './helpers';
 
 const KEY = 'test-key';
@@ -839,7 +839,33 @@ test('elements: rebinds, but never answers with the new device\'s screen', async
   const body = (await r.json()) as RpcErrorBody;
   assert.equal(body.exitCode, 3);
   assert.equal(body.deviceChanged?.to, 'emulator-5556', 'but say the ground moved, so the client can re-ask');
+  assert.equal(body.errorKind, 'CliError', 'and name the class, even on the failover wrap');
   assert.equal(readB, 0);
+});
+
+test('elements: a failed read names the error CLASS on the wire, not just its text', async () => {
+  // Issue #80. `/v1/exec` has carried an ErrorDescriptor on its 200s from the start; every
+  // other route answered with a status code and a message, so the client rebuilt a bare
+  // CliError. The `vk ai` guard decides "the app is still drawing" vs "the box is broken" on
+  // this class alone, so without the field every --server run read a mid-launch gap as fatal.
+  await start({ driver: makeDriver({ getElements: () => { throw new NoWindowError(); } }) });
+  const r = await call('/v1/elements', { method: 'POST', body: '{}' });
+  assert.equal(r.status, 500);
+  const body = (await r.json()) as RpcErrorBody;
+  assert.equal(body.errorKind, 'NoWindowError', 'the subclass, not the CliError it extends');
+  assert.equal(body.exitCode, 3, 'unchanged — a caller with no budget still exits 3');
+  assert.equal(body.deviceChanged, undefined, 'no failover here: this is the plain throw arm');
+});
+
+test('elements: a server-raised failure omits errorKind rather than inventing one', async () => {
+  // The 503 gate is the server\'s own verdict, with no wrapped driver error behind it. An
+  // absent field is what an older server sends too, so both read the same to a client.
+  await start({ serial: null });
+  const r = await call('/v1/elements', { method: 'POST', body: '{}' });
+  assert.equal(r.status, 503);
+  const body = (await r.json()) as RpcErrorBody;
+  assert.equal(body.errorKind, undefined);
+  assert.equal(body.exitCode, 3);
 });
 
 test('exec: an app failure never moves device, however healthy the alternatives', async () => {

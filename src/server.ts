@@ -54,7 +54,7 @@ import { DeviceHandle, DevicePool, WorkerDevicePool } from './server-pool';
 import type { WorkerExecResult } from './server-worker';
 import { InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
 import {
-  rebuildError, DeviceChange, DeviceListResponse, DeviceOpRequest, DeviceOpResponse,
+  describeError, rebuildError, DeviceChange, DeviceListResponse, DeviceOpRequest, DeviceOpResponse,
   ExecRequest, ExecResponse, HealthResponse, InstallResponse, LeaseResponse, LogsRequest,
   LogsResponse, RpcErrorBody,
 } from './rpc';
@@ -1120,7 +1120,16 @@ export function buildServer(config: ServerConfig): Server {
       // re-asks after a reported move — see remote.ts's preflight.
       const deviceChanged = await considerFailover(e, 'read', handle);
       if (!deviceChanged) throw e;
-      throw new HttpError(500, (e as Error).message, e instanceof CliError ? e.exitCode : 3, deviceChanged);
+      // describeError, not just .message/.exitCode: this wrap is on the path a mid-launch
+      // NoWindowError takes, and the engine's guard tells "still drawing" from "box broken"
+      // by class alone (issue #80).
+      throw new HttpError(
+        500,
+        (e as Error).message,
+        e instanceof CliError ? e.exitCode : 3,
+        deviceChanged,
+        describeError(e as Error).kind,
+      );
     }
   }
 
@@ -1712,9 +1721,16 @@ export function buildServer(config: ServerConfig): Server {
         // back why a suite degraded.
         failure = ` — ${firstLine(mapped.message)}`;
         if (!res.headersSent) {
+          // The class comes from the ORIGINAL throw, never from `mapped`: the HttpError
+          // mapping above keeps only message + exit code, which is precisely how a
+          // NoWindowError used to reach the client as an anonymous CliError (issue #80). An
+          // HttpError raised by the server itself (auth, validation, a lock) has no wrapped
+          // class and simply omits the field, which older clients already tolerate.
+          const errorKind = e instanceof HttpError ? e.errorKind : describeError(e as Error).kind;
           const body: RpcErrorBody = {
             error: mapped.message,
             exitCode: mapped.exitCode,
+            ...(errorKind ? { errorKind } : {}),
             ...(mapped.deviceChanged ? { deviceChanged: mapped.deviceChanged } : {}),
           };
           sendJson(res, mapped.status, body);

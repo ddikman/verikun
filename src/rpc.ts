@@ -208,6 +208,19 @@ export interface RpcErrorBody {
   error: string;
   exitCode?: number;
   /**
+   * The thrown error's CLASS, so a non-2xx carries the same identity `/v1/exec` already
+   * carries on its 200s. OPTIONAL twice over — absent from every older server AND absent
+   * when the failure never had a class worth naming — so a client MUST feature-detect on
+   * the FIELD, exactly as with `deviceChanged` above.
+   *
+   * MEASURED, and this field exists because of it (issue #80): a `/v1/elements` read that
+   * fails mid-launch is a `NoWindowError`, which survives the worker→main thread hop intact
+   * and was then flattened to `CliError(…, 3)` by the HTTP boundary. The `vk ai` engine
+   * decides "the app is still drawing" vs "the box is broken" on that class, so every
+   * `--server` run read a transient as a fatal environment error and aborted.
+   */
+  errorKind?: ErrorDescriptor['kind'];
+  /**
    * The server moved device while failing this request. Lives on the ERROR body because
    * that is where it matters most: `/v1/elements` and an install that exhausted the pool
    * both fail, and the client still needs to know the ground shifted under it.

@@ -64,7 +64,20 @@ const DEVICE_STOP_TIMEOUT_MS = 60_000;
 
 const trimUrl = (url: string): string => url.replace(/\/+$/, '');
 
-function describeStatus(status: number, body: RpcErrorBody | null, url: string): CliError {
+/**
+ * Turn a non-2xx into the error the caller sees.
+ *
+ * The 401/409/503 arms come FIRST and stay class-free on purpose: those describe the
+ * TRANSPORT (wrong key, device leased, nothing attached), not something a driver threw, so
+ * there is no device-error identity to restore and their wording is what a user acts on.
+ *
+ * Everything else prefers the server's `errorKind`. That field is what stops a `--server` run
+ * reading a mid-launch `NoWindowError` as a fatal environment error: the class survives the
+ * worker→main hop server-side, and this is where it used to be replaced by an anonymous
+ * `CliError` (issue #80). No field — an older server, or a failure with no class worth
+ * naming — falls through to exactly the previous behaviour.
+ */
+export function describeStatus(status: number, body: RpcErrorBody | null, url: string): Error {
   const detail = body?.error ? `: ${body.error}` : '';
   if (status === 401) {
     return new CliError(`verikun server rejected the auth key (401)${detail}. Check --auth-key / VERIKUN_SERVER_AUTH_KEY.`, 3);
@@ -78,6 +91,12 @@ function describeStatus(status: number, body: RpcErrorBody | null, url: string):
   // The server sends the intended exit code (usage 2 / env 3) in the body; fall
   // back on the HTTP class when it didn't.
   const exitCode = body?.exitCode ?? (status === 400 || status === 404 || status === 413 ? 2 : 3);
+  if (body?.errorKind) {
+    // The server's own message, NOT the `verikun server error 500 at <url>` wrapper: this is
+    // a device error that happens to have travelled, and it reads (and matches) the same as
+    // the local one. The same shape /v1/exec's 200-with-descriptor path already produces.
+    return rebuildError({ kind: body.errorKind, name: body.errorKind, message: body.error, exitCode });
+  }
   return new CliError(`verikun server error ${status} at ${url}${detail}`, exitCode);
 }
 

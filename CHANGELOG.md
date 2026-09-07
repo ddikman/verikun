@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`errorKind` on every `vk server` error response**: a device error keeps its class over the
+  wire, not only on `/v1/exec`. Absent from older servers. ([#80])
+
+### Fixed
+- **`vk ai` guards** now ride out a transient "no window" for up to 10s instead of aborting the
+  run. A bare `vk ui` still exits `3`. ([#80])
+
+### Changed
+- **"No window to read"** now names a busy main thread mid-transition as a cause, and no longer
+  suggests a command that waits. ([#80])
+
+[#80]: https://github.com/ddikman/verikun/issues/80
+
 ## [0.26.0] - 2026-09-05
 
 Runs a suite across a pool of devices, and shares prose between tests with `@include`.

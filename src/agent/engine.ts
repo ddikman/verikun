@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Element, Platform } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
 import { assertStateSupported } from '../ui/state-support';
-import { SelectorNotFoundError, AmbiguousSelectorError, isEnvError } from '../errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, NoWindowError, isEnvError } from '../errors';
 import { sleep } from '../wait';
 import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
@@ -186,6 +186,33 @@ export const DEFAULT_GUARD_SETTLE_MS = 1500;
 /** Re-dump cadence inside a guard's settle window. */
 const GUARD_POLL_MS = 150;
 
+/**
+ * How long a guard keeps looking at a screen it cannot read at all, when the reason is
+ * NoWindowError — the app was force-stopped or is mid-launch and has genuinely not drawn.
+ *
+ * Separate from `settleMs`, which answers "how long before I believe this selector is
+ * absent?". This answers "how long before I believe there is no screen to ask?" — a
+ * different question, and the only one whose wrong answer aborts the whole run.
+ *
+ * MEASURED (issue #80), post-`vk launch`, time until the first hierarchy read succeeds:
+ *   emulator-5554 (stock reads ~2s):        2027-2379ms over 10 launches
+ *   SM-A415F, physical (companion ~0.3s):   4746-6219ms over 15 launches
+ * So the "clears within a second or two" in NoWindowError's own doc is optimistic by 2.5x on
+ * real hardware; the emulator only looks compliant because one slow read already outlasts the
+ * gap. 10s clears the worst observed by ~1.6x. Below that the constant sits INSIDE the
+ * measured distribution, which is the one place it must not be.
+ *
+ * Deliberately MORE patient than a leaf command's 5s auto-wait, which is the opposite of
+ * DEFAULT_GUARD_SETTLE_MS's reasoning, because the asymmetry is real: a leaf that needs
+ * longer takes `--wait`, whereas a guard's patience is internal and a test author cannot
+ * reach it. Being generous costs at most this long ONCE per present() call, on a run that is
+ * already failing — against a 15-minute default run timeout, and clamped by it.
+ *
+ * Not configurable on purpose: a dial here is one more thing to explain, and every value a
+ * user might pick is worse than the measurement.
+ */
+const NO_WINDOW_GRACE_MS = 10_000;
+
 /** Consecutive identical screen snapshots before a loop is believed to be stuck.
  *
  *  This check is a TIME SAVER and nothing more. A loop already fails when its exit
@@ -276,6 +303,11 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
    *      probe a loop-exit check needs.
    *  So one dump attempt always happens regardless of the window.
    *
+   *  A THIRD clock sits beside both: a screen that cannot be read because the app has not
+   *  drawn (NoWindowError) is retried against NO_WINDOW_GRACE_MS, not against `settleMs`.
+   *  That is deliberately independent — "is this selector absent?" and "is there a screen to
+   *  ask at all?" are different questions, and only the second one aborts the run.
+   *
    *  Throws GuardBlindError when the window closes having NEVER once read the screen
    *  and the failure was an environment error — see that class for why. */
   const present = async (selector: string, settleMs: number): Promise<boolean> => {
@@ -293,6 +325,10 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     // body — the plan is unrunnable HERE and must say so, not quietly do nothing.
     if (deps.platform) assertStateSupported(sel, deps.platform);
     const deadline = Date.now() + Math.max(0, settleMs);
+    // A screen that cannot be read AT ALL gets its own, longer clock — see NO_WINDOW_GRACE_MS.
+    // Clamped by the run deadline so a guard can never push a run past --timeout: the grace
+    // exists to spend budget the caller already has, never to invent more.
+    const noWindowDeadline = Math.min(Date.now() + NO_WINDOW_GRACE_MS, deps.deadline ?? Infinity);
     // A non-zero window must buy at least one SECOND look, independent of the clock.
     // Measured on emulator-5554: one uiautomator dump costs ~2.4s, which already exceeds
     // a 1.5s window — so a purely time-boxed loop returns after a single dump and the
@@ -327,9 +363,26 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
       if (els !== undefined && matchElements(els, sel).matches.length > 0) return true;
       const remaining = deadline - Date.now();
       if (looks >= minLooks && remaining <= 0) {
+        // Nothing has been readable yet, and the reason is that the app has not drawn. That is
+        // an observation about the SCREEN, not a broken machine, and it clears on its own — so
+        // keep looking on the no-window clock instead of killing the run. MEASURED (#80): the
+        // two attempts above span ~75ms against a gap of 4.7-6.2s on a physical device, so
+        // without this a `repeat` with minutes of budget gives up in under a tenth of a second.
+        //
+        // Gated on `everRead` so this can only ever extend patience for an UNREADABLE screen.
+        // One successful read — even an empty tree — and the ordinary semantics resume exactly:
+        // settleMs=0 is still a single-shot probe. It must never make a merely ABSENT selector
+        // more patient, or every guard silently costs 10s.
+        if (!everRead && lastErr instanceof NoWindowError && Date.now() < noWindowDeadline) {
+          await sleep(GUARD_POLL_MS);
+          continue;
+        }
         // The window closed having NEVER once read the screen, because the environment is
         // broken. Answering "absent" here is a lie that silently skips the body — and a
         // guard-heavy plan would then finish fully GREEN having executed nothing.
+        //
+        // A no-window that outlives its grace lands here too, and still aborts: at that point
+        // the app really is gone, and reporting "absent" would be the same false green.
         if (!everRead && isEnvError(lastErr)) throw new GuardBlindError(selector, lastErr as Error);
         return false;
       }

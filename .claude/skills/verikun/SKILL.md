@@ -390,7 +390,9 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   the flow. An `if-present` guard **waits for its selector to settle** (at least two looks
   at the screen) before deciding the optional UI is absent, so a dialog that animates in a
   beat after the transition is still caught. An absent guard costs about one extra UI dump;
-  `VERIKUN_GUARD_SETTLE_MS=0` restores the old single-shot probe.
+  `VERIKUN_GUARD_SETTLE_MS=0` restores the old single-shot probe. A guard that cannot read the
+  screen **at all** — the app force-stopped, mid-launch, or busy mid-transition — keeps looking
+  for up to 10s rather than aborting; still blind after that is exit `3`, never "absent".
 - **A compile has to cover the test.** Compilation is nondeterministic, and its worst outcome
   is a plan that stops part-way: it asserts nothing after that point, so it *passes*, caches
   green, and replays against later builds — a test exercising none of its subject reporting

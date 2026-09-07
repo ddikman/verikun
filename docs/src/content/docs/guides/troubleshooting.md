@@ -127,21 +127,34 @@ Beyond that, the lever is **how many reads a test makes**, not how fast each one
   [Screenshots](/verikun/reference/screenshots/). Prefer one `assert` over a screenshot you
   intend to read back.
 
-### "No window to read" right after `launch`
+### "No window to read"
 
-`launch` force-stops the app before starting it (and `--clear` also wipes its data), so for
-a second or two there is no window at all and the platform reports a null root.
+The platform reports a null root, and there are **three** ways to get one. Two are obvious:
+`launch` force-stops the app before starting it (and `--clear` also wipes its data), so for a
+few seconds there is no window at all. The third is not: an app whose **main thread is busy
+mid-transition** reports the same thing while being fully drawn and on screen.
+
+How long the gap lasts is device-dependent and longer than it sounds — measured on a physical
+SM-A415F, a hierarchy read succeeded 4.7–6.2s after `vk launch` returned; on an emulator,
+~2.1s.
 
 **Any command that waits absorbs this** — `wait`, `find`, `assert`, `tap`, `text` — and keeps
-polling until its window elapses, so you normally never see it. It only surfaces from a
-command with no wait budget, such as a bare `vk ui` issued immediately after `launch`. Give
-it something to wait for instead:
+polling until its window elapses, so you normally never see it. **`vk ai` control-flow guards
+ride it out too**, for up to 10s, so a `repeat` or `if-present` evaluated in the gap no longer
+aborts the run.
+
+It still surfaces from a command with **no wait budget**, such as a bare `vk ui` issued
+immediately after `launch` — that exits `3`, unchanged. Give it something to wait for instead:
 
 ```sh
 vk launch com.example.app --clear
 vk wait @home_tab --timeout 30s      # spends its budget rather than giving up
 vk ui
 ```
+
+A guard that stays blind past its 10s grace **still aborts** with exit `3`. That is deliberate:
+answering "the selector is absent" for a screen nobody could read would skip the guarded body
+and let a guard-heavy plan finish green having executed nothing.
 
 ### A tap right after `launch` did nothing
 
