@@ -18,6 +18,15 @@ re-derived from several files at once. Each entry states the rule, then why it i
 | Model **`give_up`** | **Terminal** | A fallback tap onto an unrelated screen would pass as a false green |
 | Budget / timeout abort | **Terminal** | A bound that heals is not a bound |
 | Environment error, exit `3` | **Aborts**, not recorded as a regression | The box is broken; the app is not implicated |
+| **`NoWindowError`, exit `3`** | **Ridden out** for 10s, then aborts | The app has not drawn — an observation about the screen, not a broken box |
+
+`NoWindowError` is the one exit-3 that is not simply the box being broken, and it is told apart
+by **class, never by exit code** — `isEnvError` is true for it, so a guard classifying on the
+code alone killed runs whose app was merely mid-redraw ([#80]). Its class must therefore survive
+every boundary it crosses: worker→main thread, child process→parent (`errorKind` in `--json`),
+and server→client (`errorKind` on the error body). Any new boundary owes the same field.
+
+[#80]: https://github.com/ddikman/verikun/issues/80
 
 The mechanism that makes `assert` unhealable is that it **returns** exit `1` rather than
 throwing. The engine heals only on a *thrown* selector error. If you ever make `assert`

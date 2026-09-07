@@ -893,10 +893,7 @@ export class AdbDriver implements Driver {
       // nothing on it yet. Retrying it here just spends someone else's wait budget three
       // times as fast; hand it up to whoever knows how long they are willing to wait.
       if (NULL_ROOT.test(lastErr)) {
-        throw new NoWindowError(
-          'No window to read: the app has not drawn yet (force-stopped, or mid-launch). ' +
-            'Retry, or use a command that waits (`vk wait`, or any selector lookup).',
-        );
+        throw new NoWindowError();
       }
       if (attempt === 0) {
         // A sleeping display is the other documented cause of a failed read. `ensureAwake` ran

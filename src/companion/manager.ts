@@ -308,9 +308,7 @@ export class Companion {
       case 'propagate':
         break;
     }
-    throw new NoWindowError(
-      'No window to read: the app has not drawn yet (force-stopped, or mid-launch).',
-    );
+    throw new NoWindowError();
   }
 
   /** Hand the UiAutomation connection back and take it again. The one thing measured to clear

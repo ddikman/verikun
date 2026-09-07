@@ -143,8 +143,11 @@ trigger rather than becoming a terminal failure.
 | `409` | every device is leased by another run |
 | `500` | `3` |
 
-Response bodies carry `{ error, exitCode }`. `SelectorNotFoundError` and
-`AmbiguousSelectorError` are rebuilt with their subclass identity intact on the client side.
+Response bodies carry `{ error, exitCode, errorKind? }`, and `errorKind` is the thrown error's
+**class** — so it is rebuilt with its subclass identity intact on the client side, on **every**
+route rather than only on `/v1/exec`. That is what keeps a remote selector miss a heal trigger,
+and what lets a `vk ai` guard tell a mid-launch `NoWindowError` from a broken device (both are
+exit `3`). Older servers omit the field; feature-detect on it, never on `version`.
 
 ## Using them from a script
 

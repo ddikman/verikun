@@ -5,7 +5,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { FlagSpec } from './agent/ir';
-import type { DeviceChange } from './rpc';
+import type { DeviceChange, ErrorDescriptor } from './rpc';
 
 /** An error that already knows its HTTP status + the client-side exit code. */
 export class HttpError extends Error {
@@ -16,6 +16,11 @@ export class HttpError extends Error {
     /** Set when this request moved the server's device before failing — the client
      *  needs to know the ground shifted even though the answer is an error. */
     readonly deviceChanged?: DeviceChange,
+    /** The CLASS of the error this wraps, when it wraps one. Wrapping a driver error in an
+     *  HttpError is how the identity used to be lost: only `.message` and `.exitCode` were
+     *  copied across, so a `NoWindowError` reached the client as a bare `CliError`. Carry it
+     *  here and the outer catch can put it on the wire. */
+    readonly errorKind?: ErrorDescriptor['kind'],
   ) {
     super(message);
     this.name = 'HttpError';

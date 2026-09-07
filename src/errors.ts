@@ -68,11 +68,26 @@ export class SelectorNotFoundError extends CliError {
  * The retry belongs to the caller that knows how long it is willing to wait.
  */
 export class NoWindowError extends CliError {
-  constructor(message: string) {
+  constructor(message: string = NO_WINDOW_MESSAGE) {
     super(message, 3);
     this.name = 'NoWindowError';
   }
 }
+
+/**
+ * The one wording for "there is no window", shared by both Android read paths so they cannot
+ * drift — the companion and the stock dumper are reporting the same device state.
+ *
+ * It names THREE causes, not two. `getRootInActiveWindow()` also returns null while the app's
+ * main thread is busy mid-transition, and issue #80 was reported against a build that listed
+ * only force-stop and mid-launch: the reporter went looking at app startup for a screen that
+ * was drawn, present, and merely busy (device logs showed 32-121 dropped frames in the same
+ * window). It also no longer ends in "use a command that waits" — every caller that hit this
+ * in the wild was already doing exactly that.
+ */
+export const NO_WINDOW_MESSAGE =
+  'No window to read: the app has no drawn window right now — force-stopped, mid-launch, or ' +
+  'its main thread is busy mid-transition. This normally clears within a few seconds.';
 
 /** Selector matched >1 element. Exit 2. Carries the candidates so the agent runner
  *  can ask the model to disambiguate (a heal trigger) instead of aborting. */

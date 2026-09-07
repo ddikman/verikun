@@ -29,6 +29,10 @@ error's **class** — `SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWind
 `CliError`, `Error` — so a caller can tell "the app has not drawn yet" from "the device is
 gone" without matching on message text. New commands honour `--json` for success output too.
 
+The same field rides `vk server`'s error bodies, for the same reason: an error that loses its
+class at a boundary is read by its exit code alone, and exit `3` cannot distinguish a device
+that is gone from an app that is still drawing.
+
 ## No host shell, ever
 
 `exec.ts` runs everything with an **args array** — no `shell: true`. `spawnDetached` (the

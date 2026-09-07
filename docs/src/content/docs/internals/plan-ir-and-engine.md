@@ -58,6 +58,33 @@ than throwing, and that is the whole mechanism — the engine heals only on a *t
 error, so never make `assert` throw. The full matrix and the reasons:
 [Heal vs terminal](/verikun/internals/contracts/#heal-vs-terminal).
 
+## A guard has two clocks, and only one of them can abort
+
+`present()` answers "is this selector on screen?" — and it can fail in two unrelated ways that
+need different patience.
+
+**Is the selector absent?** That is the settle window: `1500ms` for an `if-present`, and `0`
+for a `repeat`'s exit guard, which is absent on every iteration by construction and would
+otherwise pay the window `cap` times. Any non-zero window buys at least **two** looks
+regardless of the clock, because one hierarchy read can cost more than the whole window on a
+slow device.
+
+**Is there a screen to ask at all?** That is `NoWindowError` — the app force-stopped,
+mid-launch, or busy mid-transition — and it gets its own **10s** grace instead, because it is
+not a fact about the selector. The two are independent on purpose: the grace applies only
+while *no* read has succeeded, so it can never make a merely absent selector more patient.
+
+Both are bounded by the run deadline, so no guard can overrun `--timeout`.
+
+A guard still blind when its grace runs out throws `GuardBlindError` and aborts the run
+(exit `3`). Reporting "absent" instead would skip the guarded body, and a guard-heavy plan
+would finish fully green having executed nothing.
+
+Why 10s rather than the 5s a leaf command auto-waits: measured post-`vk launch`, the first
+readable hierarchy arrives 4.7–6.2s later on a physical SM-A415F. A leaf that needs longer
+takes `--wait`; a guard's patience is internal and a test author cannot reach it, so it is set
+from the measurement instead. See [issue #80](https://github.com/ddikman/verikun/issues/80).
+
 ## A repair is a decision, not a forced substitution
 
 The model returns a replacement leaf **or** `give_up` (`replaceStep: null`) when the live

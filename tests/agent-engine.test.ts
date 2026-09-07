@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { runPlan, EngineDeps, ExecFn, ExecOutcome } from '../src/agent/engine';
 import { Plan, PlanNode, LeafStep, IfPresentNode, RepeatNode } from '../src/agent/ir';
-import { SelectorNotFoundError, AmbiguousSelectorError, envError } from '../src/errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, NoWindowError, envError } from '../src/errors';
 import { CostTracker } from '../src/agent/cost';
 import { AgentProvider } from '../src/agent/provider';
 import { makeEl, asLeaf } from './helpers';
@@ -741,9 +741,11 @@ test('runPlan: an if-present guard that cannot READ the screen aborts — never 
 });
 
 test('runPlan: a ONE-OFF dump failure at a guard is absorbed by the retry, not an abort', async () => {
-  // This is where the transient tolerance actually lives. Every real dump failure is an
-  // exit-3 CliError, so it cannot be "tolerated" by classification — only by the second
-  // attempt succeeding. A flaky uiautomator dump must not abort the run.
+  // Tolerance for an UNCLASSIFIED dump failure lives here: a bare exit-3 CliError says
+  // nothing about whether the screen is coming back, so the only thing that can rescue it is
+  // the second attempt succeeding. A flaky uiautomator dump must not abort the run.
+  // (NoWindowError is the one failure that IS classified, and it gets a real budget instead —
+  // see the NO_WINDOW_GRACE_MS tests below.)
   const { fn, calls } = execFrom([{ code: 0 }]);
   let n = 0;
   const r = await runPlan(
@@ -792,6 +794,122 @@ test('runPlan: a repeat guard that cannot READ the screen aborts too', async () 
   );
   assert.equal(r.ok, false);
   assert.equal(r.abortedForEnv, true);
+});
+
+// --- a transient "no window" must not abort a guard (issue #80) -------------------
+//
+// MEASURED on a physical SM-A415F: after `vk launch`, the first readable hierarchy arrives
+// 4.7-6.2s later, while a repeat's exit guard spends its two attempts in ~75ms. Every one of
+// 30 runs aborted the whole plan with exit 3 on a screen that was drawing normally.
+
+test('runPlan: a repeat guard rides out a transient "no window" instead of aborting', async () => {
+  // The #80 regression test. NoWindowError is an exit-3 CliError like any other, so the ONLY
+  // thing separating this from the abort tests above is its class.
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  let n = 0;
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:End', cap: 5, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      getElements: () => {
+        // Well past the two attempts one present() pass makes, so no amount of inner
+        // retrying can rescue this — only the grace window can.
+        if (++n <= 6) throw new NoWindowError();
+        return [makeEl({ text: 'End' })];
+      },
+    }),
+  );
+  assert.equal(r.ok, true, 'the app was drawing, not broken');
+  assert.equal(r.abortedForEnv, undefined);
+  assert.equal(calls.length, 0, 'the loop exited on its target, without running the body');
+});
+
+test('runPlan: only NoWindowError buys the grace — another env error still blinds at once', async () => {
+  // The narrowness IS the feature. A missing adb or a wedged dumper is a machine to fix, and
+  // polling it is spending someone\'s budget to learn nothing. If this ever starts passing
+  // because the grace widened, a broken toolchain costs every guard 10s before saying so.
+  const { fn } = execFrom([{ code: 0 }]);
+  let reads = 0;
+  const started = Date.now();
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:End', cap: 5, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      getElements: () => {
+        reads++;
+        throw envError("'adb' was not found on PATH.");
+      },
+    }),
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForEnv, true);
+  assert.equal(reads, 2, 'exactly one present() pass: two attempts, then give up');
+  assert.ok(Date.now() - started < 1000, 'and no waiting at all');
+});
+
+test('runPlan: a "no window" that never clears still aborts once its grace runs out', async () => {
+  // The other half: a guard that stays blind must NOT answer "absent", or a guard-heavy plan
+  // finishes green having executed nothing. The run deadline clamps the grace, which is what
+  // keeps this test fast.
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:End', cap: 5, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      deadline: Date.now() + 400,
+      getElements: () => {
+        throw new NoWindowError();
+      },
+    }),
+  );
+  assert.equal(r.ok, false, 'still an abort, never a false green');
+  assert.equal(r.abortedForEnv, true);
+  assert.equal(calls.length, 0);
+  assert.match(r.failure?.reason ?? '', /could not read the screen/);
+});
+
+test('runPlan: the no-window grace never outlives the run deadline', async () => {
+  // NO_WINDOW_GRACE_MS is 10s and this run has 300ms left, so the guard must give up on the
+  // RUN\'s clock. A grace that ignored the deadline would let one guard overrun --timeout,
+  // which is the one thing a bound may not do.
+  const { fn } = execFrom([{ code: 0 }]);
+  const started = Date.now();
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:End', cap: 5, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      deadline: Date.now() + 300,
+      getElements: () => {
+        throw new NoWindowError();
+      },
+    }),
+  );
+  assert.equal(r.ok, false);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 3000, `gave up on the run deadline, not the 10s grace (took ${elapsed}ms)`);
+});
+
+test('runPlan: the grace does NOT make a merely absent selector more patient', async () => {
+  // The `everRead` gate. One successful read and settleMs=0 is a single-shot probe again — if
+  // the grace leaked into the absent path, every loop iteration would cost 10s.
+  const { fn } = execFrom([{ code: 0 }]);
+  let reads = 0;
+  const started = Date.now();
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:Never', cap: 2, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      // Reads fine, just never shows the target.
+      getElements: () => {
+        reads++;
+        return [makeEl({ text: 'Something else' })];
+      },
+    }),
+  );
+  assert.equal(r.ok, false, 'a repeat that never sees its selector fails');
+  assert.equal(r.abortedForEnv, undefined, 'a failure, not an env abort');
+  assert.ok(Date.now() - started < 2000, 'and it did not sit out a grace window');
+  assert.ok(reads < 12, `single-shot probes, not a polled window (${reads} reads)`);
 });
 
 test('runPlan: an EMPTY dump is a bad read, not "absent" — re-read even at settleMs 0', async () => {

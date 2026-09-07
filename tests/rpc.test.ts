@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { describeError, rebuildError } from '../src/rpc';
 import type { ExecResponse, RpcErrorBody } from '../src/rpc';
-import { CliError, SelectorNotFoundError, AmbiguousSelectorError, isEnvError, envError } from '../src/errors';
+import { CliError, SelectorNotFoundError, AmbiguousSelectorError, NoWindowError, isEnvError, envError } from '../src/errors';
 import { makeEl } from './helpers';
 
 // The error codec is what lets the `vk ai` engine keep its heal-vs-terminal
@@ -79,4 +79,29 @@ test('rpc wire: deviceChanged is optional everywhere — old servers simply omit
     deviceChanged: { from: 'emulator-5554', to: 'emulator-5556', reason: 'the device is offline', retried: false },
   };
   assert.equal(moved.deviceChanged?.retried, false, 'exec never replays, so this is always false');
+});
+
+test('rpc codec: NoWindowError survives — it must not flatten into a bare CliError', () => {
+  // describeError checks this subclass BEFORE the CliError arm; swap the order and this is
+  // the test that notices. Losing the class costs twice: device/failover.ts stops
+  // recognising a mid-launch gap as transient, and the `vk ai` guard stops riding it out
+  // (issue #80).
+  const rebuilt = rebuildError(wire(describeError(new NoWindowError())));
+  assert.ok(rebuilt instanceof NoWindowError, 'instanceof NoWindowError');
+  assert.ok(rebuilt instanceof CliError, 'still a CliError');
+  assert.equal((rebuilt as CliError).exitCode, 3, 'a caller with no budget still exits 3');
+  assert.equal(isEnvError(rebuilt), true);
+});
+
+test('rpc wire: errorKind is optional on an error body — old servers simply omit it', () => {
+  // Same standing rule as deviceChanged: feature-detect on the FIELD. An older server sends
+  // no kind, and the client must fall back to its previous behaviour rather than fail.
+  const oldServer: RpcErrorBody = { error: 'boom', exitCode: 3 };
+  assert.equal(oldServer.errorKind, undefined);
+
+  const classed: RpcErrorBody = { error: 'no window', exitCode: 3, errorKind: 'NoWindowError' };
+  assert.equal(classed.errorKind, 'NoWindowError');
+  // And the field is exactly what rebuildError consumes, so the two cannot drift apart.
+  const rebuilt = rebuildError({ kind: classed.errorKind!, name: 'NoWindowError', message: classed.error, exitCode: 3 });
+  assert.ok(rebuilt instanceof NoWindowError);
 });
