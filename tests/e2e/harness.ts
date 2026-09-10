@@ -161,7 +161,7 @@ export function unavailable(): string | null {
  * hierarchy rather than an error. That cost an hour of confusion once already.
  */
 export function openScreen(
-  screen: 'login' | 'async' | 'scroll' | 'state' | 'device' | 'permission',
+  screen: 'login' | 'async' | 'scroll' | 'state' | 'device' | 'permission' | 'modal',
   opts: { clear?: boolean } = {},
 ): void {
   // `--clear` resets RUNTIME PERMISSION GRANTS along with the app data, which is the

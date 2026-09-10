@@ -5,10 +5,11 @@ import {
   StartOpts, StartResult, StopOpts, StopResult,
 } from '../types';
 import type { RawImage } from '../image';
-import { Companion, companionEnabled, releaseCompanionOn } from '../companion/manager';
+import { Companion, barrierRecycleDue, companionEnabled, releaseCompanionOn } from '../companion/manager';
 import { CliError, NoWindowError, probeFailure } from '../errors';
 import { runText, runBinary, sleepSync, commandExists, spawnDetached, TextResult } from '../exec';
-import { parseHierarchy, parseRotation } from '../ui/android-parse';
+import { isInteresting, parseHierarchy, parseRotation } from '../ui/android-parse';
+import { describeBarrier, modalBarrierOnly } from '../ui/barrier';
 import { viewportFor } from '../ui/viewport';
 import {
   SettingKey,
@@ -182,6 +183,17 @@ const DUMP_PATHS = ['/sdcard/window_dump.xml', '/data/local/tmp/window_dump.xml'
  *  costs the same ~10ms as `dump 0`). The stock path pays a full second for it only
  *  because a freshly connected bridge has no history of quiet to draw on. */
 const COMPANION_IDLE_MS = 1000;
+
+/**
+ * How long to let a barrier-only tree settle before reading it again (see `settleBarrier`).
+ *
+ * MEASURED on a physical SM-A415F and a motorola one, companion on: the read issued the
+ * moment `tap @vk_sheet_open` returned (+0.3-0.45s) held only the barrier, and the next one
+ * held the sheet. The re-read itself absorbs the rest — the companion's idle wait sees the
+ * entrance's accessibility events and returns once they stop (~1.05s against ~0.2s for a
+ * quiet screen) — so this only has to outlast the gap between the two.
+ */
+const BARRIER_SETTLE_MS = 300;
 
 /** What both capture paths say when there is no window to read: AOSP's DumpCommand prints
  *  "ERROR: null root node returned by UiTestAutomationBridge." and writes no file, and the
@@ -641,6 +653,9 @@ export class AdbDriver implements Driver {
   private lastRotation?: number;
   /** undefined = not built yet, null = opted out. See companionOrNull(). */
   private companion?: Companion | null;
+  /** When the current run of barrier-only reads began (0 = not in one). See settleBarrier. */
+  private barrierSince = 0;
+  private barrierRecycled = false;
   /** Until when `ensureAwake` may skip its probe. See AWAKE_FRESH_MS. */
   private awakeUntil = 0;
 
@@ -740,14 +755,14 @@ export class AdbDriver implements Driver {
 
     const els = this.captureElements(opts);
     // Second net, for a device that is awake but still behind the keyguard.
-    if (!this.keyguardReason(els)) return els;
+    if (!this.keyguardReason(els)) return this.settleBarrier(els, opts);
 
     err('note: the app is not on screen — trying to dismiss the keyguard');
     this.wakeAndUnlock();
 
     const after = this.captureElements(opts);
     const reason = this.keyguardReason(after);
-    if (!reason) return after;
+    if (!reason) return this.settleBarrier(after, opts);
 
     const lock = this.readLockKind();
     const what =
@@ -800,6 +815,56 @@ export class AdbDriver implements Driver {
     if (this.deviceLocked() === true) return 'locked';
     if (this.readWakefulness() === false) return 'display-off';
     return null;
+  }
+
+  /**
+   * Third net: a tree that holds only a modal barrier is read again before it is believed.
+   *
+   * A sheet's barrier blocks the route beneath it from the accessibility tree, and this
+   * dumper skips the sheet's own contents until they are on screen — so for the length of
+   * the entrance the hierarchy is the barrier and nothing else, exit 0 (issue #131; the
+   * shape is ui/barrier.ts). It lives HERE, not in the pollers, because every consumer
+   * meets it: the auto-wait, the `vk ai` guards, `/v1/elements`, the failure-evidence
+   * capture. One re-read after BARRIER_SETTLE_MS clears the measured case; a run that
+   * outlives that gets the companion connection recycled ONCE (barrierRecycleDue) and is
+   * then returned whatever it holds — a modal the test should have dismissed is still a
+   * modal, and the caller's message names it. Checked on the INTERESTING nodes even under
+   * `--all`, so the two views of one screen cannot disagree about whether it has settled.
+   */
+  private settleBarrier(els: Element[], opts: { all?: boolean }): Element[] {
+    const barrier = this.barrierIn(els, opts);
+    if (!barrier) {
+      this.barrierSince = 0;
+      this.barrierRecycled = false;
+      return els;
+    }
+    if (!this.barrierSince) this.barrierSince = Date.now();
+
+    sleepSync(BARRIER_SETTLE_MS);
+    let settled = this.captureElements(opts);
+    if (!this.barrierIn(settled, opts)) return this.settleBarrier(settled, opts); // resets the run
+
+    if (barrierRecycleDue(Date.now() - this.barrierSince, this.barrierRecycled)) {
+      this.barrierRecycled = true;
+      // ONLY when the companion is what served these reads. A recycle re-acquires the
+      // device's single UiAutomation connection, and a companion that had stood down would
+      // then SIGKILL the very stock dump the next read depends on.
+      const companion = this.hierarchySource().path === 'companion' ? this.companionOrNull() : null;
+      if (companion?.recycleConnection()) {
+        err(
+          `[verikun] the hierarchy has held only a modal barrier (${describeBarrier(barrier)}) for a while; ` +
+            'recycling the companion connection in case it is stale',
+        );
+        settled = this.captureElements(opts);
+        if (!this.barrierIn(settled, opts)) return this.settleBarrier(settled, opts);
+      }
+    }
+    return settled;
+  }
+
+  /** The barrier when `els` is a barrier-only tree, else null. */
+  private barrierIn(els: Element[], opts: { all?: boolean }): Element | null {
+    return modalBarrierOnly(opts.all ? els.filter(isInteresting) : els, this.viewport());
   }
 
   /** `dumpsys trust` reports `deviceLocked=1` while the keyguard is up. `null` = could not tell,

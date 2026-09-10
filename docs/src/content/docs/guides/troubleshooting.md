@@ -156,6 +156,13 @@ A guard that stays blind past its 10s grace **still aborts** with exit `3`. That
 answering "the selector is absent" for a screen nobody could read would skip the guarded body
 and let a guard-heavy plan finish green having executed nothing.
 
+### "The hierarchy held only a modal barrier"
+
+A sheet or dialog is up with nothing addressable inside it — its contents have no semantics,
+or a previous step left a modal open. The moment right after a modal opens or closes is already
+retried for you, so this is a modal that stayed. Dismiss it: tap the barrier (`vk tap desc:Scrim`
+on an English device; `vk ui` shows its label) or `vk key back`.
+
 ### A tap right after `launch` did nothing
 
 The first dump after `launch` can be stale — measured on real hardware. Assert on something

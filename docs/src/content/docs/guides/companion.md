@@ -123,6 +123,7 @@ off the connection first so the fallback actually works. Measured:
 | Companion cannot start | Stock read, one line on stderr — and the device is marked so it is not retried |
 | Output disagrees with the platform | Stock read, retried after a minute |
 | Connection goes stale (null root for a live window) | Connection recycled once, then the stock read |
+| Hierarchy holds only a modal barrier for ~3s | Connection recycled once; the read is then returned as it is |
 
 A fallback read costs about **3.4s** against 2.4s if the companion had never existed — a
 ~1s penalty on the rare failure path, in exchange for ~40ms on every other read.

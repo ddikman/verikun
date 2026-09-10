@@ -10,7 +10,7 @@ import {
   parseState,
   portForSerial,
 } from '../src/companion/protocol';
-import { companionEnabled, nullRootAction } from '../src/companion/manager';
+import { barrierRecycleDue, companionEnabled, nullRootAction } from '../src/companion/manager';
 
 const buf = (s: string) => Buffer.from(s, 'utf8');
 
@@ -197,3 +197,32 @@ test('COMPANION_PROTOCOL matches PROTOCOL_VERSION in the companion source', () =
       'reuse a stale daemon and never push the new jar',
   );
 });
+
+// --- barrierRecycleDue -------------------------------------------------------
+//
+// A tree that holds only a modal barrier (ui/barrier.ts) that outlives the sheet's own
+// entrance by a wide margin is either a modal the test should have dismissed, or the held
+// connection serving a stale answer — the same suspicion as a long run of null roots, on the
+// same clock, with the same one-shot remedy.
+
+test('barrierRecycleDue: a brief barrier is the sheet still arriving, not the companion', () => {
+  assert.equal(barrierRecycleDue(0, false), false);
+  assert.equal(barrierRecycleDue(2999, false), false);
+});
+
+test('barrierRecycleDue: a long run earns one recycle, and only one', () => {
+  assert.equal(barrierRecycleDue(3000, false), true);
+  assert.equal(barrierRecycleDue(60000, false), true);
+  for (const runMs of [3000, 6000, 60000]) {
+    assert.equal(barrierRecycleDue(runMs, true), false, `runMs=${runMs}`);
+  }
+});
+
+test('barrierRecycleDue: shares the null-root wedge threshold, so the two cannot drift', () => {
+  // The first millisecond at which a null root earns a recycle is the first at which a
+  // barrier does — one notion of "long enough to suspect the connection".
+  const firstNullRoot = [...Array(10000).keys()].find((ms) => nullRootAction(ms, false) === 'recycle');
+  const firstBarrier = [...Array(10000).keys()].find((ms) => barrierRecycleDue(ms, false));
+  assert.equal(firstBarrier, firstNullRoot);
+});
+

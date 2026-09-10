@@ -45,6 +45,16 @@ subsumes "`wait --gone` then assert" in one call.
 Handlers that waited append ` (waited 1.2s)` to the confirmation on stderr. The recorded
 step's duration already includes the wait, so the report reflects it with no extra plumbing.
 
+### A modal barrier is not an absence
+
+A sheet's or dialog's full-screen **barrier** blocks everything beneath it from the
+accessibility tree, and the modal's own contents join the tree only once on screen — so right
+after a modal opens or closes, an Android read can hold the barrier and nothing else. verikun
+re-reads such a tree before returning it, from every read, `vk ui` included. A barrier that
+outlives the whole wait is still a miss (exit `1`), and the message says so: *"The hierarchy
+held only a modal barrier (desc="Scrim") for the whole wait…"*. Detection is by shape, not by
+the (localised) label. iOS does not need it.
+
 ### The `wait` command is different
 
 `vk wait` remains the explicit blocking poll, with its own `--timeout` / `--interval` and
