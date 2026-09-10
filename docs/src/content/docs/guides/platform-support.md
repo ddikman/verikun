@@ -231,6 +231,7 @@ first tap rather than half-way through a half-modified device.
 </thead>
 <tbody>
 <tr><td>Auto-wait on selectors</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Modal-barrier settle on reads</td><td>✅</td><td>✅</td><td>⊘ not needed</td><td>⊘ not needed</td></tr>
 <tr><td>Auto-scroll into view</td><td>✅</td><td>✅</td><td>⚠️ orientation-blind</td><td>⚠️ orientation-blind</td></tr>
 <tr><td><code>offscreen</code> marker</td><td>⚠️ rarely fires</td><td>⚠️ rarely fires</td><td>✅</td><td>✅</td></tr>
 <tr><td>Screenshot downscaling</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
@@ -259,6 +260,9 @@ first tap rather than half-way through a half-modified device.
   literal, not approximate. The one asymmetry is remote: over `--server` the claim is held by
   the server process on the host where the devices are. See
   [Device claims](/verikun/reference/device-claims/).
+- **The modal-barrier settle is Android-only.** Its dumper skips a sheet's contents until they
+  are on screen; iOS has them in the first read. See
+  [Auto-wait](/verikun/reference/auto-wait/#a-modal-barrier-is-not-an-absence).
 - **`offscreen` is mostly an iOS signal.** Android's dumper drops nodes it considers invisible
   and clips the rest to the display, so a fully off-screen element is usually not in the tree
   at all. Do not write an Android test that expects `offscreen` to fire — its real failure

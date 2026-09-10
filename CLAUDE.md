@@ -104,6 +104,10 @@ Load-bearing rules, mirroring auto-healing:
 
 Route a new selector-resolving command through these helpers (never a raw `resolveOne`/`matchElements`) so it inherits auto-wait. The `wait` *command* is unrelated: the explicit blocking poll, with its own `--timeout`/`--interval` and `--gone`.
 
+## Modal barriers (`ui/barrier.ts` + `AdbDriver.settleBarrier`)
+
+A modal's barrier blocks everything beneath it from the tree, and Android's dumper skips the sheet's contents until they are on screen, so a read mid-entrance holds only the barrier, exit 0 (issue #131). The shape check is pure and **structural, never by the localised label**; the retry lives in **the Android driver** so every consumer meets it: settle 300ms, re-read once, recycle the companion once at ~3s (only when it served the reads), then return what is there. A persisting barrier is still a miss, named by `BarrierTally`. An empty tree is a different signal. The fixture's `@vk_modal` screen reproduces both halves.
+
 ## Auto scroll-into-view (`ui/viewport.ts` + `cli.ts`)
 
 Same shape as auto-wait, one layer further: the geometry is pure (`ui/viewport.ts` — no device, no time), the orchestration lives in `cli.ts` (`resolveTappable()`), and `ui/selector.ts` is untouched. **Matching does not change** — an out-of-view element still matches and `vk ui` still lists it (marked `offscreen`); only *actions* (`tap`/`text`) move the screen. Inspection never has a side effect.

@@ -114,6 +114,25 @@ export function nullRootAction(runMs: number, alreadyRecycled: boolean): NullRoo
   return runMs < WEDGE_AFTER_MS ? 'propagate' : 'recycle';
 }
 
+/**
+ * Is a run of barrier-only reads (see ui/barrier.ts) long enough to suspect the CONNECTION
+ * rather than the screen?
+ *
+ * Same clock as a null root, for the same reason: a held UiAutomation connection is the one
+ * component that can keep serving a stale answer after the screen has moved on, and a
+ * release + acquire is the one thing measured to clear it (a null root for a live window
+ * on a Pixel 3a; a foreign window, issue #79). A barrier that outlives the sheet's own
+ * entrance by this much is either a modal the test should have dismissed — in which case a
+ * recycle costs ~1s once — or that same staleness wearing a different hierarchy. The report
+ * behind this (issue #131) waited 30s on a painted sheet; it did not reproduce here, so the
+ * recycle is the cheap insurance and not a measured cure.
+ *
+ * Once per run: the recycle IS the test, so a second one would only prove it again.
+ */
+export function barrierRecycleDue(runMs: number, alreadyRecycled: boolean): boolean {
+  return !alreadyRecycled && runMs >= WEDGE_AFTER_MS;
+}
+
 export interface CompanionDeps {
   adb: string;
   serial: string;
@@ -312,8 +331,10 @@ export class Companion {
   }
 
   /** Hand the UiAutomation connection back and take it again. The one thing measured to clear
-   *  a stale connection — it is what the stock path's releaseCompanionOn() does by accident. */
-  private recycleConnection(): boolean {
+   *  a stale connection — it is what the stock path's releaseCompanionOn() does by accident.
+   *  Public for ONE caller besides onNullRoot: the driver's barrier settle (see
+   *  `AdbDriver.settleBarrier`), which has the same suspicion for a different hierarchy. */
+  recycleConnection(): boolean {
     try {
       requestSync(this.port, 'release', 5000);
       requestSync(this.port, 'acquire', 20000);

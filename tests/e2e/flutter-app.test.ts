@@ -13,7 +13,7 @@ import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { APP_ID, byId, isAndroid, labelField, openScreen, ui, unavailable, vk } from './harness';
+import { APP_ID, byId, isAndroid, labelField, openScreen, ui, unavailable, vk, type UiElement } from './harness';
 import type { RunState } from '../../src/run';
 
 // One probe for the whole file: with no device or no fixture, skip with a
@@ -618,6 +618,122 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
         `the read saw none of the dialog's nodes while ${foreground()} owned the foreground ` +
           `(the stock path sees ${dialogNodes({ noCompanion: true })}). This is issue #79.`,
       );
+    });
+  });
+
+  // --- A modal barrier -------------------------------------------------------
+  //
+  // Issue #131. A sheet or dialog puts a full-screen barrier in front of everything and
+  // blocks the route beneath it from the accessibility tree — deliberately, so a screen
+  // reader cannot reach what the user cannot touch. The sheet's own contents join the
+  // tree only once they are on screen, and Android's dumper skips what it considers
+  // invisible, so for the length of the entrance a read holds the barrier and nothing
+  // else — with exit 0, the shape no fallback can fire on.
+  //
+  // Android-only, and measured rather than assumed: on an iPhone 17 Pro simulator the
+  // sheet's controls were in the very first read after the tap, and `idb` reports the
+  // barrier without a tappable type, so vk's structural check never fires there.
+  describe('a modal barrier', { skip: !isAndroid }, () => {
+    /** MaterialLocalizations.scrimLabel in English. The fixture does not localise, so the
+     *  label is stable HERE; vk itself never matches on it (see src/ui/barrier.ts). */
+    const SCRIM = 'Scrim';
+
+    /** Tap "Open sheet", then take the read the report's flow would take: the first one
+     *  after the tap returned. */
+    function openSheetAndRead(): UiElement[] {
+      const opened = vk(['tap', '@vk_sheet_open']);
+      assert.equal(opened.code, 0, opened.stderr);
+      const r = vk(['ui', '--json']);
+      assert.equal(r.code, 0, r.stderr);
+      return JSON.parse(r.stdout) as UiElement[];
+    }
+
+    /** Is the companion serving reads right now? The recycle only happens on that path. */
+    function companionLive(): boolean {
+      const r = vk(['companion', 'status', '--json']);
+      if (r.code !== 0) return false;
+      const s = JSON.parse(r.stdout) as { companion: string; enabled: boolean };
+      return s.enabled && /ready/.test(s.companion);
+    }
+
+    /** Get back to the page whatever is up: the sheet's own Close, else the barrier. */
+    function dismissModals(): void {
+      for (let i = 0; i < 3; i++) {
+        if (byId(ui(), 'vk_modal_result')) return;
+        if (vk(['tap', '@vk_sheet_close', '--no-wait']).code !== 0) vk(['key', 'back']);
+      }
+    }
+
+    before(() => openScreen('modal'));
+    after(dismissModals);
+
+    test('a read that meets the barrier is settled before it is trusted (issue #131)', () => {
+      // The read the report's flow takes, right after the tap returned. Measured on an
+      // SM-A415F and a motorola one, that read lands inside the ~0.3-0.45s window in which
+      // the raw tree holds only the barrier; every first read must hold the sheet's controls
+      // anyway. (On a device where the read lands after the window this passes trivially —
+      // the settle itself is pinned by the last case in this block, whose recycle line can
+      // only be printed from inside it.) The barrier must be in the tree too, or the sheet
+      // was never up and the read proved nothing.
+      for (let cycle = 0; cycle < 3; cycle++) {
+        const els = openSheetAndRead();
+        assert.ok(els.some((e) => e.desc === SCRIM), `cycle ${cycle}: no barrier in the tree — was the sheet open?`);
+        assert.ok(byId(els, 'vk_sheet_confirm'), `cycle ${cycle}: the first read after the tap held only the barrier`);
+        dismissModals();
+      }
+    });
+
+    test("the report's flow: dismiss a dialog over the sheet, then act on the sheet at once", () => {
+      const step = (args: string[]): void => {
+        const r = vk(args);
+        assert.equal(r.code, 0, `${args.join(' ')}: ${r.stdout}${r.stderr}`);
+      };
+      step(['tap', '@vk_sheet_open']);
+      step(['assert', '@vk_sheet_confirm']);
+      step(['tap', '@vk_sheet_dialog']);
+      step(['assert', '@vk_dialog_ok']);
+      step(['tap', '@vk_dialog_ok']);
+      // The step the report issued: the dialog's barrier is still fading out and the
+      // sheet's contents are blocked behind it, so the very next read may hold only
+      // barriers. It must resolve inside the default wait, and act.
+      const found = vk(['find', '@vk_sheet_confirm']);
+      assert.equal(found.code, 0, found.stderr);
+      step(['tap', '@vk_sheet_confirm']);
+      step(['assert', '@vk_modal_result', '--text', 'Result: confirmed', '--wait', '10s']);
+    });
+
+    test('a barrier that outlives the wait is named in the failure, not "never appeared"', () => {
+      // A sheet whose contents are excluded from semantics: the honest version of a modal
+      // the test should have dismissed, and the shape the report waited 30s on. The miss
+      // is still exit 1 (a selector miss, still a heal trigger for `vk ai`), but the
+      // message says what the read saw instead of sending the reader to look for a
+      // missing identifier in app code.
+      const live = companionLive();
+      const opened = vk(['tap', '@vk_sheet_open_blank']);
+      assert.equal(opened.code, 0, opened.stderr);
+      const r = vk(['find', '@vk_sheet_confirm', '--wait', '6s']);
+      assert.equal(r.code, 1, `expected a miss, got exit ${r.code}: ${r.stderr}`);
+      assert.match(r.stderr, /only a modal barrier \(desc="Scrim"\) for the whole wait/);
+      assert.match(r.stderr, /sheet or dialog is up/);
+      if (live) {
+        // The one-shot recycle: after ~3s of barrier-only reads the companion connection
+        // is released and re-acquired ONCE, in case it is serving a stale tree, and said
+        // so. The barrier is still there afterwards — the sheet really is up — so the
+        // miss stands.
+        assert.match(r.stderr, /recycling the companion connection/);
+        assert.equal(r.stderr.match(/recycling the companion connection/g)?.length, 1, 'recycled more than once');
+      }
+      // `assert` says the same thing in its reason, so the run report carries it too.
+      const a = vk(['assert', '@vk_sheet_confirm', '--wait', '1s']);
+      assert.equal(a.code, 1);
+      assert.match(a.stdout, /FAIL @vk_sheet_confirm — not found\. The hierarchy held only a modal barrier/);
+
+      // Dismiss it the way a test should dismiss a modal it did not mean to leave up: by
+      // tapping the barrier — it IS a tap target, which is what makes it detectable.
+      const dismissed = vk(['tap', `desc:${SCRIM}`]);
+      assert.equal(dismissed.code, 0, `tapping the barrier: ${dismissed.stdout}${dismissed.stderr}`);
+      const closed = vk(['assert', '@vk_modal_result', '--text', 'Result: blank closed', '--wait', '10s']);
+      assert.equal(closed.code, 0, `${closed.stdout}${closed.stderr}`);
     });
   });
 

@@ -281,6 +281,17 @@ specific prior `ui` dump and a re-capture shifts indices; `assert` polls the who
 so `--gone` waits for disappearance. Route a new selector-resolving command through
 `resolveOneWaiting()` / `matchWaiting()`, never a raw `resolveOne` / `matchElements`.
 
+## A barrier-only tree is a read to repeat, not an absence
+
+A tree holding only a modal barrier (`ui/barrier.ts`: a clickable, id-less, text-less node
+covering a large part of the screen, nothing readable beside it) is re-read after a settle
+**in the Android driver**, so every consumer meets it ([#131]). Detection is by shape, never by
+the localised label; an empty tree is a different signal. A barrier that persists is returned
+and **named** in the miss, after one companion recycle at ~3s — only when the companion served
+the reads, since a recycle would SIGKILL a stock dump.
+
+[#131]: https://github.com/ddikman/verikun/issues/131
+
 ## State modifiers are exactly one attribute
 
 Each state predicate tests one attribute and nothing else — strengthening one with a conjunct

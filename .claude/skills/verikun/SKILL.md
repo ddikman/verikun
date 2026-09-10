@@ -233,6 +233,9 @@ round-trips and tokens.
   away (the elements are already there); add `--index N` or refine the selector.
 - **`vk assert <sel> --gone` waits for *disappearance*** — it polls until the
   element is absent, so you don't need a separate `wait --gone`.
+- **A modal's barrier is not an absence.** Reads settle through a sheet or dialog opening or
+  closing on their own. A miss saying *the hierarchy held only a modal barrier* means a modal
+  is still up — dismiss it (`vk tap desc:Scrim`, or `vk key back`); the selector is fine.
 
 When you *do* want to block on a condition as an explicit step (e.g. a long
 network wait beyond 5s), the `wait` command is still there with its own

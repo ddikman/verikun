@@ -35,6 +35,7 @@ Each screen earns its place by pinning a specific part of vk's contract:
 | `@vk_state` | `vk_mode_photo`, `vk_mode_video`, `vk_mode_status`, `vk_focus_field` | `selected` / `focused` and their `--not-` forms, and the shared-handler toggle that makes them necessary |
 | `@vk_device` | `vk_dev_brightness`, `vk_dev_orientation`, `vk_dev_textscale`, `vk_dev_sample` | `vk device set` — every line is read from `MediaQuery`, i.e. from the platform, so it changes only when the DEVICE changes |
 | `@vk_permission` | `vk_perm_mic`, `vk_perm_camera`, `vk_perm_status`, `vk_perm_dialog` | A window this app does **not** own — the runtime-permission dialog, drawn by `com.google.android.permissioncontroller`. Android only |
+| `@vk_modal` | `vk_sheet_open`, `vk_sheet_open_blank`, `vk_sheet_confirm`, `vk_sheet_dialog`, `vk_dialog_ok`, `vk_sheet_close`, `vk_modal_result` | A modal barrier — a sheet, a dialog over it, and a sheet whose contents never reach the tree |
 
 `@vk_device` is the surface that makes device settings *assertable* rather than merely
 screenshot-able. Without it a `device set dark=on` test could only prove the setting
@@ -148,11 +149,11 @@ exception, and it is there deliberately to test dumping against an animating UI.
 
 Everything here was observed by running `vk` against this app. Verified on a
 **Pixel 3a (Android 12)**, a **Samsung SM-A415F (Android 12, Swedish locale)**, a
-**Pixel 6 emulator (Android 14)** and an **iPhone 17 Pro simulator (iOS 26.5)**,
-with Flutter 3.44.8.
+**motorola one (Android 10)**, a **Pixel 6 emulator (Android 14)** and an
+**iPhone 17 Pro simulator (iOS 26.5)**, with Flutter 3.44.8.
 
-Facts 6, 9, 10, 11 and 17 are `vk` gaps rather than fixture quirks, and each links
-to the issue tracking it. Fact 12 is a platform limit rather than a `vk` gap —
+Facts 6, 9, 10, 11, 17 and 18 are `vk` gaps rather than fixture quirks, and each
+links to the issue tracking it. Fact 12 is a platform limit rather than a `vk` gap —
 there is nothing for `vk` to read.
 
 ### 1. Flutter emits no semantics tree at all unless you ask for it
@@ -527,3 +528,22 @@ boundary is at this same Android 12→14 split, which is suggestive but not evid
 The practical consequence is the one the issue names, and it is worse than it looks: a
 suite of such flows can be green on CI purely because the runner is an emulator that
 does not have the bug, and hang on the physical device it was written for.
+
+### 18. A modal barrier is all a read sees while a sheet is arriving
+
+> Tracked in [#131](https://github.com/ddikman/verikun/issues/131); fixed in 0.26.2.
+
+`@vk_modal` exists to measure this. Flutter's `ModalBarrier` drops the route beneath it from
+the tree, and the sheet's contents join it only once on screen. The read issued the moment
+`vk tap @vk_sheet_open` returned, companion on, on both physical phones:
+
+```
++325ms   [android:id/content | Scrim]                                          <- exit 0
++1.4s    [android:id/content | vk_sheet_title | vk_sheet_confirm | … | Scrim]
+```
+
+The label is localised, so `vk` detects the barrier by shape; the scrim is clipped to the area
+above a landed sheet (`[0,0][1080,1620]`), so "covers the screen" is the wrong criterion; the
+stock read (~2s) never lands in the window, and a 3s `sheetAnimationStyle` does not widen it.
+`@vk_sheet_open_blank` (`ExcludeSemantics`) keeps the barrier up to pin the failure message and
+the one-shot companion recycle. The report's 30s stall did not reproduce; iOS is unaffected.

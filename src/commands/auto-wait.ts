@@ -12,6 +12,7 @@
 import { Flags, flagBool, flagNum } from '../args';
 import { CliError, NoWindowError, SelectorNotFoundError } from '../errors';
 import type { Element } from '../types';
+import { barrierClause, modalBarrierOnly } from '../ui/barrier';
 import { MatchResult, MatchTier, Selector, matchElements, resolveOne } from '../ui/selector';
 import { sleep } from '../wait';
 import type { Ctx } from './context';
@@ -70,14 +71,51 @@ export function readForPoll(ctx: Ctx, opts: { all?: boolean } = {}): Element[] {
 }
 
 /**
- * matchElements with auto-wait: re-capture + re-match until at least one element
- * matches or the window elapses. Returns the final result either way (empty on miss).
+ * Keeps track of whether the snapshots a poll loop read were barrier-only trees (see
+ * ui/barrier.ts), so the failure at the end can say so instead of "never appeared".
+ *
+ * A sheet's barrier that outlives the whole wait is the report behind issue #131: the
+ * step waited 30s on a painted sheet and the message sent the reader looking for a missing
+ * identifier in app code. Naming the barrier is the cheap half of that fix, and it belongs
+ * to whoever owns the wait — this is the only layer that saw every read.
  */
-export async function matchWaiting(ctx: Ctx, sel: Selector, opts: { all?: boolean } = {}): Promise<MatchResult> {
+export class BarrierTally {
+  private reads = 0;
+  private barrierReads = 0;
+  private last: Element | null = null;
+
+  constructor(private readonly ctx: Ctx) {}
+
+  /** Record one snapshot. Returns it, so it can wrap a read in place. */
+  note(els: Element[]): Element[] {
+    this.reads++;
+    this.last = modalBarrierOnly(els, this.ctx.driver.viewport());
+    if (this.last) this.barrierReads++;
+    return els;
+  }
+
+  /** The clause to append to a miss, or '' when the last read was not barrier-only. */
+  clause(): string {
+    if (!this.last) return '';
+    return barrierClause(this.last, this.barrierReads === this.reads);
+  }
+}
+
+/**
+ * matchElements with auto-wait: re-capture + re-match until at least one element
+ * matches or the window elapses. Returns the final result either way (empty on miss),
+ * plus the barrier tally so the caller's miss message can name a barrier.
+ */
+export async function matchWaiting(
+  ctx: Ctx,
+  sel: Selector,
+  opts: { all?: boolean } = {},
+): Promise<MatchResult & { barrier: BarrierTally }> {
   const deadline = Date.now() + waitWindowMs(ctx.flags);
+  const barrier = new BarrierTally(ctx);
   for (;;) {
-    const res = matchElements(readForPoll(ctx, opts), sel);
-    if (res.matches.length > 0 || Date.now() >= deadline) return res;
+    const res = matchElements(barrier.note(readForPoll(ctx, opts)), sel);
+    if (res.matches.length > 0 || Date.now() >= deadline) return { ...res, barrier };
     await sleep(pollStep(ctx.flags, deadline));
   }
 }
@@ -95,8 +133,9 @@ export async function resolveOneWaiting(
   const windowMs = waitWindowMs(ctx.flags);
   const start = Date.now();
   const deadline = start + windowMs;
+  const barrier = new BarrierTally(ctx);
   for (;;) {
-    const els = readForPoll(ctx, opts);
+    const els = barrier.note(readForPoll(ctx, opts));
     if (matchElements(els, sel).matches.length >= 1) {
       const { element, tier } = resolveOne(els, sel); // 1 → resolved; >1 → throws ambiguity
       // The snapshot rides along: scroll-into-view needs the scrollable containers
@@ -107,7 +146,7 @@ export async function resolveOneWaiting(
     if (Date.now() >= deadline) {
       const waited = windowMs > 0 ? ` after ${(windowMs / 1000).toFixed(1)}s` : '';
       throw new SelectorNotFoundError(
-        `No element matched selector '${sel.raw}'${waited}. Run \`verikun ui\` to inspect the current screen.`,
+        `No element matched selector '${sel.raw}'${waited}.${barrier.clause()} Run \`verikun ui\` to inspect the current screen.`,
       );
     }
     await sleep(pollStep(ctx.flags, deadline));

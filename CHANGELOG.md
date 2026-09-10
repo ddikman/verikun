@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.26.2] - 2026-09-10
+
+Android hierarchy reads no longer mistake a sheet's or dialog's barrier for an empty screen.
+
+### Fixed
+- **Android hierarchy reads** re-read a tree holding only a sheet's or dialog's barrier before
+  trusting it, `vk ui` included; a barrier that persists still misses. ([#131])
+
+### Changed
+- **Selector misses** (`tap`, `find`, `assert`, `wait`) name a modal barrier that was all the read
+  could see, instead of "never appeared". ([#131])
+
+[#131]: https://github.com/ddikman/verikun/issues/131
+
 ## [0.26.1] - 2026-09-07
 
 Fixes a `vk ai` run dying when the app is redrawing at the moment a guard checks the screen.
