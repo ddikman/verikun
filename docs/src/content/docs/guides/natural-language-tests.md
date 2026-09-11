@@ -100,6 +100,12 @@ Repeat until the home tab (`@home`) is showing, tapping past any onboarding card
 - **A fragment holds steps, not a whole test.** It is compiled knowing it is one section of
   a larger test, so it neither re-launches the app nor adds a teardown the surrounding test
   already owns.
+- **A title or a description is context, not a chunk.** Prose that states no step — a heading,
+  a sentence saying what the test checks — is folded into the chunk of its own file that states
+  the steps it describes, and is never compiled on its own. Without that, a description written
+  above the first `@include` became a chunk, and a chunk is a whole prompt: the summary was
+  compiled into a plan of its own and those invented steps ran before the preamble. Write the
+  description wherever reads best.
 
 `@include` inside a fenced code block is left alone — that is documentation, not a directive.
 
@@ -212,7 +218,8 @@ The repository ships two working examples that run against a Flutter fixture app
 - [`example/example-test-devicestate.md`](https://github.com/ddikman/verikun/blob/main/example/example-test-devicestate.md)
   — sets dark mode and a font scale, asserts the app *observed* the change, then resets.
 
-Both open with `@include _launch-to-home.md`, the launch-and-confirm-home block they share.
+Both share `@include _launch-to-home.md`, the launch-and-confirm-home block, compiled once
+for the pair.
 
 Run them as a suite:
 

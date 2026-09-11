@@ -271,7 +271,9 @@ Keyed by the test prose + package + app build, gated by a **compiler fingerprint
   starting point, provided it covers its own prose.
 - A test assembled from [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
   fragments is keyed on the **resolved** text, and each chunk is additionally cached under
-  its own text — so shared prose is compiled once across a suite.
+  its own text — so shared prose is compiled once across a suite. Prose that states no step is
+  not a chunk of its own; it is folded into the chunk of its file that states the steps it
+  describes.
 - **Concurrent runs sharing one cache serialise per key.** A [parallel suite](/verikun/guides/suites/)
   is one process per test, so on a cold cache every lane would otherwise miss the same
   fragment at the same instant and compile its own. The first lane compiles; the rest wait

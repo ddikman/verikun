@@ -144,6 +144,15 @@ the model turned one such summary into three steps the test never asked for. The
 chunk is a section, that setup and teardown belong to its neighbours, and that emitting no
 steps is a valid answer. It is folded into the compiler fingerprint like the other two.
 
+The note is the **second** line of defence, not the only one. Whether a summary reads as a spec
+is a model judgement, and it went the wrong way on 5 of 14 tests in one suite run — producing a
+confident, entirely fabricated plan spliced ahead of the launch. So `include.ts` no longer hands
+the model such a chunk at all: prose that states no step is folded into the chunk of its own file
+that states the steps it describes. The classifier there asks for *positive evidence* of a step
+(a list item of any kind, or a known verb anywhere in a line) rather than reusing `lint.ts`'s
+instruction count, whose deliberate undercount is safe as a coverage floor and would be a moved
+step here.
+
 `compileUserPrompt` in `provider.ts` assembles that user message for all four providers, which
 differ only in how they send it.
 
