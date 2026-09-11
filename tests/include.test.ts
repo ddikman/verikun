@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { resolveIncludes, hasInstruction, segmentLabel } from '../src/agent/include';
+import { resolveIncludes, hasInstruction, statesInstruction, segmentLabel } from '../src/agent/include';
 import { CliError } from '../src/errors';
 
 // A fake filesystem: `@include` resolution is pure path arithmetic plus one read, so the
@@ -129,6 +129,130 @@ test('hasInstruction: anything with a sentence in it IS compiled — skipping pr
   assert.equal(hasInstruction('This test signs in and buys a widget.\n'), true);
 });
 
+// --- descriptions (prose that states no step is folded, never compiled alone) #133 -------
+
+test('statesInstruction: a title and a summary of what the test checks state no step', () => {
+  assert.equal(statesInstruction('# Device-state smoke test\n'), false);
+  assert.equal(statesInstruction('Checks that the settings screen opens and closes cleanly.\n'), false);
+  assert.equal(statesInstruction('This test signs in, sends a message, then ends and returns home.\n'), false);
+});
+
+test('statesInstruction: a list item of ANY kind, or a verb anywhere in the line, IS a step', () => {
+  // Each of these scores ZERO with lint.ts's instructionUnits, whose undercount is safe where
+  // it is used and would be a moved step here. That is why this asks for positive evidence.
+  assert.equal(statesInstruction('- Launch the app with its data cleared.\n'), true);
+  assert.equal(statesInstruction('1. Tap Login\n'), true);
+  assert.equal(statesInstruction('First, launch the app.\n'), true);
+  assert.equal(statesInstruction('The fixture app is `x`. Open it and wait for the home screen.\n'), true);
+});
+
+test('statesInstruction: a fenced block is shown, not performed', () => {
+  assert.equal(statesInstruction('Checks the output.\n\n```\nvk tap @login\n```\n'), false);
+});
+
+test('resolveIncludes: a description above an include folds into the file’s own next chunk', () => {
+  const { segments } = resolveIncludes(
+    't.md',
+    fs({
+      't.md': '# Buy a widget\n\nChecks that a widget can be bought.\n\n@include _p.md\n\n1. Tap Buy\n',
+      '_p.md': '1. Launch\n',
+    }),
+  );
+  assert.deepEqual(
+    segments.map((s) => [segmentLabel(s), s.text]),
+    [
+      ['_p.md:1', '1. Launch\n'],
+      ['t.md:1', '# Buy a widget\n\nChecks that a widget can be bought.\n\n1. Tap Buy\n'],
+    ],
+  );
+});
+
+test('resolveIncludes: folding a description leaves the fragment above it untouched', () => {
+  // The reason the host must be the SAME FILE: a fragment shared by nine tests keeps ONE cache
+  // key only while its text is byte-identical in all nine.
+  const withDesc = resolveIncludes(
+    'a.md',
+    fs({ 'a.md': 'Checks the widget.\n@include _p.md\n1. Tap Buy\n', '_p.md': '1. Launch\n' }),
+  );
+  const without = resolveIncludes('b.md', fs({ 'b.md': '@include _p.md\n1. Tap Buy\n', '_p.md': '1. Launch\n' }));
+  assert.equal(withDesc.segments[0].text, without.segments[0].text);
+});
+
+test('resolveIncludes: a description with no later chunk of its own file folds backward', () => {
+  const { segments } = resolveIncludes(
+    't.md',
+    fs({ 't.md': '1. Tap Buy\n@include _p.md\nChecks the receipt is shown.\n', '_p.md': '1. Launch\n' }),
+  );
+  assert.deepEqual(
+    segments.map((s) => [segmentLabel(s), s.text]),
+    [
+      ['t.md:1', '1. Tap Buy\nChecks the receipt is shown.\n'],
+      ['_p.md:1', '1. Launch\n'],
+    ],
+  );
+});
+
+test('resolveIncludes: a CHAIN of descriptions keeps the order the author wrote them', () => {
+  const { segments } = resolveIncludes(
+    't.md',
+    fs({
+      't.md': 'Alpha.\n@include _p.md\nBravo.\n@include _q.md\n1. Tap Buy\nCharlie.\n@include _r.md\nDelta.\n',
+      '_p.md': '1. One\n',
+      '_q.md': '1. Two\n',
+      '_r.md': '1. Three\n',
+    }),
+  );
+  const own = segments.find((s) => s.source.endsWith('t.md'));
+  assert.equal(own?.text, 'Alpha.\nBravo.\n1. Tap Buy\nCharlie.\nDelta.\n');
+  assert.equal(segmentLabel(own!), 't.md:1');
+});
+
+test('resolveIncludes: a file that states no step anywhere keeps its description as it was', () => {
+  // No third disposition: a chunk this pass cannot place is left exactly where it was, rather
+  // than dropped. Prose it discarded would be prose the model never sees.
+  const { segments } = resolveIncludes(
+    't.md',
+    fs({ 't.md': '# Smoke\n\nChecks the whole flow.\n\n@include _p.md\n', '_p.md': '1. Launch\n' }),
+  );
+  assert.deepEqual(segments.map((s) => [segmentLabel(s), s.compilable]), [['t.md:1', true], ['_p.md:1', true]]);
+});
+
+test('resolveIncludes: a fragment included twice stays byte-identical in both places', () => {
+  // The reason a chunk carries an EXPANSION id and not just a path: matching on `source` alone
+  // would let the first copy's trailing description reach across into the second copy.
+  const { segments } = resolveIncludes(
+    't.md',
+    fs({
+      't.md': '@include _p.md\n1. Middle\n@include _p.md\n',
+      '_p.md': '1. Launch\n@include _q.md\nChecks it landed.\n',
+      '_q.md': '1. Sign in\n',
+    }),
+  );
+  const copies = segments.filter((s) => s.source.endsWith('_p.md'));
+  assert.equal(copies.length, 2);
+  assert.equal(copies[0].text, copies[1].text);
+  assert.equal(copies[0].text, '1. Launch\nChecks it landed.\n');
+});
+
+test('resolveIncludes: a headings-only chunk is still skipped, not folded', () => {
+  const { segments } = resolveIncludes(
+    't.md',
+    fs({ 't.md': '# Title\n\n@include _p.md\n\n1. Tap Buy\n', '_p.md': '1. Launch\n' }),
+  );
+  assert.deepEqual(
+    segments.map((s) => [segmentLabel(s), s.compilable]),
+    [['t.md:1', false], ['_p.md:1', true], ['t.md:5', true]],
+  );
+});
+
+test('resolveIncludes: folding never changes the resolved text, which is the cache key', () => {
+  const { nl } = resolveIncludes(
+    't.md',
+    fs({ 't.md': 'Checks a widget can be bought.\n@include _p.md\n1. Tap Buy\n', '_p.md': '1. Launch\n' }),
+  );
+  assert.equal(nl, 'Checks a widget can be bought.\n1. Launch\n1. Tap Buy\n');
+});
+
 // --- against a real filesystem ---------------------------------------------
 
 test('resolveIncludes: reads real files, relative to the including file', () => {
@@ -143,4 +267,24 @@ test('resolveIncludes: reads real files, relative to the including file', () => 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test('resolveIncludes: the shipped device-state example no longer compiles its summary alone (#133)', () => {
+  // The repo's own instance of the reported shape — a title and a summary above the first
+  // `@include`. Kept as written, so this stays a live fixture rather than a synthetic one.
+  const { segments } = resolveIncludes('example/example-test-devicestate.md');
+  assert.equal(segments.length, 2, 'the title and summary folded into the test’s own chunk');
+  assert.match(segments[0].source, /_launch-to-home\.md$/);
+  assert.equal(segmentLabel(segments[1]), 'example/example-test-devicestate.md:1');
+  assert.ok(
+    segments[1].text.startsWith('# Device-state smoke test'),
+    'the summary is context for the steps it describes, not a test of its own',
+  );
+});
+
+test('resolveIncludes: the login example, which never had the broken shape, is unchanged', () => {
+  const { segments } = resolveIncludes('example/example-test.md');
+  assert.deepEqual(segments.map((s) => s.compilable), [false, true, true]);
+  assert.equal(segmentLabel(segments[0]), 'example/example-test.md:1');
 });

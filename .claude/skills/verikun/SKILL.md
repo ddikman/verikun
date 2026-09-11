@@ -386,7 +386,8 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   including file; a fragment may include another. Name a fragment `_something.md` — `vk suite`
   skips `_`-prefixed files, so a fragment never runs as a test of its own. Each chunk compiles
   and caches separately, so editing a shared fragment recompiles the fragment, not every test
-  that uses it.
+  that uses it. A title or a description states no step, so it is folded into the chunk of its
+  own file that does, rather than compiled as a test of its own — put it wherever reads best.
 - The plan expresses **conditions** (`if-present`, for optional interstitials like a
   permission dialog) and **bounded loops** (`repeat … until`, e.g. scroll-until) —
   control flow `vk batch` cannot, so a flaky popup or a scroll-to-find no longer breaks

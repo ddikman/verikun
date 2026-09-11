@@ -96,8 +96,15 @@ const FENCE_RE = /^\s*(```|~~~)/;
  * Verbs that open an instruction. A CLOSED set, and a tight one — every entry here raises
  * the expected plan size, so a loose entry costs a false rejection while a missing one only
  * costs detection. The floor below is generous enough to absorb the resulting undercount.
+ *
+ * Exported for ONE other consumer, `agent/include.ts`, which asks a different question of the
+ * same vocabulary: not "how many steps does this prose state" but "does it state one at all".
+ * Shared rather than copied for the reason `pidAlive` is shared with `agent/plan-lock.ts` — a
+ * second list of verbs drifts from this one invisibly. Note that it is NOT part of
+ * `COMPILER_FINGERPRINT`, so an edit here moves a chunk boundary as well as a lint threshold;
+ * the version bump such an edit already requires is what rotates the fingerprint.
  */
-const IMPERATIVES: ReadonlySet<string> = new Set([
+export const IMPERATIVES: ReadonlySet<string> = new Set([
   'tap', 'press', 'click', 'type', 'enter', 'fill',
   'launch', 'open', 'start', 'restart', 'relaunch', 'stop', 'close',
   'confirm', 'verify', 'assert', 'check', 'ensure',

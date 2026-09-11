@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.26.3] - 2026-09-11
+
+A `vk ai` test's description is no longer compiled into steps of its own.
+
+### Fixed
+- **`vk ai`** no longer compiles a title or description above an `@include` as a test of its
+  own, inventing steps that then ran first. ([#133])
+
+[#133]: https://github.com/ddikman/verikun/issues/133
+
 ## [0.26.2] - 2026-09-10
 
 Android hierarchy reads no longer mistake a sheet's or dialog's barrier for an empty screen.

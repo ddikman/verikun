@@ -5,7 +5,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compileFromSegments, obtainPlan, assertBudgetForCompile, cachedSegment } from '../src/cli';
 import { CostTracker, Price } from '../src/agent/cost';
-import { Segment } from '../src/agent/include';
+import { Segment, resolveIncludes } from '../src/agent/include';
 import { CacheKeyInput, planKey, writePlan } from '../src/agent/cache';
 import { AgentProvider, CompileInput, CompileResult, RepairResult } from '../src/agent/provider';
 import { InvalidPlanError, Plan, LeafStep } from '../src/agent/ir';
@@ -85,6 +85,25 @@ test('compileFromSegments: concatenates each segment’s steps in file order', a
   const provider = new FakeProvider({ 'launch it': planOf('launch'), 'tap it': planOf('tap', 'assert') });
   const plan = await compileFromSegments([seg('launch it'), seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
   assert.deepEqual(plan?.steps.map((s) => (s as LeafStep).command), ['launch', 'tap', 'assert']);
+});
+
+test('a description above an @include costs no model call and runs after the fragment (#133)', async () => {
+  // End to end over the reported shape: resolveIncludes decides the chunks, compileFromSegments
+  // compiles them. FakeProvider has no answer for the summary, so if it were ever sent as a
+  // section of its own this throws — which is exactly what used to happen, and the model
+  // answered with a fabricated plan spliced ahead of the launch.
+  writeFileSync(join(dir, '_p.md'), '1. Launch the app\n');
+  writeFileSync(
+    join(dir, 't.md'),
+    '# Settings smoke test\n\nChecks that the settings screen opens and closes cleanly.\n\n@include _p.md\n\n1. Tap Settings\n',
+  );
+  const own = '# Settings smoke test\n\nChecks that the settings screen opens and closes cleanly.\n\n1. Tap Settings\n';
+  const provider = new FakeProvider({ '1. Launch the app\n': planOf('launch'), [own]: planOf('tap') });
+  const { segments } = resolveIncludes('t.md');
+
+  const plan = await compileFromSegments(segments, KEY, opts(), new CostTracker(PRICE), provider);
+  assert.deepEqual(provider.seen, ['1. Launch the app\n', own], 'two chunks, and the summary was never one');
+  assert.deepEqual(plan?.steps.map((x) => (x as LeafStep).command), ['launch', 'tap'], 'the launch still runs first');
 });
 
 test('compileFromSegments: a headings-only segment is never handed to the model', async () => {
