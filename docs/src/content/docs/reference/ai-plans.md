@@ -56,8 +56,8 @@ Commands the grammar permits:
 | `screenshot` | — |
 | `device` | subcommand is the **first positional**: `set` / `get` / `reset` / `caps` |
 
-A hallucinated command is **rejected, never run** — `validateNode` is the grammar gate
-applied to both compile output and every model repair.
+A command outside this table is **rejected, never run** — the same gate is applied to the
+compile output and to every model repair.
 
 ## 2. `if-present`
 
@@ -126,28 +126,24 @@ rather than typing an empty string.
 
 Control nodes nest **one level**. The exception: `if-present` and `while-present` may go one
 deeper, so `repeat { when { while-present { … } } }` and `repeat { when { if-present { … } } }`
-are legal. Three levels is not.
-
-This shallowness is deliberate — it keeps the structured-output JSON schema
-**non-recursive**, which the model APIs require. See
+are legal. Three levels is not. Why the IR is kept shallow:
 [Plan IR & the replay engine](/verikun/internals/plan-ir-and-engine/).
 
 ## State modifiers on a control node
 
 A leaf writes a state modifier as a flag. A **control node** has nowhere to hang a flag, so
-it appends the modifier to the selector string:
+it appends the modifier to the selector string — which is exactly where a toggle guard
+belongs:
 
 ```json
 { "type": "if-present", "selector": "@mode_video --not-selected", "body": [ … ] }
 ```
 
-This is exactly where a toggle guard belongs. See
-[Selectors](/verikun/reference/selectors/#state-modifiers).
+See [Selectors](/verikun/reference/selectors/#state-modifiers).
 
 ## Rules the compiler follows
 
-These are in the grammar because getting them wrong produces a **false green**, which is
-worse than a failure:
+Each of these closes a way for a test to pass without doing what it says:
 
 - Use `--enabled` when tapping a button the app disables until a form is valid.
 - Guard shared-handler pickers and toggles with `--not-selected` / `--not-checked`. An
@@ -159,35 +155,29 @@ worse than a failure:
 - Translate literally and minimally. The one exception is `screenshot`, inserted liberally —
   free on replay, and it never affects the result.
 
+The grammar does not yet teach `--index`, so prose like "tap the first Continue" has no
+compiled form; name a unique id or text instead
+([#37](https://github.com/ddikman/verikun/issues/37)).
+
 ## The compile must cover the test
 
-Compilation is nondeterministic, and its worst outcome is not a bad plan — it is a **short**
-one. A plan that stops part-way through the test asserts nothing after that point, so it
-fails nothing: it runs green, is cached as a pass, and replays against every later build. A
-test exercising none of its subject then reports success.
-
-So a fresh compile is checked against the prose it came from, on two independent signals:
+A compile can come out **short**, and a plan that stops part-way through the test asserts
+nothing after that point: it would run green, be cached as a pass, and replay against every
+later build. So every fresh compile is checked against the prose it came from, on two
+signals:
 
 - **size** — the plan has far fewer steps than the test states instructions
 - **the ending** — the plan never references what the test's closing instructions name
 
-Either one buys **one guided recompile**, with the specific finding handed back to the model.
-A plan that still trips a check after that is **rejected**: `vk ai` exits `1`, the plan is
-**not cached**, and rerunning compiles again rather than replaying it. Under `vk suite` the
-test goes red; `--retries` recompiles, so a retry can only pass by producing a plan that does
-cover the test.
+Either one buys **one guided recompile**, with the finding handed back to the model. A plan
+that still trips a check is **rejected**: `vk ai` exits `1`, the plan is **not cached**, and
+the next run compiles again. Under `vk suite` the test goes red, and `--retries` recompiles.
+The same check disqualifies a **seed**: a cached plan that does not cover its own prose is not
+offered to the model as a starting point.
 
-The same check disqualifies a **seed**: a cached plan that does not cover its own prose is
-not offered to the model as a starting point, so one bad compile cannot propagate.
-
-Both checks are deliberately generous — a wrongly rejected test is a worse defect than the
-truncation it guards against. Set `VERIKUN_NO_COMPILE_CHECK=1` to turn them off entirely and
-restore the previous behaviour.
-
-To see a compile's size directly, `vk ai` prints `compiled N top-level step(s)` on stderr,
-`vk ai --json` reports it as `planSteps`, and a suite manifest row carries the same number.
-Unlike `steps`, which counts what *executed*, it is comparable across a pass and a failure —
-which is what makes an outlier visible when comparing runs of the same unchanged test.
+`VERIKUN_NO_COMPILE_CHECK=1` turns the check off. To see a compile's size, `vk ai` prints
+`compiled N top-level step(s)` on stderr; `--json` reports it as `planSteps`, and so does the
+suite manifest.
 
 ## Repair
 
@@ -200,10 +190,7 @@ decision:
 | `give_up` | Return a reason. The test **fails** — which is the correct result. |
 
 "Same purpose" means the same user-facing action, not merely "a tappable element exists".
-Without the `give_up` path, a too-kind fallback tap onto an unrelated screen would pass as a
-false green.
-
-Every repair goes through the same `validateNode` gate as the original compile.
+Every repair goes through the same grammar gate as the original compile.
 
 ## Models
 
@@ -225,24 +212,20 @@ derived from the model name.
 
 An unknown `--model` exits `2` with the allowlist, rather than a raw 404 from a provider.
 
+`gpt-4.1` is the one non-reasoning model in the list: `--effort` has no effect on it, and its
+cache reads bill at a different multiplier (see [Cost & budget](/verikun/reference/cost/)).
+
 ### The CLI backends
 
 `codex-cli` and `cursor-cli` shell out to an already-logged-in coding-agent CLI, so **you
 need no API key at all** — spend goes to your existing ChatGPT or Cursor subscription.
 
-Consequences:
-
 - Their reported cost is `$0`, so `--max-cost-usd` and `--cost-override` are **inert
   no-ops**. The run is bounded by the repair cap and `--timeout` instead.
-- Each CLI picks its own underlying model.
+- Each CLI picks its own underlying model; there is no way to name one yet
+  ([#24](https://github.com/ddikman/verikun/issues/24)).
 - They run **read-only in a neutral temp directory**, so they never touch your working tree.
-- They are gated by the same `parsePlan` / `validateNode` checks as every other provider.
-
-### Notes on `gpt-4.1`
-
-It is the one **non-reasoning** model in the registry, and cheaper than the default. Two
-consequences, both handled rather than papered over: it takes no reasoning effort, and it
-bills cache reads at a different multiplier from every other model here.
+- Their output is gated by the same plan parser and grammar checks as every other provider.
 
 ## Cost
 
@@ -258,28 +241,27 @@ on a repeat run means the plan is not being cached — see
 
 ## The plan cache
 
-Keyed by the test prose + package + app build, gated by a **compiler fingerprint**
-(verikun's version plus the grammar, repair and section prompt text).
+Plans live in `./.verikun/plans/`, keyed by the test prose + package + app build + platform,
+and gated by a **compiler fingerprint** (verikun's version plus the grammar, repair and
+section prompt text).
 
-- A fingerprint mismatch is treated as a **miss**, so updating verikun recompiles rather than
-  replaying a plan an older compiler produced.
+- A fingerprint mismatch is a **miss**, so updating verikun recompiles rather than replaying
+  a plan an older compiler produced.
 - The compile is cached immediately, so an unchanged test never recompiles — unless it was
   [rejected for not covering the test](#the-compile-must-cover-the-test), which is never
   written.
 - A green run re-persists the healed plan, so the next run is free again.
-- Seeding from a prior build ignores the fingerprint — an older plan is still a fine
-  starting point, provided it covers its own prose.
+- **Seeding** from a prior build ignores the fingerprint — an older plan is still a fine
+  starting point, provided it covers its own prose. A seed never crosses platforms.
 - A test assembled from [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
   fragments is keyed on the **resolved** text, and each chunk is additionally cached under
-  its own text — so shared prose is compiled once across a suite. Prose that states no step is
-  not a chunk of its own; it is folded into the chunk of its file that states the steps it
-  describes.
-- **Concurrent runs sharing one cache serialise per key.** A [parallel suite](/verikun/guides/suites/)
-  is one process per test, so on a cold cache every lane would otherwise miss the same
-  fragment at the same instant and compile its own. The first lane compiles; the rest wait
-  and take its result, printing `compiled by a concurrent run (waited 0.5s)`. A hit takes no
-  lock at all. `VERIKUN_NO_PLAN_LOCK=1` turns it off.
-- `--recompile` still takes the lock, and still ignores anything already on disk — but it
-  accepts an entry a run racing this one wrote, so N lanes do not each pay for one fragment.
+  its own text — so shared prose is compiled once across a suite. Prose that states no step
+  (a title, a summary) is folded into the chunk of its own file that states the steps.
+- Concurrent runs that miss the same key **serialise**: the first compiles, the rest wait and
+  take its result, printing `compiled by a concurrent run (waited 0.5s)`. A hit takes no lock.
+  `VERIKUN_NO_PLAN_LOCK=1` turns this off.
+- `--recompile` (alias `--no-cache`) ignores what is on disk, but still accepts an entry a
+  run racing this one writes, so N lanes do not each pay for one fragment.
 
-See [Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint).
+Persisting the cache in CI: [Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache).
+The rules: [Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint).

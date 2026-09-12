@@ -30,27 +30,22 @@ vk doctor
 the device has been prepared for testing, and whether it has a screen lock. It is **read-only**
 — it never changes a device.
 
-To actually set a test device up, prepare it once. This turns animations off, gives the display
-a 1-minute timeout, silences notifications and disables battery idle:
+To set a test device up, prepare it once — animations off, a 1-minute display timeout,
+notifications silenced, battery idle disabled:
 
 ```sh
 vk device prep --device <serial>   # a physical device must be named
 vk device prep                     # an emulator is auto-selected
 ```
 
-The `--device` requirement is the point: prep changes settings that outlive the run, so it must
-never land on a personal phone that happened to be plugged in. `vk device prep --revert` puts it
-back. `vk doctor --fix` is an alias for the same thing and inherits the same gate. Full detail:
-[Device state](/verikun/reference/device-state/#preparing-a-test-device).
+A physical device must be named so prep never lands on a personal phone that happened to be
+plugged in; `vk device prep --revert` puts it back, and `vk doctor --fix` is an alias for the
+same thing. Full detail: [Device state](/verikun/reference/device-state/#preparing-a-test-device).
 
-:::note
-The package also carries the agent
+The npm package also carries the agent
 [`SKILL.md`](https://github.com/ddikman/verikun/blob/main/.claude/skills/verikun/SKILL.md),
-the [changelog](https://github.com/ddikman/verikun/blob/main/CHANGELOG.md) and the
-[`example/`](https://github.com/ddikman/verikun/tree/main/example) tests, so they ship with
-your install. *Registering* that skill with a particular agent is a separate step — the two
-sections below do that.
-:::
+but *registering* that skill with a particular agent is a separate step — the two sections
+below do that.
 
 ## Connect a device
 
@@ -112,23 +107,22 @@ plugin, this installs the **skill** only — the CLI still comes from
 `vk doctor` warns when either half is stale:
 
 ```
-verikun: 0.19.0 — npm has 0.20.0
+verikun: 0.25.0 — npm has 0.26.3
   npm install -g verikun@latest
-claude-code-plugin: 0.11.0 — behind this CLI (0.20.0); the agent is reading stale skill docs
+claude-code-plugin: 0.24.0 — behind this CLI (0.26.3); the agent is reading stale skill docs
   claude plugin update verikun@verikun   (then restart Claude Code)
 ```
 
-The second matters more than it looks: the skill teaches an agent *how* to drive verikun, so
-a stale one means an agent confidently using a flag your CLI no longer has. That is why the
+A stale skill means an agent confidently using a flag your CLI no longer has, which is why the
 skill asks the agent to run `vk doctor` once at the start of a session.
 
 Both are warnings — being out of date does not change doctor's exit code. Set
 `VERIKUN_NO_UPDATE_CHECK=1` to skip the check entirely.
 
 :::caution[Claude Code will not update the plugin for you by default]
-Marketplace auto-update is **off by default for third-party marketplaces**, and no plugin
-author can turn it on — the setting lives in your own config. Turn it on under `/plugin` →
-**Marketplaces** → **verikun**, or refresh by hand with `/plugin marketplace update verikun`.
+Marketplace auto-update is **off by default for third-party marketplaces**. Turn it on under
+`/plugin` → **Marketplaces** → **verikun**, or refresh by hand with
+`/plugin marketplace update verikun`.
 :::
 
 ## Build from source

@@ -7,8 +7,8 @@ sidebar:
 
 ## Start here: read the exit code
 
-verikun's exit codes are a deliberate contract, and they tell you which *kind* of problem
-you have before you read a single line of output.
+verikun's exit codes tell you which *kind* of problem you have before you read a single line
+of output:
 
 | Code | Meaning | Who fixes it |
 |---|---|---|
@@ -17,8 +17,7 @@ you have before you read a single line of output.
 | `2` | Usage error, or **ambiguous selector** | **The test** — refine the selector or fix the arguments |
 | `3` | Environment — tool missing, no usable device, dump failed | **The machine** — nothing to do with your app |
 
-The `1`-vs-`3` split is the one that matters at 3am. `1` is a regression to investigate; `3`
-is a box to fix. Full detail: [Exit codes](/verikun/reference/exit-codes/).
+Full detail: [Exit codes](/verikun/reference/exit-codes/).
 
 ## Selector problems
 
@@ -48,15 +47,12 @@ marker is mostly an iOS signal.
 ### "ambiguous selector" — exit 2
 
 The selector matched more than one element. verikun prints the candidates and **never taps a
-guess**.
+guess**, and it never waits on ambiguity — the elements are already on screen.
 
 ```sh
 vk tap text:"Continue" --index 1     # pick the Nth match, 0-based
 vk tap @continue_btn                 # or use an id, which is usually unique
 ```
-
-Note that **ambiguity is never waited on**. The elements are already on screen, so waiting
-cannot disambiguate — the command reports and exits at once.
 
 ### The tap succeeded but nothing happened
 
@@ -78,12 +74,9 @@ Two likely causes:
 ### `vk tap 3` tapped the wrong thing
 
 **Indexes are per-snapshot.** `vk tap 3` taps `[3]` from the *latest* dump. If anything
-re-rendered in between, the index moved.
-
-This is also why bare-index taps and `--at x,y` **never auto-wait** — polling would
-re-capture and shift the indices underneath you.
-
-Prefer `@id` and `text:` selectors for anything you will run twice.
+re-rendered in between, the index moved. This is also why bare-index taps and `--at x,y`
+**never auto-wait** — polling would re-capture and shift the indices underneath you. Prefer
+`@id` and `text:` selectors for anything you will run twice.
 
 ## Waiting and timing
 
@@ -105,46 +98,33 @@ reads trustworthy. See [Device state](/verikun/reference/device-state/#preparing
 
 ### Why a test run takes as long as it does
 
-Almost all of it is **reading the UI hierarchy**: a stock `uiautomator dump` costs **~2.4s**
-on a mid-range phone, and that cost is fixed per invocation — a fresh VM and a fresh
-accessibility connection on every read, regardless of how big the tree is. iOS is ~10× cheaper
-(`idb` at 0.2–0.4s) precisely because `idb` keeps a process alive between reads.
-
-**On Android verikun already does this for you.** The
-[companion](/verikun/guides/companion/) keeps one accessibility connection alive on the
-device and answers in **~0.2s**; the 2.4s figure is what you get with it turned *off*
-(`VERIKUN_COMPANION=0`). It holds the device's single `UiAutomation` connection while it
-runs, which is the one reason you might.
-
-Beyond that, the lever is **how many reads a test makes**, not how fast each one is:
+Almost all of it is **reading the UI hierarchy**, and on Android the
+[companion](/verikun/guides/companion/) already makes each read about ten times faster than
+the stock dump (turn it off with `VERIKUN_COMPANION=0` and you get the slow path). Beyond
+that, the lever is **how many reads a test makes**, not how fast each one is:
 
 - **Every selector command is one read** — `tap`, `text`, `find`, `assert`, `swipe --on` — and
   a step that has to wait costs one read per poll.
 - **A guard that finds nothing costs *two*** (a second look before concluding "absent").
   [`VERIKUN_GUARD_SETTLE_MS=0`](/verikun/reference/environment-variables/) restores the
   single-shot probe and roughly halves a guard-heavy plan, at the price of less patience.
-- **Screenshots are ~1.1s each** and are *not* free even when never read back — see
+- **Screenshots take about a second each** and are *not* free even when never read back — see
   [Screenshots](/verikun/reference/screenshots/). Prefer one `assert` over a screenshot you
   intend to read back.
 
 ### "No window to read"
 
-The platform reports a null root, and there are **three** ways to get one. Two are obvious:
-`launch` force-stops the app before starting it (and `--clear` also wipes its data), so for a
-few seconds there is no window at all. The third is not: an app whose **main thread is busy
-mid-transition** reports the same thing while being fully drawn and on screen.
-
-How long the gap lasts is device-dependent and longer than it sounds — measured on a physical
-SM-A415F, a hierarchy read succeeded 4.7–6.2s after `vk launch` returned; on an emulator,
-~2.1s.
+The platform reports no root window. `launch` force-stops the app before starting it (and
+`--clear` also wipes its data), so for a few seconds there is no window at all; an app whose
+main thread is busy mid-transition reports the same thing while fully drawn. The gap lasts
+several seconds on a physical phone.
 
 **Any command that waits absorbs this** — `wait`, `find`, `assert`, `tap`, `text` — and keeps
-polling until its window elapses, so you normally never see it. **`vk ai` control-flow guards
-ride it out too**, for up to 10s, so a `repeat` or `if-present` evaluated in the gap no longer
-aborts the run.
+polling until its window elapses, so you normally never see it. `vk ai` control-flow guards
+ride it out too, for up to 10s.
 
 It still surfaces from a command with **no wait budget**, such as a bare `vk ui` issued
-immediately after `launch` — that exits `3`, unchanged. Give it something to wait for instead:
+immediately after `launch` — that exits `3`. Give it something to wait for instead:
 
 ```sh
 vk launch com.example.app --clear
@@ -152,9 +132,9 @@ vk wait @home_tab --timeout 30s      # spends its budget rather than giving up
 vk ui
 ```
 
-A guard that stays blind past its 10s grace **still aborts** with exit `3`. That is deliberate:
-answering "the selector is absent" for a screen nobody could read would skip the guarded body
-and let a guard-heavy plan finish green having executed nothing.
+A guard that stays blind past its 10s grace **still aborts** with exit `3`, because answering
+"the selector is absent" for a screen nobody could read would let a guard-heavy plan finish
+green having executed nothing.
 
 ### "The hierarchy held only a modal barrier"
 
@@ -165,8 +145,10 @@ on an English device; `vk ui` shows its label) or `vk key back`.
 
 ### A tap right after `launch` did nothing
 
-The first dump after `launch` can be stale — measured on real hardware. Assert on something
-from the new screen before acting:
+The first dump after `launch` can return the previous screen, so a selector that also matches
+something there resolves against stale coordinates and the tap exits `0` having done nothing
+([#45](https://github.com/ddikman/verikun/issues/45)). Assert on something from the new
+screen before acting:
 
 ```sh
 vk launch com.example.app
@@ -202,8 +184,15 @@ vk type -- "-50% off"
 
 ### Emoji or non-Latin characters do not type
 
-An Android limitation in `adb input text`. ASCII is reliable; Unicode may not be. There is no
-verikun-side fix.
+On Android, `vk text` and `vk type` with non-ASCII input (CJK, accented Latin, emoji) exit
+`0` but the field stays empty — `adb input text` cannot deliver it, and nothing checks what
+landed ([#85](https://github.com/ddikman/verikun/issues/85)). ASCII is reliable.
+
+### The last character is doubled
+
+`vk text` occasionally leaves a duplicated final character in the field, while reporting
+success ([#46](https://github.com/ddikman/verikun/issues/46)). Assert on the field's value
+with `--text` when it matters.
 
 ### The keyboard is covering the element I want to inspect
 
@@ -237,23 +226,14 @@ A claim from a crashed job clears on its own. Full detail:
 
 ### The display went to sleep
 
-A slept device does **not** reliably fail the read: a dozing device serves a well-formed
-hierarchy of `com.android.systemui` — the dump *succeeds* and hands back the **lock screen**
-instead of the app, a false green in which every selector then misses for a reason that has
-nothing to do with your app.
-
-So before every hierarchy read, screenshot, tap, swipe, keypress or typed text, verikun asks
-whether the display is actually on (`dumpsys power`'s `mWakefulness` — the only signal that
-holds on every device, ~85 ms per read, cached for two seconds). If it is not, it wakes the
-device and tries `wm dismiss-keyguard` first. A device that is awake but behind the keyguard is
-caught afterwards from the hierarchy plus `dumpsys trust`: verikun retries and then exits
-**`3`** naming the lock.
-
-A **swipe** lock is cleared automatically. A **PIN, pattern or password** is not — verikun never
-asks for or stores a device credential — so remove the lock on a test device (*Settings >
-Security*). `vk doctor` lists, per device, whether it is prepared and what kind of lock it has
-(it stays quiet on API 29, where `dumpsys lock_settings` lacks the field — the read-time check
-above still works there).
+A slept device does **not** reliably fail the read: it serves the **lock screen** as a
+well-formed hierarchy, so every selector then misses for a reason that has nothing to do with
+your app. verikun checks that the display is on before every read, screenshot, tap, swipe,
+keypress or typed text, wakes it if not, and clears a **swipe** lock by itself. A **PIN,
+pattern or password** is never cleared — verikun never asks for or stores a device credential
+— so the read exits **`3`** naming the lock. Remove the lock on a test device (*Settings >
+Security*); `vk doctor` lists, per device, whether it is prepared and what kind of lock it
+has.
 
 A prepared device gives the display a **1-minute** timeout, long enough to span the gap
 between two commands of one flow. If you would rather it never slept at all — the right answer
@@ -281,13 +261,8 @@ vk log com.example.app --full       # everything
 
 Scoping with a `package` filters to that app's live process. Once the app has **crashed**
 its process is gone, so `vk log <pkg>` falls back to system-wide logs — where the crash
-trace still is.
-
-:::caution
-Logs are **raw device output** and can contain anything the app logged, including secrets.
-They are not redacted. Treat archived reports accordingly; `VERIKUN_NO_RUN=1` disables
-recording entirely.
-:::
+trace still is. Logs are raw device output and are
+[not redacted](/verikun/reference/reports-and-test-runs/#secrets).
 
 ### The agent used a flag or command that does not exist
 
@@ -301,9 +276,8 @@ so the new skill loads. See
 
 ### My phone was left dark, rotated, or offline
 
-A bare `vk device set` from a shell **stays applied** — deliberately. Inside `batch`, `ai`
-and `suite` it is restored automatically even if the flow dies, but a one-off is yours to
-undo:
+A bare `vk device set` from a shell **stays applied**. Inside `batch`, `ai` and `suite` it is
+restored automatically even if the flow dies, but a one-off is yours to undo:
 
 ```sh
 vk device reset
@@ -316,17 +290,13 @@ If a rollover happened between the change and the reset, verikun prints the exac
 ### `airplane=on` was refused — exit 2
 
 You are connected over **wireless adb**. Turning on airplane mode would cut the very link
-carrying the next command, and nothing could turn it back on remotely. Recovery would mean
-physically plugging in USB.
-
-`--allow-wireless` overrides it if you mean it.
+carrying the next command, and nothing could turn it back on remotely. `--allow-wireless`
+overrides it if you mean it.
 
 ### The app is offline but the test says it is online
 
-`airplane=on` is verified **by effect**, not by the flag — Android remembers a user who
-re-enabled wifi during a previous flight, so `airplane-mode enable` can leave wifi *up*.
-verikun reconciles the radios named in `airplane_mode_toggleable_radios` and forces any
-survivor.
+`airplane=on` is verified **by effect**, not by the flag: Android can leave wifi up after
+enabling airplane mode, so verikun forces any surviving radio off and says so on stderr.
 
 If you are chasing the opposite — `airplane=off` and the app still shows offline — note that
 turning the radio back on is not the same as having internet. Follow it with a real wait:
@@ -344,24 +314,22 @@ vk assert @content --wait 10s     # not an immediate tap
 | **`401`** | Auth key mismatch | Both sides need the same `VERIKUN_SERVER_AUTH_KEY`. It is sent as a bearer token. |
 | Exit `3`, unreachable | Network path | Not verikun. Check the tailnet or route is up on the client. |
 | Install rejected | Server lacks `--allow-install` | Restart the server with the flag; a read-only server refuses builds by design. |
-| Device overrides stranded after a crash | Known gap: under `--server` the snapshot lives in the **server's** run file | `vk device reset` from the device box. |
-| The suite ran on a device you did not expect, a step failed naming a device no longer bound, or `[failover] no working device remains` | The server [failed over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) off a bad device; a step is never replayed elsewhere, and on exhaustion the error shown is the **first** device's | `[verikun] server moved device:` on the client says which and why; `curl "$VERIKUN_SERVER/v1/health" \| jq .quarantined` says what was ruled out. Re-run the flow from the top — the new device has none of the old one's state. A successful `vk devices restart <name> --server <url>` clears a quarantine; pin with `--device` to forbid moves. |
-| `Requested internal only, but not enough space` | The device's disk is full (it carries no `INSTALL_FAILED_*` code, so it is classified by *not* being a build failure) | With failover on, the server moves to another attached device by itself; otherwise free space on the device, or `vk devices restart` it. |
+
+Failover, a full device disk, a stranded device-state snapshot and the other server-side
+symptoms are in the
+[Remote devices & CI troubleshooting table](/verikun/guides/remote-devices-and-ci/#troubleshooting).
 
 ## iOS and idb
 
-| Symptom | Meaning |
+| Symptom | Fix |
 |---|---|
-| `clear` exits `3` | Expected. iOS has no per-app data reset. Use `launch` to restart instead. |
-| `current` returns `(unknown)` | Expected. iOS exposes no reliable foreground-app query. |
-| `--selected` / `--focused` exits `3` | Expected. `idb` emits no such key, so the filter could only ever match nothing. |
-| `--tree` renders flat | Expected. `idb`'s accessibility list has no nesting depth. |
-| `swipe --duration` ignored | Expected. `idb` has no duration knob. |
 | `idb` not found | Install it, or set `IDB=/path/to/idb`. Run `vk doctor --ios`. |
 | No logs from a physical device | Simulator-only. Use Console.app or `idb log`. |
 
-Every one of these, plus what a physical device supports:
-[Platform support](/verikun/guides/platform-support/).
+Anything that exits `3` naming a capability — `clear`, `--selected`, `--focused`, a device
+setting — is a documented gap, not a broken setup: `--tree` renders flat, `current` returns
+`(unknown)`, `swipe --duration` is ignored. Every one of these, plus what a physical device
+supports: [Platform support](/verikun/guides/platform-support/).
 
 ## `vk ai` and suites
 
@@ -380,7 +348,9 @@ exactly the kind of friction worth
 step's intent — the flow drifted to the wrong screen or app.
 
 Read the run's failure screenshot and hierarchy. The usual cause is an earlier step that
-exited `0` without doing what you assumed.
+exited `0` without doing what you assumed. On a device in a non-English locale, an OS
+permission dialog is a known cause
+([#116](https://github.com/ddikman/verikun/issues/116)).
 
 ### An assertion failed and was not healed
 
@@ -389,14 +359,11 @@ exists to catch.
 
 ### The suite aborted with exit 3 partway through
 
-The device or toolchain broke mid-run. verikun re-probes before aborting, precisely because a
+The device or toolchain broke mid-run. verikun re-probes before aborting, because a
 transient `uiautomator` failure also exits `3`; an abort means it was still broken on the
-re-probe.
-
-The tests that did not run get **no rows** in `index.json` and no place in `totals`, so
-nothing downstream mistakes them for regressions.
-
-Consider `--retries 2` — environment failures earn retries with increasing backoff.
+re-probe. The tests that did not run get **no rows** in `index.json` and no place in
+`totals`, so nothing downstream mistakes them for regressions. Consider `--retries 2` —
+environment failures earn retries with increasing backoff.
 
 ### The run costs more than expected
 
@@ -405,13 +372,13 @@ Every run reports a cost line —
 repeat run `compile` should be `$0.0000`; if it is not, the plan is not being cached — check
 whether `--recompile` is set, whether the prose changes between runs, or whether verikun was
 updated (which
-[rotates the cache fingerprint](/verikun/internals/contracts/#the-plan-cache-fingerprint)
-on purpose). A non-zero `repairs` means steps are drifting instead — tighten the selectors the
-prose names. [Reading the cost line](/verikun/reference/cost/#reading-the-cost-line) breaks
-down each field.
+[rotates the cache fingerprint](/verikun/internals/contracts/#the-plan-cache-fingerprint)).
+A non-zero `repairs` means steps are drifting instead — tighten the selectors the prose
+names. [Reading the cost line](/verikun/reference/cost/#reading-the-cost-line) breaks down
+each field.
 
-On CI, check one more thing first: whether the job restores `./.verikun/plans/` at all. A fresh
-runner has no cache, so every test recompiles every run —
+On CI, check whether the job restores `./.verikun/plans/` at all. A fresh runner has no
+cache, so every test recompiles every run —
 [persisting it](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache) is what
 gets you to the \$0 steady state.
 

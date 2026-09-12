@@ -8,8 +8,6 @@ sidebar:
 This walks from a connected device to an HTML report you can open in a browser. It assumes
 you have finished [Installation](/verikun/getting-started/installation/).
 
-Every step here is a real command. Nothing is elided.
-
 ## 1. Check the device
 
 ```sh
@@ -17,8 +15,9 @@ vk doctor --fix
 vk devices
 ```
 
-`--fix` zeroes the three animation scales. Animations are the single biggest cause of a UI
-dump that reads a screen mid-transition, so this is worth doing once per device.
+`--fix` prepares the device for testing (animations off, a sane display timeout, and more);
+a physical device must be named with `--device`. Animations are the single biggest cause of a
+UI dump that reads a screen mid-transition, so this is worth doing once per device.
 
 If `vk devices` lists more than one, pick one for the rest of this page:
 
@@ -55,9 +54,8 @@ vk ui
 Read that as: index, element type, visible text, `@resource-id`, centre coordinates, and
 flags (`tap` = clickable, `pwd` = a password field, `focused`, `offscreen`).
 
-This textual snapshot is what you should reach for instead of a screenshot whenever you can.
-It is a fraction of the tokens, and it gives you the *identifiers* to act on — a screenshot
-only gives you pixels. See
+Reach for this textual snapshot instead of a screenshot whenever you can: it is a fraction of
+the tokens, and it gives you the *identifiers* to act on — see
 [Be frugal](/verikun/getting-started/using-from-an-agent/#be-frugal-text-over-images).
 
 Useful variants:

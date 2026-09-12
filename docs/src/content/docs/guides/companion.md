@@ -5,83 +5,37 @@ sidebar:
   order: 7
 ---
 
-Reading the UI hierarchy is the single most expensive thing verikun does on Android — about
-**2.4s per call**, and every selector command makes at least one. On a guard-heavy suite
-that is the overwhelming majority of the runtime.
+Reading the UI hierarchy is the single most expensive thing verikun does on Android: a stock
+`uiautomator dump` costs about **2.4s per call**, every selector command makes at least one,
+and on a guard-heavy suite that is most of the runtime.
 
 The companion is a small program pushed to the device that answers the same question in
-about **40ms end to end**, reporting every element the stock read does, with identical
-bounds. (It can omit system decor lying outside the app's own window, which nothing can tap
-— see [Calibration](#calibration).)
+about **0.2s**, reporting every element the stock read does, with identical bounds.
 
 ```sh
 vk ui          # ~0.2s instead of ~2.4s — nothing to enable
 ```
 
 **It is on by default.** verikun starts it the first time it reads the hierarchy, and
-`VERIKUN_COMPANION=0` turns it off — see [What it costs you](#what-it-costs-you) for when
-you would want to.
+`VERIKUN_COMPANION=0` turns it off — see [What it costs you](#what-it-costs-you) for when you
+would want to.
 
 The first read on a device pays for setting it up: about **6s** to push, start and
-[calibrate](#calibration). After that every read is ~0.2s, and the verdict is remembered on
-the device, so when the companion idle-shuts-down a later run restarts it in about **2.1s**
-without recalibrating.
+[calibrate](#calibration). After that every read is fast, and the verdict is remembered on
+the device, so a later run restarts an idle-stopped companion in about 2s without
+recalibrating. Every command that resolves a selector benefits, not just `vk ui`: `find`,
+`assert`, `wait`, `tap`, `text`, auto-wait polling, `vk ai` guards and failure-evidence
+capture all read through the same path.
 
-It also makes auto-wait behave. A 5s wait for an element that never appears takes ~6.4s with
-the companion but ~10.8s without: the stock path's final 2.4s read starts just before the
-deadline, so every timeout overshoots by most of a read.
-
-**Every command that resolves a selector benefits**, not just `vk ui` — they all read the
-hierarchy through the same path. Measured on a settled screen, same device:
-
-| Command | Stock | Companion | |
-|---|--:|--:|--:|
-| `vk find` | 2.48s | 0.20s | 12.3x |
-| `vk assert` | 2.45s | 0.20s | 12.0x |
-| `vk wait` | 2.44s | 0.21s | 11.5x |
-| `vk tap` | 2.48s | 0.31s | 8.1x |
-| `vk text` | 3.03s | 0.85s | 3.6x |
-
-The remainder is the *action* itself. `adb shell input tap` costs ~0.1s and typing rather
-more, and neither goes through the companion today — which is why `text` gains least. Auto-wait
-polling, auto-scroll re-reads, `vk ai` guards and failure-evidence capture all read through
-the same path, so they benefit identically.
-
-## Why the stock read is slow
-
-Measured on a physical SM-A415F (Android 12). Almost none of it is work:
-
-| Stage | Cost |
-|---|--:|
-| Starting ART and loading `uiautomator.jar` | ~1.22s |
-| `waitForIdle(1000, 10000)` | ~1.00s |
-| Actually walking and serialising the tree | ~0.10s |
-
-Both large terms are **per-invocation**, and `adb shell uiautomator dump` is one invocation
-per read. Neither depends on how complex your screen is: a 57-node launcher and a deep app
-screen both cost ~2.4s.
-
-The idle wait is the interesting one. It is not a flat one-second sleep — it waits for the
-accessibility event stream to have been *quiet* for 1000ms, and a **freshly connected**
-bridge has no history of quiet, so it has to sit and observe one. A long-lived connection
-already knows the screen has been idle for ages and returns immediately.
-
-So the companion keeps the full idle semantics and still returns in milliseconds. This is
-not a case of trading safety for speed.
-
-## What it actually does
+## What it does
 
 It is Java compiled to dex, pushed to `/data/local/tmp`, and run by the phone's own runtime
-via `app_process` — the same approach scrcpy uses. **Nothing is installed**: no APK, no
-root, and your device's package list is untouched. verikun starts it on first use and it
-shuts itself down after 15 minutes idle.
+via `app_process` — the same approach scrcpy uses. **Nothing is installed**: no APK, no root,
+and your device's package list is untouched. It shuts itself down after 15 minutes idle.
 
-It **does not cache the hierarchy.** Every read still walks the live tree; what it keeps
-alive is the *connection*. verikun's rule that every command re-captures the screen fresh
-is unchanged.
-
-It borrows the platform's own serialiser, so the XML is byte-for-byte what
-`uiautomator dump` would have produced — verified on-device, not assumed.
+It **does not cache the hierarchy**. Every read still walks the live tree; what it keeps
+alive is the accessibility *connection*, which is where the stock dump spends its time. The
+XML it returns is what `uiautomator dump` would have produced.
 
 ## What it costs you
 
@@ -101,137 +55,54 @@ vk companion stop             # or just hand it back once
 vk companion status           # "running on port 8486 (ready app held)" / "not running"
 ```
 
-`0`, `false`, `off` and `no` all opt out. Anything else — including an empty value — leaves
-it on: failing *open* is the safe direction here, because the worst case is the fast path,
-which already falls back on its own.
-
-It is on by default because the alternative did not work. A hierarchy read is the dominant
-cost of every Android run, and nobody discovers an environment variable they were never
-told about — the people who most need the speedup are the least likely to go looking for
-it.
+`0`, `false`, `off` and `no` all opt out. Anything else, including an empty value, leaves it
+on.
 
 ## It will not fail your test
 
-verikun falls back to the stock read whenever the companion cannot serve one, and gets it
-off the connection first so the fallback actually works. Measured:
+verikun falls back to the stock read whenever the companion cannot serve one — a failed dump,
+a crashed process, output that disagrees with the platform, a connection that has gone stale
+— and releases the connection first so the fallback actually works. A fallback read costs
+about a second more than a stock read would have.
 
-| Situation | Result |
-|---|---|
-| Companion dump fails | Connection released, stock read used, run continues |
-| Companion killed or crashed | Stock read works immediately — process death frees the connection |
-| Companion running but released | Connection retaken (~1.7s), then reads are fast again |
-| Companion cannot start | Stock read, one line on stderr — and the device is marked so it is not retried |
-| Output disagrees with the platform | Stock read, retried after a minute |
-| Connection goes stale (null root for a live window) | Connection recycled once, then the stock read |
-| Hierarchy holds only a modal barrier for ~3s | Connection recycled once; the read is then returned as it is |
+A fallback suppresses the companion for about a minute, then it is tried again; when the
+*screen* was the problem rather than the companion (an app that has not drawn yet), only for
+a couple of seconds. Only two things stand it down for the whole process: the device note
+saying the companion cannot start on this phone, and no jar to push.
 
-A fallback read costs about **3.4s** against 2.4s if the companion had never existed — a
-~1s penalty on the rare failure path, in exchange for ~40ms on every other read.
-
-### Falling back is temporary, except when it cannot be
-
-A fallback suppresses the companion for **a minute**, then it is tried again — or for just a
-couple of seconds when the *screen* was the problem rather than the companion, since an app
-that has not drawn yet starts working the moment it does. Only two things stand it down for
-the whole process, because only they cannot change while it runs: the device note saying the
-companion does not work on this phone, and no jar to push.
-
-That distinction matters most for a long-lived process. Up to 0.21.0 a single stand-down was
-permanent, which was invisible when every command is its own process and permanent for
-`vk server` — a server that hit one moving screen during calibration, or simply idled past the
-companion's own 15-minute shutdown, spent the rest of its life on the 2.4s path next to a
-healthy companion. That was [issue #77](https://github.com/ddikman/verikun/issues/77).
-
-### Another app's window
-
-A permission dialog — or anything else another package puts on top of the app under test —
-is part of the hierarchy the companion serves. That takes an explicit request for window
-information at connect time. Without one the platform hands a long-lived connection no
-window list at all, so it goes on serving whichever window was active when it connected, and
-never notices another opening on top.
-
-That failure was silent, which is what made it worth fixing: a stale root is a well-formed
-hierarchy of the wrong window, so the read returns exit `0` and none of the fallbacks above
-can fire on it. `uiautomator dump` never meets it, because it connects, reads once and exits
-— "active at connect time" is always right for a process that short. That was
-[issue #79](https://github.com/ddikman/verikun/issues/79).
+Known gap: on HyperOS (Android 15) the companion crashes on startup, so every read silently
+takes the slow path ([#87](https://github.com/ddikman/verikun/issues/87)). `vk companion
+status`, or `reads` on a server's `/v1/health`, tells you which path is in use.
 
 ## Calibration
 
-On first use verikun takes **one** real `uiautomator dump` and checks the companion
-reproduces it. That is most of the ~5.8s first read.
+On first use verikun takes **one** real `uiautomator dump` and checks that the companion
+reproduces it: every tappable or focusable node byte-identical, in the same order. Decor
+outside the app's own window — a navigation-bar background, which nothing can tap — may be
+missing from the companion's dump and is tolerated. Anything else declines the companion for
+that device, and verikun stays on the stock path rather than risk a tap landing somewhere
+else while reporting success.
 
-The answer is then remembered **on the device** (`/data/local/tmp/verikun-companion.note`,
-keyed by verikun version), so it is paid once per device rather than once per companion —
-a restart after the idle shutdown reuses it and costs ~2.1s. The same note records a device
-where the companion could not start at all, so that phone falls straight through to the
-stock read instead of paying a doomed startup on every command.
-
-This exists because the dumper clips every node's bounds to a display size, and **which size
-the platform uses genuinely differs between devices**:
-
-| Device | Vendor | Android | Clips to |
-|---|---|---|---|
-| Samsung SM-A415F | Samsung | 12 | the **app window** (1080x2184) |
-| Pixel 3a | Google | 12 | the **app window** (1080x2176) |
-| Pixel 6 emulator | AOSP | 14 | the **physical display** (1080x2400) |
-
-The boundary is the **platform version, not the vendor**, and it is in AOSP itself:
-`DumpCommand` reads `getSize()` on the `android12-release` and `android13-release` branches
-and `getRealSize()` from `android14-release` onward. A Samsung and a Google device on
-Android 12 therefore agree with each other, and both differ from Android 14.
-
-So any hard-coded choice is wrong on one side of that boundary. verikun could pin a version
-table instead — but the platform has already changed this once, and calibrating against the
-device in front of you handles the next change without an update.
-
-The gap ranges from 44px to 254px, and guessing wrong would not fail loudly — it would shift
-elements near the bottom of the screen so a tap lands somewhere else while still reporting
-success. So verikun does not guess, and if neither candidate reproduces the platform's dump
-it declines the companion and stays on the stock path.
-
-### What "reproduces it" means
-
-Every node the companion reports must be byte-identical to one the platform reported, in the
-same order. That is the property taps depend on, and it is checked in full.
-
-The two dumps do not have to be the *same string*. Asking for window information (above)
-makes Android clip node bounds to the app's own window, so decor outside it drops out of the
-companion's dump — on a Pixel 6 emulator, `android:id/navigationBarBackground` at
-`[0,2274][1080,2400]`. Demanding an exact string match benched a companion whose every
-tappable node was exactly right, and cost ~33s per read instead of ~0.2s.
-
-So a node the platform reports and the companion misses is tolerated only if it is a leaf
-and is neither clickable nor focusable. Anything else — a tappable node missing, a container
-missing, a node whose bounds differ, a node the companion invents — declines the companion,
-exactly as before.
+The verdict is remembered **on the device** (`/data/local/tmp/verikun-companion.note`, keyed
+by verikun version), so it is paid once per device. The same note records a device where the
+companion could not start at all.
 
 ## Under `vk server`
 
-The companion works exactly as it does locally — the server holds one driver for its lifetime,
-and every route reaches it — but two things are worth knowing.
+The companion works exactly as it does locally, with two things worth knowing:
 
 **`VERIKUN_COMPANION` is read in the server's environment, not the client's.** Reads execute
-server-side, so a client cannot turn the companion on or off across the wire, and `vk companion
-status|stop` has no `--server` form. To hand the connection back on a remote host, run
-`vk companion stop` there, or stop the server — since 0.21.1 shutting the server down releases
-the connection rather than leaving it held for up to 15 more minutes.
+server-side, so a client cannot turn the companion on or off across the wire, and
+`vk companion status|stop` has no `--server` form. To hand the connection back on a remote
+host, run `vk companion stop` there, or stop the server, which releases it.
 
 **Ask the server which path it is using** rather than inferring it from step durations:
-
-```sh
-curl -s http://<server>:8391/v1/health | jq .reads
-# { "path": "companion", "detail": "ready app held" }
-# { "path": "stock", "detail": "companion off (VERIKUN_COMPANION)" }
-```
-
-The server prints the same line at startup, and a `--server` client echoes it once at run
-start. A `--server` suite index also records it, next to the server's own verikun version.
+[Check which read path the server is using](/verikun/guides/remote-devices-and-ci/#check-which-read-path-the-server-is-using).
 
 ## iOS
 
 Not applicable, and not needed: `idb` already keeps a companion process alive and reads the
-hierarchy in ~0.2s. `vk companion` exits `3` on iOS. See
+hierarchy quickly. `vk companion` exits `3` on iOS. See
 [Platform support](/verikun/guides/platform-support/).
 
 ## Related

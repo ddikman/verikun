@@ -62,13 +62,11 @@ They are not redacted.
 | `clear <app>` | Wipe the app's locally stored data — login/session, preferences, caches — resetting it to just-installed state (Android `pm clear`, which also force-stops). **iOS unsupported**: there is no per-app data reset. |
 | `install <app.apk\|.ipa> [--server url]` | Install a build (`adb install -r` / `idb install`). With `--server`, the file is uploaded to a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) started with `--allow-install` (single-file `.apk`/`.ipa`, sha256-verified). **Android**: if the device holds a build of the same package signed by a *different* key, that build is removed and the install retried — **its app data is lost**, and a note says so on stderr. Same-key installs keep their data as before. |
 
-### Why `launch` restarts by default
+### `launch` restarts by default
 
-Re-issuing a launch intent to an app that is already running just resurfaces its current —
-often mid-flow, stale — screen rather than starting fresh. That is what made reruns flaky.
-
-So `launch` force-stops first. Force-stop is a no-op when the app is not running, so no "is
-it running?" probe is needed, and none would be portable (iOS has no foreground query).
+Re-issuing a launch intent to an app that is already running only resurfaces its current,
+often mid-flow, screen, so `launch` force-stops the app first and you start from a cold
+screen every time.
 
 - `--no-restart` opts out and brings the existing instance forward.
 - `--clear` instead wipes data via `pm clear`, which already force-stops.
@@ -114,7 +112,7 @@ Change the *device* the app runs on, then put it back. Full detail:
 | `--server <url>` | `VERIKUN_SERVER` | Run device I/O against a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) |
 | `--reset-app <id>` | — | Clear (iOS: force-stop) that app before the first step, on this run's own device |
 | `--show-plan` | — | Print the compiled IR and exit without running |
-| `--recompile` | — | Ignore the cache |
+| `--recompile` (alias `--no-cache`) | — | Ignore the cache |
 
 ### `suite` flags
 
@@ -136,15 +134,10 @@ Change the *device* the app runs on, then put it back. Full detail:
 
 Clients pass `--server <url>` (or `VERIKUN_SERVER`) plus `--auth-key` (or
 `VERIKUN_SERVER_AUTH_KEY`) to `ai`, `suite` and `install`. **The server's device and platform
-apply** — no flag on an `exec` request can repoint them.
-
-`--allow-device-control` is the one exception, and it is opt-in: it lets a client
-`restart`/`stop` the server's *own* device, and `--allow-device-control=<names>` additionally
-lets it `start` one of those operator-declared targets. The device lifecycle commands below all
-accept `--server <url>` to act on a remote server's device.
-
-The **server itself** may also change its binding, by moving off a device that fails —
-never at a client's request. See
+apply** — no flag on an `exec` request can repoint them. With `--allow-device-control` a
+client may `restart`/`stop` the server's own device, and with `--allow-device-control=<names>`
+also `start` one of those targets; the device lifecycle commands below all accept
+`--server <url>`. The server may also move itself off a device that fails — see
 [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
 
 | Flag | Effect |
@@ -168,16 +161,15 @@ never at a client's request. See
 `vk devices stop` powers a **device** off; `vk stop <appId>` force-stops an **app**, and
 `vk device set` (singular) changes settings on the device you are driving.
 
-Physical devices are never power-cycled — `start`/`stop`/`restart` refuse them with exit 2.
-An ambiguous name is exit 2 with the candidates listed: simulator names repeat across iOS
-runtimes, so `iPhone 17 Pro` genuinely identifies two devices and you pass the UDID instead.
-A boot that times out is exit **1** (retryable — the device is left running); a missing
-toolchain is exit **3**. Set `VERIKUN_EMULATOR` if the SDK's `emulator` binary is not on
-`PATH` or under `$ANDROID_HOME`.
+Physical devices are never power-cycled — `start`/`stop`/`restart` refuse them with exit `2`.
+An ambiguous name (simulator names repeat across iOS runtimes) is exit `2` with the candidates
+listed; pass the UDID instead. A boot that times out is exit **1** (retryable — the device is
+left running); a missing toolchain is exit **3**. Set `VERIKUN_EMULATOR` if the SDK's
+`emulator` binary is not on `PATH` or under `$ANDROID_HOME`.
 
 `--wipe` (`emulator -wipe-data` / `simctl erase`) is the only destructive path: `start` and
 `restart` only, never a physical device, and never against an already-running target — use
-`restart --wipe`, whose name says it tears the device down.
+`restart --wipe`.
 
 ## Test runs
 
@@ -207,9 +199,9 @@ Every command accepts these; the environment-variable forms are listed in
 
 | Flag | Meaning |
 |---|---|
-| `-d, --device <serial>` | Target a specific device. Resolution order: `--device`, then `VERIKUN_DEVICE`, then `ANDROID_SERIAL` (Android only). With none set, verikun picks a device **no other job is driving** and says which on stderr; naming a device another job holds, or every device being claimed, is exit `2` — see [Device claims](/verikun/reference/device-claims/). `VERIKUN_NO_CLAIM=1` restores the older behaviour: one attached device auto-resolves, more than one exits `2`. |
+| `-d, --device <serial>` | Target a specific device. Resolution order: `--device`, then `VERIKUN_DEVICE`, then `ANDROID_SERIAL` (Android only). With none set, verikun picks a device **no other job is driving** and says which on stderr; naming a device another job holds, or every device being claimed, is exit `2` — see [Device claims](/verikun/reference/device-claims/). `VERIKUN_NO_CLAIM=1` turns claims off: one attached device auto-resolves, more than one exits `2`. |
 | `-p, --platform <android\|ios>` | Platform, default `android`. `--ios` / `--android` are shortcuts. |
-| `-j, --json` | Machine-readable output — **also serializes errors** as `{error, exitCode, errorKind}` with the exit code unchanged, so one parser handles both outcomes. `errorKind` is the error's class (`SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`, `CliError`, `Error`), so "the app has not drawn yet" and "the device is gone" are told apart without matching on message text (both are exit `3`). |
+| `-j, --json` | Machine-readable output — **also serializes errors** as `{error, exitCode, errorKind}` with the exit code unchanged, so one parser handles both outcomes. `errorKind` is the error's class (`SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`, `CliError`, `Error`), so a caller can tell "the app has not drawn yet" from "the device is gone" although both are exit `3`. |
 | `--server <url>` | For `ai` / `suite` / `install`: run against a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) (or `VERIKUN_SERVER`). The server's device and platform apply. |
 | `--auth-key <k>` | Key for `--server` (or `VERIKUN_SERVER_AUTH_KEY`, which keeps it out of `ps`). |
 | `--` | End flag parsing, so text may start with `-`: `vk type -- "-50% off"`. |

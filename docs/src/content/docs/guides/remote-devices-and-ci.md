@@ -23,12 +23,10 @@ Only **validated device commands** cross the network — one HTTP round-trip per
 Selector [auto-wait](/verikun/reference/auto-wait/) polls on the server, next to the device,
 so a slow screen does not cost a round-trip per poll.
 
-Each step's detail — selector, heal tier, resolved element, failure screenshot and hierarchy
-— returns with the response and is spliced into the client's run, so the archived report is
-**identical to a local run's**.
-
-Because the engine and the model both live on the runner, a drifted step is repaired there too.
-Whether that should fail your build, and what a repair can and cannot hide, is
+Each step's detail — selector, heal tier, resolved element, failure hierarchy — returns with
+the response and is spliced into the client's run, so the archived report matches a local
+run's. Because the engine and the model both live on the runner, a drifted step is repaired
+there too; whether that should fail your build is
 [Self-healing in CI](/verikun/guides/self-healing-in-ci/).
 
 ## Start the server
@@ -49,20 +47,13 @@ vk server --devices all-ios --bind 100.64.0.7                      # only the si
 vk server --devices emulator-5554,emulator-5556 --bind 100.64.0.7  # a named pair
 ```
 
-`all-android` / `all-ios` both select the devices **and** pin the platform, so a host with
-emulators *and* simulators attached never has to be read as two flags. A bare `all` means
-"every usable device of this server's platform"; a named serial that is not attached is a
-startup error rather than a silently smaller pool.
+`all-android` / `all-ios` select the devices **and** pin the platform. A bare `all` means
+every usable device of the server's platform, and when both kinds are attached it takes the
+**virtual** ones and says so — name the serial to pool a physical phone deliberately. A named
+serial that is not attached is a startup error, not a silently smaller pool.
 
-When a host has both kinds attached, `all` takes the **virtual** ones and says so — a
-simulator and a plugged-in iPhone are not interchangeable (log capture is
-[unsupported on the phone](/verikun/guides/platform-support/)), and `all` has no business
-enlisting somebody's handset while an emulator is running. Name the serial to pool a
-physical device deliberately.
-
-`vk suite --devices` takes the same spelling, resolved against the machine the suite runs
-on. It is a usage error to combine it with `--server`: those serials are local, so the
-suite would quietly test the wrong machine.
+`vk suite --devices` takes the same spelling, resolved against the machine the suite runs on,
+and cannot be combined with `--server` (exit `2`).
 
 A pooled server keeps one URL and one secret. Each run token **leases** one device for its
 whole run — compile, every step, every repair — so a client needs no device id and cannot end
@@ -72,8 +63,8 @@ capacity from `/v1/health` and sizes itself to match, so the CI line does not ch
 
 Two things behave differently on a pool: `vk install --server` installs on **every** device
 (otherwise later lanes would run the previous build), and `/v1/devices/{start,restart,stop}`
-answer `403` — there is no single device for them to act on, and guessing would let one job
-power-cycle a phone another is mid-test on. Run one server per device if you need that.
+answer `403`, since there is no single device for them to act on. Run one server per device
+if you need those.
 
 From anywhere that can reach it:
 
@@ -89,12 +80,13 @@ vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
 ### Check which read path the server is using
 
 Reads happen server-side, so how the server reads the hierarchy sets the pace of your whole
-suite — on Android the difference between the [companion](/verikun/guides/companion/) and the
-stock dump is roughly 0.2s and 2.4s per read. The server reports it:
+suite: on Android the [companion](/verikun/guides/companion/) is roughly ten times faster
+than the stock dump. The server reports which it is using:
 
 ```sh
 curl -s "$VERIKUN_SERVER/v1/health" | jq .reads
 # { "path": "companion", "detail": "ready app held" }
+# { "path": "stock", "detail": "companion off (VERIKUN_COMPANION)" }
 ```
 
 `/v1/health` needs no auth key, so this works as a CI preflight assertion. The server also
@@ -104,10 +96,8 @@ run, is the one that actually drove the device.
 
 ## The transport: Tailscale
 
-The device box is usually behind NAT — a desk, an office, someone's home. It has no routable
-address for a GitHub-hosted runner to dial.
-
-[Tailscale](https://tailscale.com) is the recommended answer. It gives the device box a
+The device box is usually behind NAT — a desk, an office, someone's home — with no routable
+address for a GitHub-hosted runner to dial. [Tailscale](https://tailscale.com) gives it a
 stable `100.x.y.z` address on a private tailnet, and the runner joins that tailnet for the
 duration of the job. Any routable address works; Tailscale is simply the least work.
 
@@ -122,8 +112,8 @@ In a workflow, add the Tailscale action **before** the suite step:
     tags: tag:ci
 ```
 
-For a public host instead, terminate TLS in front of the server — it speaks plain HTTP by
-design, and does not try to be a TLS endpoint.
+For a public host instead, terminate TLS in front of the server — it speaks plain HTTP and
+does not try to be a TLS endpoint.
 
 ## The security model
 
@@ -132,67 +122,61 @@ design, and does not try to be a TLS endpoint.
 ### Auth is mandatory
 
 Pass a key via `--auth-key` or `VERIKUN_SERVER_AUTH_KEY` (the environment variable keeps it
-out of `ps`), or one is generated and printed at startup. Clients send it as a bearer token,
-and comparison is constant-time.
+out of `ps`), or one is generated and printed at startup. Clients send it as a bearer token.
 
 `--allow-unsafe-anonymous` disables auth loudly. It is only for networks that are themselves
 the boundary, and it **cannot be combined with a key**.
 
 ### Only the validated grammar runs
 
-Every `/v1/exec` request passes the same `validateNode` gate that guards `vk ai` model
-repairs: action verbs only (`tap`, `text`, `assert`, `launch`, …), never `ui` or `log`, and
-never a shell.
-
-The device and platform are **fixed when the server starts** — no flag on an `exec` request
-can repoint them. Only `/v1/devices/*` can change that binding, and it is off unless you opt
-in (below).
+Every `/v1/exec` request passes the same grammar gate that guards `vk ai` model repairs:
+action verbs only (`tap`, `text`, `assert`, `launch`, …), never `ui` or `log`, and never a
+shell. The device and platform are **fixed when the server starts** — no flag on an `exec`
+request can repoint them. Only `/v1/devices/*` can change that binding, and it is off unless
+you opt in (below).
 
 ### Installs are opt-in
 
 `POST /v1/install` requires `--allow-install`; a read-only server refuses builds. It accepts
-only single-file `.apk` / `.ipa` uploads, writes to a **server-generated** temp path (never a
-client-supplied one), and verifies a sha256 of the body.
+only single-file `.apk` / `.ipa` uploads, writes to a **server-generated** temp path, and
+verifies a sha256 of the body.
 
 That one flag also authorizes the removal an install sometimes needs: an Android build signed
 by a different key than the installed one cannot be updated over, so the server removes the
-installed build and installs again — losing that build's app data, and logging it. There is no
-separate permission; if you do not want that, do not pass `--allow-install`.
+installed build and installs again — **losing that build's app data**, and logging it. If
+you do not want that, do not pass `--allow-install`.
 
 ### Device control is opt-in, and naming is allowlisted
 
 `--allow-device-control` lets an authenticated client `restart` or `stop` **the server's own
-device** — the recovery path for a device that has gone flaky mid-suite. It names nothing.
-
+device** — the recovery path for a device that has gone flaky mid-suite.
 `--allow-device-control=Pixel_6_API_34,...` additionally lets a client **start** one of those
-operator-declared targets. Enumerating the host's AVDs is autocomplete, not authorization, so
-the allowlist is the boundary: a request naming anything else is rejected with a message that
-does not reveal whether it exists.
+operator-declared targets; a request naming anything else is rejected without revealing
+whether it exists.
 
 Every mutation takes the device lock, so a restart while another run holds the device is a
-`409` — but the **holder** may power-cycle its own device, which is what makes recovery work.
+`409` — but the **holder** may power-cycle its own device.
 
 With the flag the server will also start with **no device attached**: `/v1/health` reports
-`serial: null` and the device endpoints answer `503` telling you to boot one. Without that, a
-server whose device is down could never be fixed remotely. An *ambiguous* device still fails
-fast at startup — that is an operator error, and booting another device makes it worse.
+`serial: null` and the device endpoints answer `503` telling you to boot one. An *ambiguous*
+device still fails fast at startup.
 
 :::caution
-Enabling device control also lets that client **erase** the device (`--wipe`). That is the
-honest cost of the flag; leave it off if you do not want it.
+Enabling device control also lets that client **erase** the device (`--wipe`). Leave the flag
+off if you do not want that.
 :::
 
 ### One run per device
 
 A run token **leases** a device. A caller that arrives when every device is already leased
-gets **`409`**.
+gets **`409`**. The lease is released when the command finishes, so `vk install` then
+`vk suite` chain seamlessly.
 
-The lease is released when the command finishes, so `vk install` then `vk suite` chain
-seamlessly. A lease that has been silent for **5 minutes** may be taken over — but only by a
-run that actually needs a device, so a crashed CI job cannot wedge a device permanently while
-a merely slow one (a cold compile, a model repair) keeps its own phone. A run that *does* lose
-its device is told so with a `409` naming it, never handed a different one: its earlier steps
-ran somewhere else, and continuing elsewhere would report one run that executed on two.
+A lease that has been silent for **5 minutes** may be taken over — but only by a run that
+actually needs a device, so a crashed CI job cannot wedge a device permanently while a merely
+slow one (a cold compile, a model repair) keeps its phone. A run that *does* lose its device
+is told so with a `409` naming it, never handed a different one: its earlier steps ran
+somewhere else.
 
 A pooled server therefore serves as many concurrent runs as it has devices — and no more.
 
@@ -200,11 +184,9 @@ A pooled server therefore serves as many concurrent runs as it has devices — a
 
 `--bind <addr>` is what opts into exposure. The default is `127.0.0.1`.
 
-:::caution
 Failure evidence — screenshots, UI hierarchies — crosses the authenticated channel like
-everything else, and carries the same caveat as `vk log`: **device output is not redacted.**
-Treat archived reports as potentially containing whatever the app logged.
-:::
+everything else, and like `vk log` it is
+[not redacted](/verikun/reference/reports-and-test-runs/#secrets).
 
 ## A GitHub Actions workflow you can copy
 
@@ -229,12 +211,10 @@ concurrency:
   cancel-in-progress: false
 ```
 
-The `concurrency` group is **load-bearing**. A second job would get `409` rather than
-queueing, because a parallel suite leases every device the server has. `cancel-in-progress:
-false` means a queued run waits instead of killing the one holding the devices.
-
-If you want two jobs to share a host, give each its own server (`--devices` naming disjoint
-serials, on different ports) rather than relaxing this group.
+The `concurrency` group matters: a second job would get `409` rather than queueing, because
+a parallel suite leases every device the server has. `cancel-in-progress: false` means a
+queued run waits instead of killing the one holding the devices. To let two jobs share a
+host, give each its own server (`--devices` naming disjoint serials, on different ports).
 
 Start with `workflow_dispatch` while you prove the setup, then add `pull_request` once the
 device server is reliably reachable from PR builds.
@@ -304,9 +284,7 @@ and must not travel. Why the key does not have to be exact, and the caveats:
 
 Produce or fetch the build in an earlier step — a build job artifact, a release download,
 whatever you already have. The guard means a plain suite re-run still works when no build is
-present.
-
-This requires the server to have been started with `--allow-install`.
+present. This requires the server to have been started with `--allow-install`.
 
 ### Run the suite — this is the gate
 
@@ -340,9 +318,8 @@ result parsing, no separate check step.
     if-no-files-found: warn
 ```
 
-`if: always()` is the important bit — the evidence uploads exactly when it matters, on a
-failed suite. Without it, the artifact step is skipped by the failing suite step above and
-you get a red job with nothing to look at.
+`if: always()` is the important bit — without it the artifact step is skipped by the failing
+suite step above, and you get a red job with nothing to look at.
 
 ### Publishing results elsewhere
 
@@ -377,15 +354,14 @@ before the first step** — never between tests and never mid-run, so it cannot 
 green. It means "boot something if nothing is usable"; when a device is already available it
 is a no-op and says so, even if you named a different one.
 
-There is deliberately **no** automatic mid-run restart: a reboot destroys the app session, so
-the retried step would pass meaninglessly or cascade into confusing failures. Failover, below,
-is a *lateral* move under the same rule — it never reboots, and it never replays a step.
+There is **no** automatic mid-run restart: a reboot destroys the app session, so the retried
+step would pass meaninglessly or cascade into confusing failures. Failover, below, never
+reboots and never replays a step.
 
 ## When the bound device fails
 
-A pool that cannot route around one bad member has the availability of its worst member. So
-when the device a server is bound to cannot serve a request, the server moves to another
-attached device and rules the bad one out.
+When the device a server is bound to cannot serve a request, the server moves to another
+attached device and rules the bad one out:
 
 ```
 [server] install: FAILED on emulator-5554 — the device is out of space (INSTALL_FAILED_INSUFFICIENT_STORAGE)
@@ -400,46 +376,34 @@ attached device and rules the bad one out.
 
 |  | Failover |
 |---|---|
-| `vk server` (no `--device`) | **on** — the server already auto-selected a free device; moving to another free one is that same decision made again |
-| `vk server --device X` | **off** — you named the device, and a pin means what it says |
+| `vk server` (no `--device`) | **on** — the server auto-selected a free device, so moving to another free one is the same decision made again |
+| `vk server --device X` | **off** — a pin means what it says |
 | `--allow-failover` | on even for a pinned server; any attached, running, unclaimed device |
 | `--allow-failover=<a,b>` | as above, bounded to those serials or AVD/simulator names |
 | `--no-failover`, `VERIKUN_NO_FAILOVER=1` | off outright |
 
 A candidate must already be **running**: failover never boots anything. Booting is
-`vk devices start --server`'s job, it takes minutes inside a held device lock, and letting a
-client cause a boot it is not allowed to *name* would be an escalation. Failover is lateral,
-never upward.
+`vk devices start --server`'s job.
 
 ### An install is retried. A step is not.
-
-This is the important half, and the asymmetry is deliberate.
 
 `install` is idempotent, carries no app session, and its uploaded bytes are still on the
 server's disk — so it is replayed on the new device and your job simply succeeds.
 
-A **step** is not. Step 12 of a flow presupposes steps 1–11 ran *on that device*; the new
-device's app is wherever an earlier run left it. Replaying there would either find something
-matching and go **green** — a false green that ships a regression — or wake the repair model
-against the wrong screen. So the step fails, honestly, carrying **the old device's error**:
+A **step** is never replayed: step 12 of a flow presupposes steps 1–11 ran *on that device*,
+and the new device's app is wherever an earlier run left it. So the step fails, carrying
+**the old device's error**, and it is the *next* run — the next `vk suite` test, or the next
+`--retries` attempt — that lands somewhere healthy:
 
 ```
 [verikun] server moved device: emulator-5554 → 032AY1UNR2 (the device is not attached) — this step failed on the old device; the next runs on the new one
 ```
 
-The run that hit the bad device still fails. It is the **next** one that lands somewhere
-healthy — the next `vk suite` test, or the next `--retries` attempt, with no intervention.
-
-### Deciding whose fault a failure was
-
-Reachability is not the signal — a phone with a full disk answers `adb get-state` happily. So
-verikun enumerates the install failures that are provably about the **build**
-(`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`, `_TEST_ONLY`, an unreadable `.apk`)
-and treats **everything else** as the device's fault, including wordings nobody has seen
-before: a broken build fails identically everywhere, anything else might work next door.
-
-A step keeps the opposite default — exit `3` there is dominated by transient device noise, so
-verikun re-probes the device twice a second apart and only moves if it is genuinely gone.
+Which failures move: an install failure moves unless it is provably the **build's** fault
+(`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`, `_TEST_ONLY`, an unreadable `.apk`),
+because a broken build fails identically everywhere. A step moves only if the device is
+genuinely gone — verikun re-probes it twice, a second apart, first. On iOS only the
+unreachable-device check exists; see [Platform support](/verikun/guides/platform-support/#behaviour-and-reporting).
 
 At most **two** moves per request, and on exhaustion the client is given the **first** device's
 error, never the last, so the real cause stays the headline:
@@ -454,10 +418,10 @@ Failed to install '…apk': adb: device offline
 ### Failover on a pool
 
 With [`--devices`](#serving-several-devices-from-one-address) the same machinery keeps the pool
-at **full capacity** rather than moving a single binding: a healthy unclaimed device that is
-attached and not yet a member joins, the failed one leaves, and every other lease keeps
-serving. Usually there is no such spare, because `--devices all` already pooled everything
-attached. Then the failing device is **demoted, not dropped**:
+at **full capacity**: a healthy unclaimed device that is attached and not yet a member joins,
+the failed one leaves, and every other lease keeps serving. Usually there is no such spare,
+because `--devices all` already pooled everything attached. Then the failing device is
+**demoted, not dropped**:
 
 - It keeps its worker, its claim and its place in the pool, and `/v1/health` lists it under
   `degraded` rather than `quarantined`.
@@ -465,22 +429,21 @@ attached. Then the failing device is **demoted, not dropped**:
   only when nothing else is free.
 - It is **restored by working**, not by a timer — the first step or hierarchy read that
   succeeds on it puts it back in the healthy rotation.
-
-**The lease follows the move.** The run whose device failed lands on the replacement the server
-just announced, without losing its place in the queue; the failing *step* is still never
-replayed — the client seals that run and opens a fresh one on the new device, so no report
-spans two. **The last device is never shed**: a server down to its final device stays on it,
-because a bare `503` would replace the real diagnosis with a message that names nothing.
+- **The lease follows the move.** The run whose device failed lands on the replacement
+  without losing its place in the queue; the failing step is still not replayed — the client
+  seals that run and opens a fresh one on the new device, so no report spans two.
+- **The last device is never shed.** A server down to its final device stays on it.
 
 ### A device that comes back rejoins by itself
 
 A pooled server sweeps once a minute for devices that *should* be serving and are not — a
-worker that died, a phone unplugged and replugged, an emulator restarted out of band, or (with
-`--devices all`) one attached after startup; an explicit `--devices a,b,c` only re-adopts from
-that list. Starting the worker **is** the probe, so a device that is still broken simply fails
-to come back; each failure doubles the wait, up to 30 minutes, and every attempt is logged. A
-rejoining device is brought up to the session's last install before it is dealt any work, and
-stays out if that install fails.
+worker that died or was terminated for hanging, a phone unplugged and replugged, an emulator
+restarted out of band, or (with `--devices all`) one attached after startup; an explicit
+`--devices a,b,c` only re-adopts from that list. Starting the worker **is** the probe, so a
+device that is still broken simply fails to come back; each failure doubles the wait, up to
+30 minutes, and every attempt is logged. A rejoining device is brought up to the session's
+last install before it is dealt any work, and stays out if that install fails.
+Single-device servers do not sweep.
 
 ```
 [server] pool: emulator-5556 left the pool — worker exited with code 1
@@ -493,10 +456,10 @@ stays out if that install fails.
 ### What was ruled out, and how to clear it
 
 A quarantine says "never move *onto* this device". It lasts as long as the server process and
-has no timer, on purpose — a device that ran out of disk ten minutes ago is still out of disk.
-A successful `vk devices restart|start|stop` for that device clears it, and so does rejoining
-the pool, because coming up is a real probe. An install that fails on *every* device is read
-as a bad build, not a bad pool, so the quarantines that attempt set are rolled back.
+has no timer — a device that ran out of disk ten minutes ago is still out of disk. A
+successful `vk devices restart|start|stop` for that device clears it, and so does rejoining
+the pool. An install that fails on *every* device is read as a bad build, not a bad pool, so
+the quarantines that attempt set are rolled back.
 
 ```sh
 curl -s "$VERIKUN_SERVER/v1/health" | jq '{capacity, devices, degraded, quarantined}'
@@ -514,16 +477,15 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 - Set `VERIKUN_SERVER_AUTH_KEY` in the service environment, not on the command line.
 - Bind to the tailnet address, not `0.0.0.0`.
 - Pass `--allow-install` only if CI actually needs to push builds.
-- Restart on failure — the device lock's 5-minute idle takeover means a restart mid-run does
-  not permanently wedge anything.
+- Restart on failure — a restart mid-run does not permanently wedge anything, because an
+  idle lease is taken over after 5 minutes.
 
 The server writes its own log, so a service unit needs no output redirection — by default
 `~/.verikun/logs/server-<port>.log`, rotated at 10 MB keeping one previous generation and named
-in the startup banner; `--log-file <path>` moves it (useful when the service runs as a user
+in the startup banner. `--log-file <path>` moves it (useful when the service runs as a user
 whose `$HOME` is not where you look) and `--log-file off` leaves stderr only. It records every
-request with its status, run
-token and leased device, the reason behind every error the client was sent, and every lease,
-failover and pool change:
+request with its status, run token and leased device, the reason behind every error the
+client was sent, and every lease, failover and pool change:
 
 ```
 2026-09-02T09:14:22.108Z [server] POST /v1/exec run=a1b2c3d4 dev=emulator-5554 → 200 (812ms)
@@ -540,16 +502,11 @@ failover and pool change:
 | Exit `3`, "server unreachable" | Network path, not verikun. Check the tailnet is up on the runner. |
 | Installs rejected | The server was started without `--allow-install`. |
 | `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / `signatures do not match` | The device holds a build of the same package signed by a different key. On Android the server removes it and retries by itself; if it still fails, the message names the package and the `adb uninstall` to run on the host. iOS has no such recovery. |
-| `not enough space` / `INSTALL_FAILED_INSUFFICIENT_STORAGE` | The device's disk is full. With failover on the server moves to another attached device by itself; if it reports `no working device remains`, free space on the named device or `vk devices restart` it. |
+| `not enough space` / `Requested internal only, but not enough space` / `INSTALL_FAILED_INSUFFICIENT_STORAGE` | The device's disk is full. With failover on the server moves to another attached device by itself; if it reports `no working device remains`, free space on the named device or `vk devices restart` it. |
 | The suite ran on a device you did not expect | The server failed over. `[verikun] server moved device:` on the client, and `/v1/health`'s `quarantined`, say which device was ruled out and why. |
-| A pool's `capacity` fell during a run | Read the server log (`~/.verikun/logs/server-<port>.log`). A device only leaves the pool when its worker died; one that merely failed is `degraded` and still serving. Anything that left is retried automatically, with the reason and the next attempt logged. |
+| A pool's `capacity` fell during a run | Read the server log. A device only leaves the pool when its worker died; one that merely failed is `degraded` and still serving. Anything that left is retried automatically, with the reason and the next attempt logged. |
 | A device never rejoins the pool | Its rejoin attempts are failing — the log names the reason each time. Backoff doubles to a 30-minute ceiling, so check the most recent `reconcile:` line rather than waiting. |
-| Steps take ~2.4s each on Android | The server is on the stock read path. `curl "$VERIKUN_SERVER/v1/health" \| jq .reads` says which, and why — most often `VERIKUN_COMPANION` is set in the **server's** environment, or the [companion](/verikun/guides/companion/) declined on that device. |
+| Steps take seconds each on Android | The server is on the stock read path. `curl "$VERIKUN_SERVER/v1/health" \| jq .reads` says which, and why — most often `VERIKUN_COMPANION` is set in the **server's** environment, or the [companion](/verikun/guides/companion/) declined on that device. |
+| Device overrides left applied after a client crashed | Under `--server` the [device-state](/verikun/reference/device-state/) snapshot is written by the server process, so a client that dies outright cannot restore it. Run `vk device reset` on the device box. |
 
 More in [Troubleshooting](/verikun/guides/troubleshooting/).
-
-## Known gap
-
-Under `--server`, the [device-state](/verikun/reference/device-state/) snapshot is written by
-the **server** process. A client that crashes outright therefore leaves overrides applied on
-the device — `vk device reset` from the device box puts them back.

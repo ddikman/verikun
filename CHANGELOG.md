@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Docs**: every page trimmed to what a reader needs; history and design rationale removed, gotchas kept, open issues linked.
+
 ## [0.26.3] - 2026-09-11
 
 A `vk ai` test's description is no longer compiled into steps of its own.

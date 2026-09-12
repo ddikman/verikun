@@ -15,9 +15,9 @@ sidebar:
 | `IDB` | `idb` | Path to the `idb` binary — useful when it lives in a Python virtualenv |
 | `VERIKUN_LOG_FILE` | unset | Where [`vk server`](/verikun/guides/remote-devices-and-ci/) writes its log. A path relocates it; `off` disables the file and leaves stderr. `--log-file` wins over it. Default: `~/.verikun/logs/server-<port>.log`, rotated at 10 MB keeping one previous generation. |
 | `VERIKUN_NO_FAILOVER` | unset | Set to `1` to stop a [`vk server`](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails) moving off a device that fails. Wins over `--allow-failover`, and is announced in the server's startup log. |
-| `VERIKUN_NO_CLAIM` | unset | Set to `1` to disable [device claims](/verikun/reference/device-claims/) entirely — no reads, no writes. Restores the older behaviour: more than one attached device exits `2` rather than picking a free one. |
-| `VERIKUN_NO_PLAN_LOCK` | unset | Set to `1` to stop concurrent runs serialising their [plan compiles](/verikun/reference/ai-plans/#the-plan-cache). Restores the older behaviour: on a cold cache every lane of a parallel suite compiles the same `@include`d fragment itself. |
-| `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. It also paces the heartbeat of a job that holds devices without running commands itself (a parallel `vk suite`) — a quarter of the window, capped at 60s. |
+| `VERIKUN_NO_CLAIM` | unset | Set to `1` to disable [device claims](/verikun/reference/device-claims/) entirely — no reads, no writes. More than one attached device then exits `2` rather than picking a free one. |
+| `VERIKUN_NO_PLAN_LOCK` | unset | Set to `1` to stop concurrent runs serialising their [plan compiles](/verikun/reference/ai-plans/#the-plan-cache). On a cold cache every lane of a parallel suite then compiles the same `@include`d fragment itself. |
+| `VERIKUN_CLAIM_TTL_MIN` | `5` | Minutes a **one-off** command's claim survives without a further command. `0` expires them immediately. Does not apply to `ai`/`suite`/`batch`/`server`, whose claim lives exactly as long as the process. |
 | `VERIKUN_EMULATOR` | — | Path to the Android SDK's `emulator` binary, for `vk devices start`. Only needed when it is not on `PATH`, under `$ANDROID_HOME` / `$ANDROID_SDK_ROOT`, beside `$ADB`, or in the default SDK location. Set but unusable is a hard error, never a silent fallback. |
 
 Resolution order for the device is `--device` → `VERIKUN_DEVICE` → `ANDROID_SERIAL`. With
@@ -55,28 +55,25 @@ refuses to start.
 
 | Variable | Default | Controls |
 |---|---|---|
-| `VERIKUN_NO_RUN` | unset | Set to `1` to disable run recording entirely — every `note`, `attachImage` and `attachLog` becomes a no-op |
+| `VERIKUN_NO_RUN` | unset | Set to `1` to disable run recording entirely |
 | `VERIKUN_NO_LOGS` | unset | Skip archive-time device-log capture **on green runs only**. A failed run always captures. |
 | `VERIKUN_RUN_IDLE_MIN` | `30` | Minutes of idleness before an **implicit** run auto-archives and rolls over. `0` disables. |
 | `VERIKUN_SESSION` | — | Session identity for rollover; a change closes and archives the active run |
 | `TERM_SESSION_ID` | — | Fallback session identity when `VERIKUN_SESSION` is unset |
 | `VERIKUN_LANE` | — | Moves the active run to `./.verikun/run-<lane>/` and suffixes run ids with it. Set by a parallel [`vk suite`](/verikun/guides/suites/) on each of its child processes; you rarely set it yourself |
 
-See [Automatic rollover](/verikun/reference/reports-and-test-runs/#automatic-rollover).
-
-:::note
-The ephemeral server-side execution path deliberately ignores `VERIKUN_NO_RUN` — the server
-needs step detail to return to the client, which splices it into the client's run.
-:::
+See [Automatic rollover](/verikun/reference/reports-and-test-runs/#automatic-rollover). The
+server-side execution path ignores `VERIKUN_NO_RUN`, since the server needs each step's detail
+to return to the client.
 
 ## Tuning behaviour
 
 | Variable | Default | Controls |
 |---|---|---|
 | `VERIKUN_SHOT_MAX_EDGE` | `700` | Default screenshot longest-edge cap in pixels. Ignored unless finite and ≥ 1. |
-| `VERIKUN_COMPANION` | on | The [Android companion](/verikun/guides/companion/) is used by default; `0` (or `false`/`off`/`no`) turns it off. It makes hierarchy reads ~0.2s instead of ~2.4s, at the cost of holding the device's single `UiAutomation` connection while it runs. Under `--server` it is read in the **server's** environment, since that is where reads execute — a client cannot set it across the wire. |
-| `VERIKUN_GUARD_SETTLE_MS` | — | `vk ai` `if-present` guard settle window. `0` restores the old single-shot probe. |
-| `VERIKUN_NO_COMPILE_CHECK` | unset | Set to `1` to stop `vk ai` checking that a fresh compile [covers its test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test). Restores the older behaviour: a plan that covers only the start of the test is run and cached like any other. |
+| `VERIKUN_COMPANION` | on | The [Android companion](/verikun/guides/companion/) is used by default; `0` (or `false`/`off`/`no`) turns it off, at the cost of far slower hierarchy reads. Under `--server` it is read in the **server's** environment, since that is where reads execute. |
+| `VERIKUN_GUARD_SETTLE_MS` | — | `vk ai` `if-present` guard settle window. `0` makes a guard look once. |
+| `VERIKUN_NO_COMPILE_CHECK` | unset | Set to `1` to stop `vk ai` checking that a fresh compile [covers its test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test). A plan that covers only the start of the test is then run and cached like any other. |
 
 Screenshot precedence is `--full` > `--max <px>` > `--more` > `VERIKUN_SHOT_MAX_EDGE` > the
 default. See [Screenshots](/verikun/reference/screenshots/).
@@ -107,9 +104,9 @@ text @password {{env.TEST_ACCOUNT_PASSWORD}}
 This is how credentials reach a test without ever appearing in the prose or the cached plan.
 
 :::caution
-An unset **or empty** variable **fails the step**. That is deliberate: a missing CI secret
-must fail loudly rather than silently typing an empty string and producing a confusing
-assertion failure three steps later.
+An unset **or empty** variable **fails the step**, so a missing CI secret fails loudly rather
+than silently typing an empty string and producing a confusing assertion failure three steps
+later.
 :::
 
 ## A CI environment, end to end

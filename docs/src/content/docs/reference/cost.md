@@ -20,9 +20,8 @@ does the work:
 | **Repair** — a step's selector stopped resolving | up to 3 per failing step | `--max-cost-usd`, `--timeout` |
 | **Replay** — running the plan on the device | **none** — always `$0` | — |
 
-That is the whole cost model: pay once to compile, replay free, pay again only when the app drifts
-under a step. See [Natural-language tests](/verikun/guides/natural-language-tests/#the-cost-model)
-for the design rationale.
+Pay once to compile, replay free, pay again only when the app drifts under a step. See
+[Natural-language tests](/verikun/guides/natural-language-tests/#the-cost-model).
 
 ## When the model is called
 
@@ -34,7 +33,7 @@ things cause a miss:
 | Cause | Detail |
 |---|---|
 | The cache key changed | Key is the test prose **byte-exact**, plus `--package`, `--app-build` and the platform. A reworded sentence is a new key. |
-| The compiler fingerprint rotated | verikun's version plus its grammar and repair-prompt text. **A verikun upgrade re-spends the whole suite** — deliberately, so a plan an older compiler produced is never replayed. |
+| The compiler fingerprint rotated | verikun's version plus its grammar and repair-prompt text. **A verikun upgrade re-spends the whole suite.** |
 | `--recompile` / `--no-cache` | Skips the read outright. |
 | No cache on disk | A fresh CI runner has no `./.verikun/plans/` — see [the cold cache](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache). |
 
@@ -46,17 +45,15 @@ Two spenders that surprise people:
 
 - **`--show-plan` still compiles, and still spends.** It skips the device, not the model.
 - **Seeding from a prior build is still a paid compile.** A prior plan goes into the prompt as a
-  starting point, which makes the *result* better, not the call cheaper — it is a larger input for
-  the same one call.
+  starting point, which makes the *result* better, not the call cheaper.
 
 ### Repair
 
 A repair is triggered **only** by a selector that misses or resolves ambiguously. It is capped at
 **3 attempts per failing step** — a fixed number with no flag.
 
-An `assert` failure never heals, so it never costs anything: a failed assertion returns exit `1`
-rather than throwing, which is what makes it structurally unhealable. Neither does an environment
-error, a guard, or a `read`. See [Self-healing in CI](/verikun/guides/self-healing-in-ci/).
+An `assert` failure never heals, so it never costs anything. Neither does an environment error,
+a guard, or a `read`. See [Self-healing in CI](/verikun/guides/self-healing-in-ci/).
 
 ## How the estimate is calculated
 
@@ -67,19 +64,8 @@ Each API response reports its token usage. Every response is priced with the sam
 ```
 
 where `in$` and `out$` are the model's price per **1M** tokens
-([where they come from](#where-the-rates-come-from)). Worked through, with an illustrative rate of
-\$3 in / \$15 out per 1M — read your model's real rate from the table:
-
-```
-input        1,500 tok
-output       2,000 tok
-cache_write  6,000 tok    the stable grammar prefix, written on the first call
-cache_read       0 tok
-
-(1500 × 3  +  2000 × 15  +  6000 × 3 × 1.25  +  0)  ÷  1,000,000
-= (4,500  +  30,000  +  22,500)  ÷  1,000,000
-= $0.0570
-```
+([where they come from](#where-the-rates-come-from)). At an illustrative \$3 in / \$15 out, a
+compile with 1,500 input, 2,000 output and 6,000 cache-write tokens costs about \$0.057.
 
 Four things about that formula are not visible from the outside:
 
@@ -97,11 +83,8 @@ Every model carries two numbers: USD per 1M input tokens and USD per 1M output t
 
 **The single source of truth is
 [`src/agent/cost.ts`](https://github.com/ddikman/verikun/blob/main/src/agent/cost.ts)** — read your
-model's rate there. The same table drives the `--model` allowlist and the provider routing, so a
-model's price, its allowed-ness and its backend can never disagree. The file also records the date
-each vendor's prices were captured.
-
-For which models exist, which backend serves each, and which key it needs, see
+model's rate there. The file also records the date each vendor's prices were captured. For which
+models exist, which backend serves each, and which key it needs, see
 [AI plans & models](/verikun/reference/ai-plans/#models).
 
 :::caution
@@ -136,19 +119,11 @@ test's ceiling, because the check happens after a test finishes rather than mid-
 
 ### When it is checked
 
-The budget is a **pre-spend** gate, tested at four points:
-
-1. **Before each further compile of a multi-chunk test** — fatal, so a test built from
-   [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
-   fragments cannot quietly cost several times the ceiling. Crossing it on the *last* chunk is
-   not a breach (nothing further is asked for; point 3 then declines to run), and a chunk
-   another run compiled while this one waited costs nothing.
-2. **Before the lint retry** — non-fatal: it keeps the first plan rather than paying for a better one.
-3. **After compile, before the device run** — fatal. The run never starts.
-4. **Before each repair attempt** — fatal.
-
-The check happens *before* a call, so the actual spend can overshoot the ceiling by up to one
-call. It is never checked during replay, because replay never spends.
+The budget is a **pre-spend** gate: it is tested before each further compile of a multi-chunk
+test, before the lint retry (which is skipped rather than failed), after compile but before the
+device run, and before each repair attempt. Because the check happens *before* a call, the actual
+spend can overshoot the ceiling by up to one call. It is never checked during replay, because
+replay never spends.
 
 ### What a breach looks like
 
@@ -161,8 +136,7 @@ call. It is never checked during replay, because replay never spends.
   [Exit codes](/verikun/reference/exit-codes/).
 - **The run is recorded as failed**, so the JUnit and HTML report show it red. A budget abort can
   never archive green.
-- **`--retries` never retries it.** Each attempt would get its own fresh ceiling and simply
-  re-abort, having spent twice.
+- **`--retries` never retries it** — each attempt would get its own fresh ceiling and re-abort.
 - **A compile-time abort produces no artifacts at all** — no run directory, no report, no JUnit,
   and therefore **empty stdout**. Worth knowing if you script `REPORT=$(vk ai …)`.
 
@@ -179,11 +153,8 @@ compile=$0.0184 · repairs=$0.0000 · replay=$0 · cache_read=12043 tok · est $
 | `compile` | Spend on compiling the prose into a plan, including any lint retry |
 | `repairs` | Spend on model repairs of drifted steps |
 | `replay` | Always `$0` — running the plan calls no model |
-| `cache_read` | Cached input tokens read across the run |
+| `cache_read` | Cached input tokens read across the run — the only token count printed |
 | `est` | `compile + repairs`, the figure `--max-cost-usd` meters |
-
-`cache_read` is the **only** token count ever printed. Input, output and cache-write counts are
-converted to dollars and discarded.
 
 Where the line surfaces:
 
@@ -215,20 +186,18 @@ at runtime. Caching cuts spend, not the key requirement. Only `--show-plan` degr
 | Do this | Because |
 |---|---|
 | **Persist `./.verikun/plans/`** between CI runs | It is the difference between \$0 and a full recompile of every test, every run. [How](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache) |
-| **Name identifiers in the prose** — `Tap @get_started`, not "tap the big green button" | A selector that resolves never triggers a repair. Repairs are the only recurring cost on a warm cache. |
-| **Assert, don't just act** | An assert failure is terminal and never healed, so it costs nothing and fails fast instead of paying for three repair attempts. |
+| **Name identifiers in the prose** — `Tap @get_started`, not "tap the big green button" | A selector that resolves never triggers a repair, the only recurring cost on a warm cache. |
+| **Assert, don't just act** | An assert failure is terminal and never healed, so it fails fast instead of paying for three repair attempts. |
 | **Pick a cheaper model**, or a CLI backend | Compile is output-heavy (the plan is JSON), so the output rate dominates. |
 | **Leave `--effort` alone** unless a test needs it | It bills through the output rate. |
-| **Tighten `--max-cost-usd` per test** | It is the only cap that exists; the suite has none. |
-| **Expect a full re-spend after upgrading verikun** | The compiler fingerprint rotates on purpose. Budget for it rather than being surprised. |
+| **Tighten `--max-cost-usd` per test** | It is the cap that always applies; `--max-suite-cost-usd` is optional. |
+| **Expect a full re-spend after upgrading verikun** | The compiler fingerprint rotates. Budget for it. |
 
 ## What is not metered here
 
 This page is about **verikun's own** model spend — the compile and repair calls it makes on your
-behalf.
-
-It is not about the tokens **your** agent spends while driving the device: reading a `vk ui` dump
-back into its context, or looking at a screenshot. That is a separate budget, on a separate bill,
-and it is usually the larger of the two. It is covered in
+behalf. It is not about the tokens **your** agent spends while driving the device: reading a
+`vk ui` dump back into its context, or looking at a screenshot. That is a separate budget, usually
+the larger of the two, covered in
 [Using it from an AI agent](/verikun/getting-started/using-from-an-agent/) and
 [Screenshots](/verikun/reference/screenshots/).

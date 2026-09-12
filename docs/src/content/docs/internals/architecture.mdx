@@ -29,17 +29,6 @@ Three layers, separated so that **two of them never touch a platform**.
   el --> vp`}
 />
 
-The same thing as the ASCII diagram that has always been in the README:
-
-```
-cli.ts ──> drivers/ ──> adb (Android) / idb + simctl (iOS)   (platform I/O)
-   │           └─ produces normalized Element[]
-   ├─ ui/android-parse.ts   uiautomator XML -> Element[]
-   ├─ ui/ios-parse.ts       idb describe-all JSON -> Element[]
-   ├─ ui/selector.ts        @id / text: / desc: / class: matching
-   └─ ui/format.ts          compact / tree / json rendering
-```
-
 ## `src/types.ts` is the seam
 
 The `Driver` interface is what every platform backend implements, and `Element` is the
@@ -65,8 +54,8 @@ and, if it should appear in a test run, an entry in `RECORDABLE` in `run.ts`.
 
 Helpers and handlers that outgrow the dispatcher live under `commands/`: `context.ts` holds
 the `Ctx` every handler takes, `auto-wait.ts` the selector auto-wait, `batch.ts` the batch
-line grammar and `devices.ts` the device listing. They never import `cli.ts` (`auto-wait.ts`
-takes `Ctx` from `commands/context.ts`), which is what keeps further extraction cycle-free.
+line grammar and `devices.ts` the device listing. They never import `cli.ts`, so there is no
+cycle.
 
 `run.ts` and `report.ts` sit beside `cli.ts`. They may use the driver, like `cli.ts` does —
 they are not part of the platform-agnostic core. `report.ts` is pure: `RunState` → JUnit/HTML
@@ -92,11 +81,8 @@ snapshot cache expecting staleness to be acceptable.**
 | Logs | `logcat` |
 
 `launch()` resolves the app's default LAUNCHER activity with
-`cmd package resolve-activity --brief` and starts it with `am start -n <component>`.
-
-It deliberately does **not** use `monkey -c LAUNCHER`: monkey hangs indefinitely on some OEM
-skins (MIUI/HyperOS, for example), tripping the exec timeout. If you touch launch, keep the
-`am start` path.
+`cmd package resolve-activity --brief` and starts it with `am start -n <component>`. Keep
+that path: `monkey -c LAUNCHER` hangs indefinitely on some OEM skins (MIUI/HyperOS).
 
 ### iOS — `drivers/ios.ts`
 
@@ -111,12 +97,8 @@ cannot address the simctl-only `booted` alias.
 ### Honest degradation
 
 Two methods have no clean iOS equivalent and **degrade honestly** rather than half-implement:
-
-- `clearApp` throws exit `3` — there is no per-app data reset.
-- `currentApp` returns `"(unknown)"` — there is no foreground query.
-
-Keep that shape for any similar gap. A half-implementation that quietly returns something
-plausible is worse than an error.
+`clearApp` throws exit `3` (no per-app data reset) and `currentApp` returns `"(unknown)"`
+(no foreground query). Keep that shape for any similar gap.
 
 ## `device/settings.ts` is a table, not code
 
@@ -134,7 +116,7 @@ so a platform gap can never be documented in one place and forgotten in another.
 | File | Purpose |
 |---|---|
 | `bin/verikun.ts` | The `#!/usr/bin/env node` shim. Calls `run()` and exits with its code, or prints `Fatal:` and exits `3`. |
-| `cli.ts` | Every command handler except `vk devices` (`commands/devices.ts`), `usageText()`, the dispatch switches, `executeOutcome` / `executeParsed` / `executeForServer`, `mapError`, provider selection, and the `ai` / `suite` / `install` orchestration. Still the big file; helpers it has shed live under `commands/`. |
+| `cli.ts` | Every command handler except `vk devices` (`commands/devices.ts`), `usageText()`, the dispatch switches, `executeOutcome` / `executeParsed` / `executeForServer`, `mapError`, provider selection, and the `ai` / `suite` / `install` orchestration. |
 | `commands/context.ts` | The `Ctx` every command handler takes: driver, platform, device, positionals, flags, and the recorder when the command is part of a test run. |
 | `commands/auto-wait.ts` | Selector auto-wait: the wait window and poll interval, no-window tolerance while polling, and the waiting `resolveOneWaiting` / `matchWaiting` every selector-resolving handler goes through. |
 | `commands/batch.ts` | The batch line grammar: shell-like quoting without a shell, and the globals a `batch` call passes down to every line. |
