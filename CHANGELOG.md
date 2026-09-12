@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-13
+
+### Added
+- **`vk doctor`** warns when the host's adb server has leaked USB handles, naming the restart that fixes it.
+- **`vk server`** restarts a rotted adb server while idle; `VERIKUN_NO_ADB_RECYCLE=1` opts out.
+
 ### Changed
 - **Docs**: every page trimmed to what a reader needs; history and design rationale removed, gotchas kept, open issues linked.
 

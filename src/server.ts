@@ -59,6 +59,7 @@ import {
   LogsResponse, RpcErrorBody,
 } from './rpc';
 import { platformFromFlags, deviceFromFlags } from './cli';
+import { adbRecycleEnabled, adbServerHealth, adbServerRotting, describeRot, recycleAdbServer } from './adb-health';
 import { serialQueue, sleep } from './wait';
 import { VERSION } from './version';
 
@@ -90,6 +91,10 @@ const LOCK_IDLE_MS = 5 * 60 * 1000;
 // comfortably inside the client's 15-minute install ceiling at ~1 minute an install,
 // while a farm of ten wedged emulators cannot burn ten installs inside one request.
 const MAX_FAILOVER_HOPS = 2;
+// How often to ask whether the host's adb server has rotted. Generous on purpose: the
+// check shells out to `log show` (~1s) and the condition it looks for accumulates over
+// DAYS, so a tight interval would buy nothing and spend host time on every idle server.
+const ADB_RECYCLE_CHECK_MS = 10 * 60 * 1000;
 // Gap between the two probes that separate a momentary blip from a dead device. Mirrors
 // suite.ts's stillBroken, and for the same reason: a flaky dump also surfaces as exit 3,
 // so acting on one probe would rotate the pool on ordinary flake.
@@ -517,6 +522,70 @@ export function buildServer(config: ServerConfig): Server {
   // The first timer this server has ever had, so this is the first thing that could hold the
   // process open after Ctrl-C. It must not.
   reconcileTimer?.unref?.();
+
+  // --- adb server recycle ----------------------------------------------------
+  //
+  // A long-lived adb server leaks USB handles until it drops devices mid-run, and only a
+  // restart cures it (the measurements: `adb-health.ts`). `vk server` is BUILT to sit on a
+  // CI host for days — precisely the condition that rots it — so this is ON by default:
+  // on a dedicated box, recycling a broken transport is the expected behaviour, not a
+  // surprise. `VERIKUN_NO_ADB_RECYCLE=1` opts out, for the rare host running other adb
+  // work beside the server; that restores today's behaviour exactly, the equivalence
+  // `VERIKUN_NO_CLAIM` and `VERIKUN_NO_FAILOVER` are held to.
+  //
+  // Three properties are what make a DEFAULT-ON, HOST-GLOBAL restart safe:
+  //
+  //   * EVIDENCE, NEVER AGE. A healthy server measures exactly zero violations, so a
+  //     healthy host is never touched. Age alone would restart a perfectly good server on
+  //     a timer — a new way to fail, which is the one thing this may not add.
+  //   * FULLY IDLE ONLY. `kill-server` drops every transport on the machine, so anything
+  //     mid-run vetoes. `othersActive` is the existing predicate for that and already
+  //     steps over an idle lease, so a crashed client cannot wedge this forever.
+  //   * ANDROID ONLY — and in practice macOS only, since `adbServerHealth` reports no
+  //     evidence elsewhere and no-evidence is never rot. An iOS server never pays for it.
+  //
+  // The residual race is a client arriving during the ~2s restart and getting a busy
+  // error. Accepted deliberately: we only ever get here when adb is ALREADY broken, so
+  // that client's alternative was a server that drops its device mid-suite. An honest
+  // refusal beats a half-dead transport. `exclusive` is held across the restart so the
+  // refusal is the clean one the lease layer already knows how to give.
+  const adbRecycleOn = adbRecycleEnabled(config.platform);
+  const RECYCLE_TOKEN = '__adb-recycle__';
+
+  const recycleAdbIfRotten = async (): Promise<void> => {
+    // Cheap gate first: never shell out to `log show` while the server is working.
+    if (othersActive(RECYCLE_TOKEN) || inFlight.size > 0) return;
+    const health = adbServerHealth();
+    if (!adbServerRotting(health)) return;
+    await serializeFailover(async () => {
+      // Re-check inside the queue: the health probe shells out for ~1s, which is ample
+      // time for a run to start, and by here we are about to cut every transport.
+      if (othersActive(RECYCLE_TOKEN) || inFlight.size > 0) return;
+      err(`[server] ${describeRot(health)}`);
+      exclusive = RECYCLE_TOKEN;
+      try {
+        const ok = recycleAdbServer(process.env.ADB || 'adb');
+        err(ok ? '[server] adb server restarted — devices reconnecting' : '[server] adb server restart failed — continuing');
+      } finally {
+        exclusive = null;
+      }
+    });
+  };
+
+  let recycling = false;
+  const recycleTimer = adbRecycleOn
+    ? setInterval(() => {
+        if (recycling) return;
+        recycling = true;
+        void recycleAdbIfRotten()
+          .catch((e) => err(`[server] adb recycle check failed — ${firstLine((e as Error).message)}`))
+          .finally(() => {
+            recycling = false;
+          });
+      }, ADB_RECYCLE_CHECK_MS)
+    : null;
+  // Like the reconcile timer: must never hold the process open at Ctrl-C.
+  recycleTimer?.unref?.();
 
   const pickFailoverDevice = (failed: string, reason: string): Promise<string | null> =>
     serializeFailover(() => pickFailoverDeviceLocked(failed, reason));
@@ -1768,6 +1837,7 @@ export function buildServer(config: ServerConfig): Server {
   // builds a server and drops it leaves neither behind, and Ctrl-C is clean in production.
   server.on('close', () => {
     if (reconcileTimer) clearInterval(reconcileTimer);
+    if (recycleTimer) clearInterval(recycleTimer);
     dropRetainedInstall();
   });
 
@@ -2018,6 +2088,18 @@ export async function cmdServer(positionals: string[], flags: Flags): Promise<nu
         err('[server] NOTE: an authenticated client can now power-cycle AND erase this device.');
       }
       err(`[server] failover: ${failover.why}`);
+      // Announced in both states, like the failover kill switch. ON is worth saying because
+      // `adb kill-server` is host-global and an operator should not meet it as a surprise;
+      // OFF is worth saying because a rotted adb server is otherwise a baffling flake.
+      if (platform === 'android') {
+        err(
+          `[server] adb recycle: ${
+            adbRecycleEnabled(platform)
+              ? 'on — a rotted adb server is restarted while idle (VERIKUN_NO_ADB_RECYCLE=1 to disable)'
+              : 'disabled (VERIKUN_NO_ADB_RECYCLE)'
+          }`,
+        );
+      }
       err(
         serverLog
           ? `[server] log: ${serverLog.path} (--log-file ${LOG_OFF} to disable)`

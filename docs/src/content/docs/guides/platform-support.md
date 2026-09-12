@@ -206,10 +206,16 @@ first tap rather than half-way through a half-modified device.
 <tr><td><code>vk server</code> failover — unreachable device</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>vk server</code> failover — device cannot serve an install</td><td>✅</td><td>✅</td><td>❌ probe only</td><td>❌ probe only</td></tr>
 <tr><td><code>vk server</code> pool degrade / rejoin sweep</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>vk server</code> adb-server recycle</td><td>✅ macOS host only</td><td>✅ macOS host only</td><td>⊘ no adb</td><td>⊘ no adb</td></tr>
 <tr><td><code>vk server --log-file</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 </tbody>
 </table>
 
+- **The adb-server recycle needs a macOS host.** A long-running adb server leaks USB handles
+  until devices drop mid-run, and the server restarts it while idle. Detecting it reads the
+  macOS kernel's guard-violation log, so on a Linux host the server never recycles and
+  `vk doctor` stays quiet. iOS has no adb to recycle. See
+  [Remote devices & CI](/verikun/guides/remote-devices-and-ci/#it-keeps-the-hosts-adb-server-healthy).
 - **Failover on iOS moves only for an unreachable device.** Telling "this device cannot take
   the build" from "this build is broken" relies on `adb`'s `INSTALL_FAILED_*` vocabulary,
   which `idb` does not share, so a full simulator does not trigger a move: the install fails.

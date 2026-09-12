@@ -171,6 +171,39 @@ A pool's own members are excluded from its failover candidates, so on `--devices
 
 Operator view: [Failover on a pool](/verikun/guides/remote-devices-and-ci/#failover-on-a-pool).
 
+## Recycling adb is host-global, so it needs evidence
+
+A long-lived adb server leaks IOKit Mach ports until it drops devices mid-run, and only a
+restart clears it. Measured on macOS: a 9-day-old server emitting kernel guard violations at
+2/sec, all from the adb pid; a restart took it to zero and every device returned in ~5s.
+
+Why the server owns this rather than the operator: **adb rot defeats device failover.**
+`device/failover.ts` moves off a device that fails, but every candidate sits behind the same
+host adb — so when the transport is what broke, failover retires healthy phones for a
+host-side fault. That is the polarity error `ARTIFACT_RULES` exists to prevent on the install
+path: attribute only what you can actually attribute.
+
+Four rules hold a default-on, host-global restart safe:
+
+- **Evidence, never age.** A healthy server measures exactly zero violations; a rotted one
+  60–120 per minute. There is no middle ground to tune a threshold against, so any nonzero
+  count is the signal — and a healthy host is never touched. Age alone would restart a good
+  server on a timer, which is a new way to fail.
+- **The rate is a leaked-handle counter.** adb scans USB at ~1 Hz and each *stale* handle
+  throws one violation per pass, so the per-minute count reads as "how many handles adb has
+  leaked". It steps up at the instant a device re-enumerates and never comes back down.
+- **Fully idle only.** `kill-server` drops every transport on the machine, so anything
+  mid-run vetoes. `othersActive` is the gate, and it already steps over an idle lease, so a
+  crashed client cannot wedge the recycle forever. `exclusive` is held across the restart, so
+  a client arriving inside the ~2s window gets the clean refusal the lease layer already
+  gives — accepted deliberately, because we only get here when adb is *already* dropping
+  devices.
+- **No evidence is never rot.** Off macOS there is no guard-violation log, so the check
+  reports nothing and the server does nothing. It never degrades to a blind restart.
+
+`VERIKUN_NO_ADB_RECYCLE=1` restores the previous behaviour exactly, the equivalence
+`VERIKUN_NO_CLAIM` and `VERIKUN_NO_FAILOVER` are held to.
+
 ## The plan cache fingerprint
 
 Each cache entry records a **compiler fingerprint** = verikun's version + `GRAMMAR` +

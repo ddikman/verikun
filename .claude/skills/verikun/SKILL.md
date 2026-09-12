@@ -37,15 +37,20 @@ examples below use `vk`.
 ## Before you start (once per session)
 
 Run `vk doctor` once before the first device command. Alongside the adb/device checks it
-reports version staleness on stderr — it never fails on that, so treat it as information:
+reports version staleness and host problems on stderr — it never fails on those, so treat
+them as information:
 
 - **`claude-code-plugin: … behind this CLI`** → **this skill file is out of date.** Trust
   `vk --help` over what you read here when they disagree, and tell the user to run
   `claude plugin update verikun@verikun` and restart Claude Code.
 - **`verikun: … npm has <newer>`** → tell the user `npm install -g verikun@latest`.
+- **`adb server: … leaking USB handles`** → **the host's adb server has rotted.** Devices
+  will drop mid-flow for reasons that look like your selectors failing. Tell the user to run
+  `adb kill-server && adb start-server` — safe, and devices reconnect in seconds.
 
 **Tell the user, don't run it.** Upgrading changes their machine, and the plugin path needs
-a Claude Code restart to take effect. Mention it once and move on.
+a Claude Code restart to take effect; restarting adb is host-wide and drops every device on
+the machine, not just yours. Mention it once and move on.
 
 ## The loop: act → inspect → assert
 
