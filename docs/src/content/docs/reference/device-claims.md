@@ -8,9 +8,7 @@ sidebar:
 Running two or three agents in parallel against one pool of phones, emulators and simulators,
 the question that matters is *which device is free right now*. verikun answers it itself: the
 first device-touching command **claims** the device it resolves, so a second job picks a
-different one — or is told, in milliseconds, that everything is busy and who has it. Without
-that, two jobs on one device clobber each other's app, and it surfaces as ordinary assertion
-failures that read exactly like a regression.
+different one — or is told, in milliseconds, that everything is busy and who has it.
 
 ## What you see
 
@@ -38,8 +36,8 @@ Every attached device is in use:
 Wait for one, free it with `verikun device release <serial>`, or set VERIKUN_NO_CLAIM=1 to ignore claims.
 ```
 
-You named a busy device explicitly. Also exit `2` — see [Why there is no
-`--force`](#why-there-is-no---force):
+You named a busy device explicitly. Also exit `2` — there is no `--force`, see
+[Releasing](#releasing):
 
 ```
 $ vk tap @submit --device emulator-5554
@@ -51,8 +49,7 @@ emulator-5554 is in use by workspace 'brussels' (last seen 2m ago).
 
 ## Seeing who holds what
 
-`vk devices` grows a `USED BY` column when anything is claimed — and only then, so a host
-where nothing is ever claimed sees the table it always saw:
+`vk devices` grows a `USED BY` column when anything is claimed — and only then:
 
 ```
 $ vk devices
@@ -79,8 +76,9 @@ cannot reach — hand it back explicitly:
 vk device release emulator-5554
 ```
 
-That releases another job's claim too. You had to type the serial, and refusing would leave
-no way to recover a stuck device at all.
+That releases another job's claim too. There is deliberately no `--force` on ordinary
+commands: taking a device another job is driving breaks both runs. To ignore claims for a
+whole invocation, set `VERIKUN_NO_CLAIM=1` (below).
 
 ## When a claim expires
 
@@ -92,26 +90,18 @@ A claim is refreshed between commands, so two signals decide whether it is still
 | Idle time since the last command | Live for **5 minutes** by default |
 | The owning process is **gone**, and it owned the whole job (`ai` / `suite` / `batch` / `server`) | Free **immediately** |
 
-A running process always counts because the heartbeat can only fire *between* commands — a
-large `install` or a model repair round-trip cannot report that it is still working. `ai`,
-`suite`, `batch` and `server` are one process for the whole job, so their death frees the
-device at once; a one-off `vk tap` exits after every command while the job carries on, which is
-what the idle window is for. `VERIKUN_CLAIM_TTL_MIN` tunes it (`0` expires one-off claims at
-once); one minute is usually too tight for an agent that pauses to think between taps.
+A running process always counts as live, however long it has been silent — a large `install`
+or a model round-trip cannot refresh the claim while it runs. `ai`, `suite`, `batch` and
+`server` are one process for the whole job, so their death frees the device at once; a
+one-off `vk tap` exits after every command while the job carries on, which is what the idle
+window is for. `VERIKUN_CLAIM_TTL_MIN` tunes it (`0` expires one-off claims at once).
 
 ## Turning it off
 
-`VERIKUN_NO_CLAIM=1` disables reads **and** writes. That restores the previous behaviour
-exactly — one attached device auto-resolves, more than one exits `2` rather than guessing —
-and makes the run invisible to other jobs. It is the escape hatch for a takeover, for a
-single-user machine that wants nothing to do with any of this, and for debugging (if
-behaviour differs with it set, the claim store is involved).
-
-### Why there is no `--force`
-
-Taking a device another job is driving is precisely the thing that breaks both runs, so it is
-not a flag. Making it an environment variable keeps it deliberate — you opt a whole
-invocation out of coordination, rather than reaching for a convenient flag mid-flow.
+`VERIKUN_NO_CLAIM=1` disables claim reads **and** writes: one attached device auto-resolves,
+more than one exits `2` rather than guessing, and the run is invisible to other jobs. Use it
+to take over a device on purpose, on a single-user machine that wants none of this, or to
+check whether the claim store is involved in a problem.
 
 ## Where claims live
 
@@ -121,24 +111,22 @@ One JSON file per device under `~/.verikun/devices/`:
 ~/.verikun/devices/emulator-5554-3c9a1f04.json
 ```
 
-**Host-global, not per-workspace**: a device is a fact about the machine, and the jobs that
-collide are in different directories by definition. One file per device, because the premise is
-concurrent writers. A claim records the serial and platform, the owning working directory and
-session, the pid and hostname, and when it was taken and last seen. Reads are **tolerant**: a
-corrupt or unreadable file counts as unclaimed.
+Claims are **host-global, not per-workspace**: a device is a fact about the machine, and the
+jobs that collide are in different directories. A claim records the serial and platform, the
+owning working directory and session, the pid and hostname, and when it was taken and last
+seen. A corrupt or unreadable file counts as unclaimed, and an unwritable store logs and
+continues — the store is never a new way to fail.
 
 ## What counts as "the same job"
 
 A claim is yours when **either** the session matches (`VERIKUN_SESSION`, else
-`TERM_SESSION_ID`) **or** the working directory does. Either, not both, deliberately: the only
-unsafe error is falsely accusing your own job, and an agent harness may run every command in a
-fresh shell with no stable session id.
+`TERM_SESSION_ID`) **or** the working directory does. An agent harness may run every command
+in a fresh shell with no stable session id, so either signal is enough.
 
 ## Remote devices
 
 Over [`--server`](/verikun/guides/remote-devices-and-ci/) the claim is held by the server
-process, on the host where the devices are; the server's own per-run lease is the finer
-mechanism for two clients sharing one server, and claims sit beneath it. When a server
+process, on the host where the devices are; two clients sharing one server are arbitrated by
+the server's own per-run lease. When a server
 [fails over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails), the claim
-moves with the binding — the new device is claimed, probed and committed before the old one is
-released — and a candidate another job holds is skipped, not quarantined.
+moves with the binding, and a candidate another job holds is skipped.

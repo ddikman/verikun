@@ -6,7 +6,7 @@ sidebar:
 ---
 
 Exit codes are an **API**, not a convenience. An agent or a CI job branches on them without
-parsing prose, so they are stable and deliberate.
+parsing prose, so they are stable.
 
 | Code | Meaning |
 |---|---|
@@ -16,9 +16,9 @@ parsing prose, so they are stable and deliberate.
 | `3` | environment error — `adb`/`idb`/`simctl` missing, no usable device, dump failed |
 
 Over [`--server`](/verikun/guides/remote-devices-and-ci/), a server that failed over does not
-change these. An install that succeeded on another device is still `0`; one that exhausted the
-pool is still `3`, carrying the **first** device's error. A step that failed on a device the
-server has since moved off keeps that device's exit code — it is never re-run elsewhere.
+change these: an install that succeeded on another device is `0`, one that exhausted the pool
+is `3` carrying the **first** device's error, and a step that failed on a device the server
+has since moved off keeps that device's code — it is never re-run elsewhere.
 
 **stdout is data; stderr is diagnostics.** Healed-match notes, "tapped …" confirmations and
 warnings all go to stderr so stdout stays parseable.
@@ -32,15 +32,13 @@ This is the distinction that matters operationally:
 
 `ai`, `suite`, `install` and `server` verify the toolchain **up front**, so a `3` arrives
 immediately with an install hint instead of halfway through a flow. A `suite` whose device
-dies mid-run stops with `3` rather than reporting every remaining test as a failure — which
-would read exactly like a mass regression.
+dies mid-run stops with `3` rather than reporting every remaining test as a failure.
 
 ## Warnings have no code of their own
 
-There is no fifth code for "worth knowing about", deliberately: `set -e` makes any new
-non-zero value a failure, so a warning code would be read as one by exactly the scripts it
-was meant to spare. Warnings go to **stderr and leave the exit code alone** — `vk doctor`
-prints an out-of-date CLI or plugin, and the command that fixes it, then still exits `0`.
+Warnings go to **stderr and leave the exit code alone**: `vk doctor` prints an out-of-date
+CLI or plugin and the command that fixes it, then still exits `0`. A fifth code would be read
+as a failure by every `set -e` script.
 
 ## What produces each code
 
@@ -72,8 +70,8 @@ prints an out-of-date CLI or plugin, and the command that fixes it, then still e
 | Any unexpected, non-`CliError` throw | `3` |
 
 :::note
-`assert` **returns** exit `1` — it never throws. That distinction is load-bearing: it is what
-stops [`vk ai`](/verikun/guides/natural-language-tests/) from ever healing a real assertion
+`assert` **returns** exit `1` — it never throws. That is what stops
+[`vk ai`](/verikun/guides/natural-language-tests/) from ever healing a real assertion
 failure. See [Contracts](/verikun/internals/contracts/#heal-vs-terminal).
 :::
 
@@ -85,11 +83,8 @@ produces the report and gates CI. There is no separate check step to wire up.
 ## `batch`
 
 [`vk batch`](/verikun/guides/writing-test-cases/#explicit-steps-vk-batch) stops at the first
-line that exits non-zero and **propagates that line's exit code**. A failed `tap` or `assert`
-means the rest of the flow can no longer be trusted.
-
-This is also why `batch` cannot express "this step *should* fail" — for that you need a
-harness that asserts on the code.
+line that exits non-zero and **propagates that line's exit code**. It therefore cannot express
+"this step *should* fail" — for that you need a harness that asserts on the code.
 
 ## `vk ai`
 
@@ -100,11 +95,8 @@ harness that asserts on the code.
 | The compile [did not cover the test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) | `1` |
 | Environment aborted (`abortedForEnv`) | `3` |
 
-The `3` for an environment abort is deliberate: it must not be confused with a regression.
-
-A rejected compile is `1` for the mirror-image reason: `2` would make `vk suite` treat it as a
-usage error and never retry it, and `3` would make a lane probe the device and possibly retire
-a perfectly healthy phone for a problem that was entirely model-side.
+An environment abort is `3` so it is never read as a regression. A rejected compile is `1`,
+not `2`, so `vk suite --retries` retries it.
 
 ## `vk suite`
 
@@ -116,14 +108,13 @@ a perfectly healthy phone for a problem that was entirely model-side.
 | `3` | Environment — the provider or device toolchain is unavailable, or the box broke mid-run |
 
 Retry interaction: a thrown **exit `2`** (usage) is the only non-retryable throw. Every other
-code, including `3`, is retried while attempts remain — an environment wobble is worth
-riding out. A [**budget abort**](/verikun/reference/cost/#the-budget) is never retried,
-because each attempt gets its own ceiling and would simply re-abort having spent twice. It
-exits `1`, like any other failure; `abortedForBudget` in `--json` is what tells them apart.
+code, including `3`, is retried while attempts remain. A
+[**budget abort**](/verikun/reference/cost/#the-budget) is never retried, since each attempt
+would get its own fresh ceiling; it exits `1` like any other failure, and `abortedForBudget`
+in `--json` is what tells them apart.
 
 `--max-suite-cost-usd` stops the suite at **`1`**, not `3`: the box is fine, the run just did
-not finish — the same verdict `vk ai --max-cost-usd` already produces. `index.json`'s
-`aborted.kind` says which of the two happened.
+not finish. `index.json`'s `aborted.kind` says which of the two happened.
 
 Across a [pool](/verikun/guides/suites/#running-across-several-devices), a broken device
 retires its lane and its tests move to the others; `3` arrives only once **every** device is
@@ -143,11 +134,10 @@ trigger rather than becoming a terminal failure.
 | `409` | every device is leased by another run |
 | `500` | `3` |
 
-Response bodies carry `{ error, exitCode, errorKind? }`, and `errorKind` is the thrown error's
-**class** — so it is rebuilt with its subclass identity intact on the client side, on **every**
-route rather than only on `/v1/exec`. That is what keeps a remote selector miss a heal trigger,
-and what lets a `vk ai` guard tell a mid-launch `NoWindowError` from a broken device (both are
-exit `3`). Older servers omit the field; feature-detect on it, never on `version`.
+Response bodies carry `{ error, exitCode, errorKind? }`. `errorKind` is the thrown error's
+**class**, so the client rebuilds it with its identity intact — that is what lets a `vk ai`
+guard tell a mid-launch `NoWindowError` from a broken device when both are exit `3`. Older
+servers omit the field; feature-detect on it, never on `version`.
 
 ## Using them from a script
 
@@ -163,6 +153,5 @@ esac
 
 ## Where this is implemented
 
-`src/errors.ts` carries the contract via `CliError(message, exitCode)`, thrown from anywhere.
-The single `try`/`catch` in `run()` is the **only** place an error maps to a process exit
-code, and a non-`CliError` throw becomes `3`.
+`CliError(message, exitCode)` in `src/errors.ts` carries the code from wherever it is thrown;
+the one `try`/`catch` in `run()` maps it to the process exit, and any other throw becomes `3`.

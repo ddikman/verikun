@@ -12,17 +12,13 @@ import ciArchitecture from '../../../assets/ci-architecture-overview.png';
     in ci-architecture-overview.prompt.md — frontmatter cannot hold it (Starlight silently
     strips unknown keys). Claims the image encodes, to re-check if the architecture changes:
     the engine and both model calls are runner-side, and exactly one labelled channel crosses
-    to the device box. It does NOT encode "an assert failure is never healed" — the prose
-    below is the only place that claim appears, so it must survive any trim. */}
+    to the device box. It does NOT encode "an assert failure is never healed" — the bullet
+    under "Should it heal, or just fail?" is where that claim lives on this page. */}
 
 `vk ai` repairs a step whose selector stopped resolving, and it does that on CI exactly as it
-does on your laptop. There is **no flag to turn it off**.
-
-That sounds alarming for a gate — a test suite that fixes itself is a test suite that could
-pass when it should not. It is not, and this page is why: a heal is deliberately **narrow**
-(only two failure kinds qualify) and deliberately **loud** (every one is recorded and named in
-the report). The choice is not *heal silently* versus *fail loudly*. It is **heal and tell you**
-versus fail.
+does on your laptop. There is **no flag to turn it off**. That is safe for a gate because a
+heal is **narrow** (only two failure kinds qualify) and **loud** (every one is recorded and
+named in the report).
 
 ## What actually runs where
 
@@ -32,10 +28,8 @@ The part people get backwards: **the engine is on the CI runner, not on the devi
 Compiling the prose, the plan cache, replaying the plan, deciding a repair and assembling the
 report all happen runner-side. `vk server` receives **one validated command per HTTP
 round-trip**, runs it over `adb`/`idb`, and hands back pass/fail plus that step's evidence. It
-holds no API key and never talks to a model.
-
-That is also the security story: no pull-request code and no model credential ever reach the
-machine with the phone. Full responsibility split in
+holds no API key and never talks to a model, so no pull-request code and no model credential
+ever reach the machine with the phone. Full responsibility split in
 [Remote devices & CI](/verikun/guides/remote-devices-and-ci/#the-shape-of-it).
 
 ## Should it heal, or just fail?
@@ -49,13 +43,9 @@ What matters is how little that can hide. Exactly two failures are healable: a s
   `@submit_button` still gets tapped, and the report tells you it changed. Failing the build
   for a cosmetic rename is noise, not signal.
 - **A heal cannot hide a failed `assert`.** Assertions are never healed — healing one would
-  mask the exact regression the test exists to catch. The mechanism is worth knowing: `assert`
-  *returns* exit `1` rather than throwing, so the engine never sees a healable error at all.
-  It is structural, not a policy check someone could relax.
+  mask the exact regression the test exists to catch.
 - **A heal cannot hide a flow that went to the wrong screen.** When the live screen has nothing
-  serving the failed step's intent, the model answers `give_up`, which is terminal. Without
-  that answer a "too kind" fallback tap would pass as a false green — worse than a failure,
-  because nobody investigates a green run.
+  serving the failed step's intent, the model answers `give_up`, which is terminal.
 
 A repair is also re-validated against the same grammar gate as the original compile, so a
 hallucinated command is rejected rather than run. The full matrix is in
@@ -109,10 +99,9 @@ costs roughly \$0, because a cached plan replays with no model calls. **That is 
 machine that keeps its cache.** A CI runner usually does not.
 
 The plan cache lives in `./.verikun/plans/`, relative to the working directory. A fresh
-`ubuntu-latest` checkout has no such directory, so **every test recompiles on every run** —
-you pay the first-compile price every time, forever, and never reach the steady state the
-cost model describes. [Cost & budget](/verikun/reference/cost/#keeping-it-cheap) covers the
-other levers.
+`ubuntu-latest` checkout has no such directory, so **every test recompiles on every run** and
+never reaches the steady state. [Cost & budget](/verikun/reference/cost/#keeping-it-cheap)
+covers the other levers.
 
 Persist it:
 
@@ -135,34 +124,25 @@ Persist it:
 ```
 
 A unique key per run so `save` always writes, with `restore-keys` prefix-matching the most
-recent previous entry — the standard rolling-cache shape. Plans are small JSON, so the
-accumulation is immaterial against the repository cache budget.
+recent previous entry. Use the `restore` + `save` pair rather than the combined
+`actions/cache` action: the combined action does not save when the job fails, and a red run
+is precisely the one whose fresh compiles you want to keep.
 
 Cache `.verikun/plans` and nothing beside it. `.verikun/plan-locks/` holds the short-lived
-locks that stop [concurrent runs compiling the same
-chunk](/verikun/reference/ai-plans/#the-plan-cache) twice; a lock restored onto a fresh runner
-names a process on a machine that no longer exists, which is why it lives in its own directory
-rather than among the plans.
+per-machine locks that stop [concurrent runs compiling the same
+chunk](/verikun/reference/ai-plans/#the-plan-cache) twice, and must not travel.
 
 **The key does not have to be right.** Every entry is gated on a compiler fingerprint at read
 time, and the filename already folds in the prose, package, build and platform — so a wrong or
-stale restore produces a *miss*, which recompiles. It can never cause a wrong replay. That is
-what makes a coarse key safe here.
-
-**A cache is portable, by design.** Entries embed no absolute paths — the plan is selectors and
-commands, and the grammar excludes every command that takes one. So the same cache replays on
-any machine with the same verikun version, platform, package and test text. Sharing one between
-runners, or seeding a runner from a developer's machine, is intended rather than a hack.
-
-Use the `restore` + `save` pair rather than the combined `actions/cache` action: the combined
-action does not save when the job fails, and a red run is precisely the one whose fresh
-compiles you want to keep.
+stale restore produces a *miss*, which recompiles, never a wrong replay. **A cache is
+portable**: entries embed no absolute paths, so the same cache replays on any machine with the
+same verikun version, platform, package and test text, and seeding a runner from a
+developer's machine is fine.
 
 Four things worth knowing before you rely on it:
 
 - **A verikun upgrade invalidates everything** — the fingerprint folds in the version and the
-  grammar text, so a new engine never replays an old compiler's plan
-  ([Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint)).
+  grammar text ([Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint)).
 - **`--app-build $GITHUB_SHA` defeats the exact key.** Pass it at the granularity you want to
   invalidate at; a missed key still *seeds* from a prior plan, which beats a cold compile.
 - **A restored cache is not behaviourally inert**: seeding ignores the build and the

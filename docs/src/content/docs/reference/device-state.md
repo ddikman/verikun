@@ -38,58 +38,41 @@ vk device caps                                           # what this platform su
 
 Android supports all nine. iOS does not, and a simulator and a physical device differ —
 [Platform support](/verikun/guides/platform-support/#device-settings) is the per-key matrix.
+Note that `vk device caps` on iOS reports the **simulator** answer even when you resolved a
+physical device.
 
 `screen-timeout` reads back as **milliseconds**, not as the duration you typed, because that
-is what the device stores — and a snapshot has to round-trip exactly or restoring it would
-compare unequal and be reported as refused.
-
-`vk device caps` prints what the active platform supports, but note that on iOS it reports the
-**simulator** answer whether or not you resolved a physical device: the capability table is
-static, and only the driver knows what it found.
+is what the device stores.
 
 ### Value domains
 
 - **`on|off`** also accepts `true/false`, `yes/no`, `enable/disable`, `enabled/disabled`,
   `1/0`. All canonicalise to `on` / `off`.
 - **`font-scale`** takes a number from `0.5` to `3.0`, or the literal `default` (which is
-  `1.0`). Values are canonicalised, so `1.30`, `1.3` and `1.300` compare equal on readback.
-- **`rotation`** takes only the five named values. Bare integers are rejected on purpose.
-  `auto` is a real value, so a snapshot can restore auto-rotate.
+  `1.0`). `1.30`, `1.3` and `1.300` compare equal on readback.
+- **`rotation`** takes only the five named values; bare integers are rejected. `auto` is a
+  real value, so a snapshot can restore auto-rotate.
 
 ### When a platform cannot do it
 
-An unsupported key exits **`3` before any device I/O**, naming the manual equivalent. A test
-asking for something the platform cannot do therefore fails on the first step rather than
+An unsupported key exits **`3` before any device I/O**, naming the manual equivalent. For
+`vk suite` and `vk ai`, device-setting keys and values are validated when the plan is
+validated, so a suite asking for `rotation` on iOS fails before the first tap rather than
 half-way through a half-modified device.
-
-For `vk suite` and `vk ai`, device-setting keys and values are validated at **plan-validation
-time** — unlike every other command, whose selector failures are runtime facts the engine can
-heal. That is what makes a suite asking for `rotation` on iOS fail before the first tap.
 
 ## Every write is verified by readback
 
-`svc`, `cmd` and `settings put` are all fire-and-forget, and are silently ignored on some OEM
-skins. Trusting the exit code would report success for a change that never happened.
-
-So verikun mutates, then **polls the setting until it reads the wanted value** (200 ms up to
-4 s) and throws exit `3` naming both the command and the value still being reported.
+Some OEM skins silently ignore `settings put`, `svc` and `cmd`, so verikun never trusts the
+exit code: it mutates, then **polls the setting until it reads the wanted value** (200 ms,
+up to 4 s), and exits `3` naming both the command and the value still being reported.
 
 ### `airplane=on` is verified by effect, not by its flag
 
-Android keeps `airplane_mode_toggleable_radios` — typically `bluetooth,wifi,nfc` — and
-remembers a user who re-enabled wifi during a previous flight. So `airplane-mode enable`
-**can leave wifi up**.
-
-verikun reads that list off the device, reconciles only the radios it names, forces any
-survivor, and announces it on stderr.
-
-Deliberately **not** `mobile_data`: cellular is never in that list (the flag cuts it
-outright), and `mobile_data` is a stored user *preference* rather than live radio state — so
-on a SIM-less device it keeps reading `1` while the device is plainly offline, and would fail
-a perfectly good offline state.
-
-Reporting "offline" while the app is still online would make an offline test pass for the
-wrong reason. That is the worst failure mode a testing tool has.
+Android can leave wifi up after `airplane-mode enable` — it remembers a radio the user
+re-enabled during a previous flight. verikun reconciles the radios the device lists as
+toggleable, forces any survivor off, and says so on stderr. Mobile data is not part of that
+check: it is a stored preference rather than live radio state, so on a SIM-less device it
+still reads on while the device is plainly offline.
 
 ### `airplane=off` re-enables the radio, not the internet
 
@@ -102,8 +85,8 @@ vk assert @content --wait 10s
 
 ## Preparing a test device
 
-`device set` is for **one test**: change something, then put it back. Setting up a phone so
-that reads are trustworthy at all is a different job, and it is what `vk device prep` does.
+`device set` is for **one test**: change something, then put it back. Setting a phone up so
+that reads are trustworthy at all is `vk device prep`.
 
 ```sh
 vk device prep --dry-run                 # what would change, and from what
@@ -112,7 +95,7 @@ vk device prep                           # an emulator is auto-selected
 vk device prep --revert --device 032AY1UNR2   # put it back the way you found it
 ```
 
-It establishes five knobs, each because it prevents a failure verikun actually has:
+It establishes five knobs, each preventing a failure verikun actually meets:
 
 | knob | why |
 |---|---|
@@ -122,98 +105,60 @@ It establishes five knobs, each because it prevents a failure verikun actually h
 | `dnd=on` | a heads-up notification lands on top of the app and steals the next tap |
 | `doze=off` | battery idle suspends the background work a test is waiting on |
 
+On Android 9 the `dnd` knob is not scriptable and prep fails on it
+([#103](https://github.com/ddikman/verikun/issues/103)).
+
 ### Prep is sticky; `device set` is not
 
-This is the difference that matters. `device set` snapshots into the **run file** and is
-auto-restored by `batch`/`ai`/`suite` — correct, because a test that goes offline must come
-back. Prep must *survive* the run that established it, so its snapshot goes to a host-global
-record under `~/.verikun/prepared/` that no `finally` may touch, and is undone only by an
-explicit `--revert`.
-
-That also means prep is the only copy of the values needed to put a borrowed phone back. It
-deliberately does **not** live beside the claim files in `~/.verikun/devices/`, which are
-churn and get swept.
+`device set` snapshots into the **run file** and is auto-restored by `batch`, `ai` and
+`suite`. Prep must outlive the run that established it, so its snapshot goes to a host-global
+record under `~/.verikun/prepared/` and is undone only by an explicit `--revert`.
 
 ### A physical device must be named
 
-Naming the serial *is* the opt-in. There is no `trust` verb and no allow-list: one less piece
-of state to go stale, and the thing you type names the phone you mean — which a `--yes` flag
-never does, since an agent would simply always pass it. An emulator is auto-selected, matching
-[`devices start|stop|restart`](/verikun/reference/commands/), which likewise refuses to
-power-cycle a physical device.
+Naming the serial with `--device` is the opt-in; there is no trust list. An emulator is
+auto-selected, as it is for
+[`devices start|stop|restart`](/verikun/reference/commands/), which likewise never
+power-cycles a physical device.
 
 ### The device parks itself
 
-A prepped device's display goes dark on its own about a minute after the last command, and
-comes back when the next one needs it. Nothing switches it off explicitly.
-
-The two display knobs are one decision, and it is worth knowing why they move together.
-`stay-awake=on` is `stay_on_while_plugged_in`, which keeps the screen lit **while charging** —
-and a device on USB adb always is. So leaving it on makes `screen-timeout` inert, which is why
-prep used to mean *never sleeps*, and why teardown then had to switch the display off by hand.
-That blanked the screen between every two commands of a burst, which is what
-[#101](https://github.com/ddikman/verikun/issues/101) asked to stop.
-
-A longer gap than a minute is not a failure: every path that touches the screen — a hierarchy
-read, a screenshot, a tap, a keypress — probes `mWakefulness` first and wakes the device
-(clearing a swipe keyguard) before it acts. Without that, `screencap` would return the ambient
-frame into your report and an injected tap would do nothing at all while exiting `0`.
+A prepped device's display goes dark about a minute after the last command and is woken
+before the next one needs it, so a longer gap between commands is not a failure.
 
 `vk device prep --no-sleep-when-idle` selects the other policy — `stay-awake=on`,
-`screen-timeout=max`, i.e. the display never turns off. That is the answer for a device with a
-PIN or pattern lock, since verikun can only clear a **swipe** lock on its own; prep says so at
-the time if it finds one.
+`screen-timeout=max`, the display never turns off. That is the answer for a device with a
+PIN or pattern lock, which verikun cannot clear; prep says so at the time if it finds one.
 
 ### Screen locks: warned about, never removed
 
-verikun **cannot** remove a screen lock and does not try.
+verikun never asks for or stores a device credential, so it cannot remove a PIN, pattern or
+password lock. `vk doctor` and `vk device prep` **report** a lock and name the fix: remove it
+in *Settings > Security*. A residual **swipe** lock is cleared automatically on every run.
 
-- Clearing one needs `locksettings clear --old <PIN>` — i.e. your device credential. verikun
-  never asks for or stores one; run files, reports and CI artifacts are the wrong place for it.
-- On Android 15 the obvious alternative provably does not work anyway. `locksettings help`
-  says of `set-disabled`: *"If the lock screen is secure, this has no immediate effect. I.e.
-  this can only change between Swipe and None."*
-
-So `vk doctor` and `vk device prep` **report** a lock (read from `dumpsys lock_settings`) and
-name the manual fix: remove it in *Settings > Security*. Do that once and the residual swipe
-lock is cleared automatically on every run thereafter.
-
-This matters because of what a slept device actually does. It does **not** reliably fail the
-read — measured on a Pixel 3a (API 32), a `Dozing` device served a well-formed hierarchy of
-`com.android.systemui`. The read *succeeds* and returns the **lock screen**, which is a false
-green: every selector then misses for a reason that has nothing to do with your app.
-
-So verikun checks the hierarchy it already has, confirms with `dumpsys trust`, wakes the device
-and tries `wm dismiss-keyguard` — which clears a swipe lock but only raises the prompt on a
-secure one. If the keyguard is still up afterwards it exits `3` naming the lock rather than
-handing back a dump of it. See
-[Troubleshooting](/verikun/guides/troubleshooting/) for the detection rules.
+A locked device does not fail a read — it serves the lock screen as a perfectly valid
+hierarchy, so every selector then misses. verikun detects the keyguard, wakes the device, and
+exits `3` naming the lock if it stays up. See
+[Troubleshooting](/verikun/guides/troubleshooting/#the-display-went-to-sleep).
 
 ## Wireless adb is refused for `airplane=on`
 
 It would cut the very link carrying the next command, and nothing could turn it back on
-remotely — recovery means physically plugging in USB.
-
-Exit `2`; `--allow-wireless` overrides it if you mean it.
-
-verikun classifies a serial as `usb`, `tcp` or `emulator`. An unrecognised serial shape
-deliberately falls back to `usb`: this is a foot-gun net, not a security boundary, so
-blocking a legitimate run is the worse error.
+remotely. Exit `2`; `--allow-wireless` overrides it if you mean it. The check classifies the
+serial by shape (`host:port` is wireless); an unrecognised shape is treated as USB.
 
 ## Restore lives in the run file
 
 `device set` records what each setting held **before** verikun first touched it — earliest
 wins, so setting `dark` twice still restores to the pre-run value.
 
-That snapshot lives in the **run file**, not in memory. Because every `vk` call is its own
-process, an in-memory latch could not undo a flow that died; the run file can, so
-`vk device reset` works from a later process.
+The snapshot lives in the run file, so `vk device reset` works from a later process even
+when the flow that made the change died. `batch`, `ai` and `suite` reset from a `finally`,
+which is what stops a test that dies between `airplane=on` and `reset` from stranding the
+device.
 
-`batch`, `ai` and `suite` call reset from a `finally`, which is what stops a test that dies
-between `airplane=on` and `reset` from stranding the device.
-
-**A bare `vk device set` from a shell deliberately stays applied.** It is yours to reset —
-do not strand someone's phone offline.
+**A bare `vk device set` from a shell stays applied.** It is yours to reset — do not strand
+someone's phone offline.
 
 ### Rollover carries the snapshot
 
@@ -225,23 +170,3 @@ with the exact command needed to undo them.
 
 Under `--server` the snapshot is written by the **server** process, so a crashed client leaves
 overrides applied on the device. Run `vk device reset` from the device box.
-
-## Why this is safe to expose over RPC
-
-Every device token issued comes from a **closed enum** in the settings table, so no
-caller-supplied string ever reaches the device shell. That is why `device` is exposed over
-[`vk server`](/verikun/guides/remote-devices-and-ci/) RPC without a new `--allow-*` flag —
-unlike `install`, which writes an arbitrary binary.
-
-## Where this is implemented
-
-`src/device/settings.ts` is a **table, not code**. It declares every key: its value domain,
-its per-platform support (`supported` / `unsupported` / `noop`), and — where unsupported —
-the manual equivalent.
-
-One table drives four consumers: argument validation, the driver switch, `vk device caps`,
-and the `vk ai` plan validator. Adding a setting is a table row plus a `case` in each driver,
-so a platform gap can never be documented in one place and forgotten in another.
-
-Two invariants the unit suite enforces: every `unsupported` entry names a manual equivalent,
-and every `noop` says why it was unnecessary.

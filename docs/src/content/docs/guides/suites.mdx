@@ -45,15 +45,10 @@ devices](#running-across-several-devices).
 
 ## The exit code is the CI gate
 
-| Code | Meaning |
-|---|---|
-| `0` | All green — **including flakes that recovered** under `--retries` |
-| `1` | A test failed. A regression to investigate. |
-| `2` | Bad or empty directory |
-| `3` | Environment — the provider or device toolchain is unavailable, or the box broke mid-run |
-
-The `1`-vs-`3` split is the point: **`1` is a regression to investigate, `3` is a machine to
-fix.** Conflating them means a dead USB cable reads like a mass regression at 3am.
+The suite exits non-zero when any test fails, so the CI step needs no result parsing. `1`
+is a test failure (a regression to investigate); `3` is an environment failure (a machine to
+fix); `0` includes flakes that recovered under `--retries`. The full table:
+[Exit codes](/verikun/reference/exit-codes/#vk-suite).
 
 ## Recovering from flakes: `--retries`
 
@@ -74,12 +69,9 @@ being papered over. Cost and duration sum across attempts.
 ### What earns a retry
 
 Anything that might come out differently: a flaky selector, a wedged app, and **a broken
-environment** — including a `vk server` connection dropping mid-suite.
-
-The bias is intentional. An attempt costs one test; giving up costs the whole suite plus a
-human rerunning it. Environment retries wait a little longer each time (an outage that
-survives the health probe usually needs seconds, not milliseconds) and each one lands in
-`warnings`, so riding out a wobble is never silent.
+environment** — including a `vk server` connection dropping mid-suite. Environment retries
+wait a little longer each time, and each one lands in `warnings`, so riding out a wobble is
+never silent.
 
 **Exactly two failures are never retried**, because a rerun cannot change them:
 
@@ -87,20 +79,16 @@ survives the health probe usually needs seconds, not milliseconds) and each one 
   spent twice
 - a **usage error** (exit `2`) — an unreadable test file, a payload the server refuses
 
-A retry cannot launder a bad **compile** into a pass. A plan that
+A retry cannot launder a bad **compile** into a pass: a plan that
 [does not cover its test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) is
-rejected before it runs and is never cached, so the retry compiles again — and only a plan
-that does cover the test can produce the green.
+never cached, so the retry compiles again.
 
 ### When a broken environment does stop the suite
 
 If a test dies from an environment error (exit `3` — tool gone, device unplugged, server
-unreachable), the toolchain is **re-probed**. Only if it is *still* broken **and** no
-retries remain does the suite abort.
-
-That re-probe matters: a transient `uiautomator` dump failure also exits `3`, and should not
-vaporise a 20-test run. But continuing on a genuinely dead box just produces one identical
-red row per remaining test — noise that reads exactly like a mass regression.
+unreachable), the toolchain is **re-probed**, since a transient dump failure also exits `3`.
+Only if it is *still* broken **and** no retries remain does the suite abort, rather than
+producing one identical red row per remaining test.
 
 ## Running across several devices
 
@@ -121,42 +109,38 @@ vk suite tests/ --app com.example.app --servers http://a:8391,http://b:8391
 ```
 
 `--devices` names devices on **this** machine, so combining it with `--server` is a usage
-error (exit `2`) rather than a suite that quietly tests the wrong host. `all` /
-`all-android` / `all-ios` mean exactly what they mean for
+error (exit `2`). `all` / `all-android` / `all-ios` mean exactly what they mean for
 [`vk server --devices`](/verikun/guides/remote-devices-and-ci/#serving-several-devices-from-one-address).
 
-The split is **dynamic**, not a partition you maintain: a device that draws three short tests
-simply comes back for a fourth. That matters because real suites have a wide duration spread,
-and any static split forfeits part of what the extra devices bought.
-
-Wall-clock falls to roughly the length of the **slowest single test**, so past that point more
-devices buy nothing — the useful number is small, and it rises only as the suite grows.
+The split is **dynamic**: a device that draws three short tests simply comes back for a
+fourth. Wall-clock falls to roughly the length of the **slowest single test**, so past that
+point more devices buy nothing.
 
 ### What changes when you use a pool
 
 - **File order no longer sequences anything.** Tests must be independent. Longest-first
   ordering is taken from the previous run's `index.json`, so cache `./.verikun/suites` in CI
   the way you already cache `./.verikun/plans`.
-- **Every test is its own process**, one per device at a time. That is what makes the
-  parallelism real — every device call underneath is a blocking shell-out — and it gives each
-  test crash isolation and its own active run directory (`./.verikun/run-<lane>/`).
-- **Each row names the device that ran it**, in `index.json` and in the overview table. That
-  is what makes "is this device bad, or is this test bad?" answerable.
-- **A shared `@include` fragment is still compiled once on a cold cache**, not once per lane.
-  The lanes share one plan cache, so the first to reach a fragment compiles it and the rest
-  wait for its result — they print `compiled by a concurrent run`. See
+- **Every test is its own process**, one per device at a time, with its own active run
+  directory (`./.verikun/run-<lane>/`).
+- **Each row names the device that ran it**, in `index.json` and in the overview table, so
+  "is this device bad, or is this test bad?" is answerable.
+- **A shared `@include` fragment is still compiled once on a cold cache**, not once per lane:
+  the lanes share one plan cache, so the first to reach a fragment compiles it and the rest
+  wait for its result (they print `compiled by a concurrent run`). See
   [the plan cache](/verikun/reference/ai-plans/#the-plan-cache).
 - **Duration splits in two.** `totals.wallClockMs` is how long the gate took;
   `totals.durationMs` keeps its meaning but is now device-seconds across the pool.
-- **`--app` resets inside the test**, on the device that test holds — a reset issued from
-  outside could land on a different device than the test that follows.
+- **`--app` resets inside the test**, on the device that test holds. Known gap: a reset that
+  fails transiently fails the test in parallel where it would be retried serially, and can
+  retire a healthy device ([#107](https://github.com/ddikman/verikun/issues/107)).
 - **A device that breaks retires its lane.** Its remaining tests move to the others; the suite
   aborts (exit `3`) only when every device is gone.
 - **`--ensure-device` is refused with `--devices`.** Its bare form boots "the one startable
   device", which may well be another lane's emulator — start the pool yourself with
   [`vk devices start`](/verikun/reference/commands/).
-- **Every lane must share a platform.** A pool is a set of interchangeable devices; running the
-  same suite on Android *and* iOS is a matrix, which you express by running it twice.
+- **Every lane must share a platform.** Running the same suite on Android *and* iOS is a
+  matrix, which you express by running it twice.
 
 ### Throttling and budget
 
@@ -166,13 +150,12 @@ vk suite tests/ --devices emu-1,emu-2,emu-3 --concurrency 2 --max-suite-cost-usd
 
 `--concurrency` caps how many devices run at once. More is not monotonically better: three
 emulators on one host can thrash it badly enough to produce timeouts that look like test
-failures, so a pool is a ceiling and this is the throttle. Separate hosts, or physical devices,
-deliver the win that stacked emulators do not.
+failures. Separate hosts, or physical devices, deliver the win that stacked emulators do not.
 
 `--max-suite-cost-usd` stops dequeuing once total model spend crosses it and exits `1` (the box
-is fine; the run just did not finish). It is off by default — `--max-cost-usd` already caps each
-test, so the total was always bounded; what a pool changes is the rate. See
-[Cost & budget](/verikun/reference/cost/#the-budget) for how the two ceilings interact.
+is fine; the run just did not finish). It is off by default; `--max-cost-usd` still caps each
+test. See [Cost & budget](/verikun/reference/cost/#the-budget) for how the two ceilings
+interact.
 
 ## The overview report
 
@@ -181,20 +164,15 @@ The suite writes to `./.verikun/suites/<id>/`:
 ### `index.json`
 
 A stable, `schemaVersion`ed manifest: per-test pass/fail, steps, model repairs, cost,
-duration, and the run id, plus suite totals.
+duration, and the run id, plus suite totals. Upload and publish steps compose over it (see
+the [CI guide](/verikun/guides/remote-devices-and-ci/#publishing-results-elsewhere)).
 
-This is the **output contract for reporting**. Upload and publish steps compose over it (see
-the [CI guide](/verikun/guides/remote-devices-and-ci/#publishing-results-elsewhere)) rather
-than verikun growing upload plugins.
-
-On an abort it also carries `aborted: {reason, notRun, kind}`. The not-run tests get **no rows
-and no place in `totals`**, so `passed + failed === tests` still holds and nothing downstream
-mistakes a skipped test for a regression. `kind` is `environment` (exit `3`) or `budget`
-(exit `1`).
-
-Retried flakes add `flaky` and `attempts` on the test row plus suite-level `warnings`. A
-parallel suite adds `concurrency`, `totals.wallClockMs` and a per-test `device`. All of these
-are additive, so `schemaVersion` stays `1`.
+On an abort it also carries `aborted: {reason, notRun, kind}`; the not-run tests get no rows
+and no place in `totals`, so a skipped test never reads as a regression. `kind` is
+`environment` (exit `3`) or `budget` (exit `1`). Retried flakes add `flaky` and `attempts` on
+the test row plus suite-level `warnings`; a parallel suite adds `concurrency`,
+`totals.wallClockMs` and a per-test `device`. The full field list:
+[Reports & test runs](/verikun/reference/reports-and-test-runs/#the-suite-manifest-indexjson).
 
 ### `index.html`
 

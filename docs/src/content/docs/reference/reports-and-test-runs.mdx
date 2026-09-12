@@ -25,17 +25,14 @@ of the page.
 ./.verikun/run-<lane>/     active run of one lane of a PARALLEL suite (VERIKUN_LANE)
 ```
 
-Because each `vk` call is its own process, run state is **persisted to disk and reloaded per
-command**. That is what lets `vk device reset` undo a change from a later process, even if
-the flow that made it died.
+Run state is on disk, not in memory, so a later `vk` process can pick it up — that is what
+lets `vk device reset` undo a change after the flow that made it has died.
 
 ## What is recorded
 
 Actions plus `wait` and `assert`. **Not** inspection — `ui`, `find`, `devices` — because
-reading the screen is not a test step.
-
-The one exception is **`log`**, which is recorded precisely so its on-demand device-log
-capture lands in the report.
+reading the screen is not a test step. The one exception is `log`, which is recorded so its
+device-log capture lands in the report.
 
 ## Archiving
 
@@ -71,22 +68,20 @@ Expanding the accordion shows the captured device log inline:
 
 ## Device logs
 
-Logs are pulled **at archive time** into `artifacts/logcat.txt`, session-scoped where
-possible — no explicit `vk log` is required.
+Logs are pulled **at archive time** into `artifacts/logcat.txt`, scoped to the run's window
+where possible — no explicit `vk log` is required.
 
 - Opt out on green runs with `vk run archive --no-logs` or `VERIKUN_NO_LOGS`. **Failed runs
   still capture.**
 - Capture is best-effort and **never blocks sealing**.
 - An on-demand `vk log` still attaches into its own step, kept tail-first so a crash trace
   survives the size cap.
-
-Session scoping works by recording a device-clock marker at the run's first step, then
-passing it as the log start. Over `--server`, the remote endpoints serve the same data so a
-remote CI archive matches a local one.
+- Over `--server` the same data is served by the server, so a remote CI archive matches a
+  local one.
 
 :::caution
-`getLogs` returns **raw device output**. Those logs can carry secrets the app logged. They
-are **not redacted**.
+Device logs are **raw device output** and can carry secrets the app logged. They are **not
+redacted**.
 :::
 
 ## Secrets
@@ -94,10 +89,13 @@ are **not redacted**.
 Step names never include typed text. `vk text` **redacts the value** into the step message
 when the field carries the `password` flag.
 
-:::note
-Measured gap: `obscureText` does not set the `password` flag on **iOS**, so redaction never
-fires there for Flutter apps. Do not rely on it cross-platform.
-:::
+Redaction is detection-based, so a field the platform does not flag as a password is stored
+verbatim. Two known gaps: on iOS a Flutter obscured field is never flagged
+([#44](https://github.com/ddikman/verikun/issues/44); see
+[Platform support](/verikun/guides/platform-support/#behaviour-and-reporting)), and a value
+typed from `{{env.NAME}}` is not masked by name
+([#57](https://github.com/ddikman/verikun/issues/57)). Failure evidence — screenshots and
+hierarchies — is raw as well.
 
 ## Pass/fail mapping
 
@@ -111,23 +109,12 @@ The returned exit code, or a thrown `CliError`'s code:
 
 ### A failed run can never archive green
 
-Recording is a side effect of running a *command*, so a failure the `vk ai` **engine**
-produced — a control node giving up, a budget or timeout abort — has no command to attach
-itself to. Such a run used to reach the archive with nothing red in it, and the report
-declared a failed test `failures="0"`.
-
-That is closed at three levels:
-
-1. The recorder sets a run-level `failure` (the `where` plus the reason) and appends **one**
-   synthetic failed step — but **only when no step is already red**, so a leaf failure is
-   never counted twice.
-2. `cli.ts` builds that record from the plan result and is also what prints the `[ai] …`
-   verdict, so the archive and the console cannot disagree.
-3. The report renderer trusts `failure` over the step tally, and emits a synthetic failing
-   testcase if a failed run somehow still has no red step.
-
-Evidence for such a failure is a screenshot plus hierarchy locally; hierarchy only over
-`--server`, which has no screenshot route.
+A failure the `vk ai` engine produces with no command to attach it to — a guard giving up, a
+budget or timeout abort — is recorded as one synthetic failed step (only when no step is
+already red), so the archive and the `[ai] …` verdict on the console always agree. Its
+evidence is a screenshot plus hierarchy locally; over `--server` the hierarchy only
+([#48](https://github.com/ddikman/verikun/issues/48)). The rule:
+[Contracts](/verikun/internals/contracts/#a-failed-run-can-never-archive-green).
 
 ## Automatic rollover
 
@@ -148,28 +135,19 @@ destination to stderr.
 
 ### Rollover and device overrides
 
-Because [device-state](/verikun/reference/device-state/) snapshots live in the run file, a
-rollover could strand them — carrying the snapshot into the archive while `vk device reset`,
-which reads the *active* run, reports "nothing to restore".
-
-This is measured, not theoretical: two workspaces driving different devices from one working
-directory ping-pong the active run, and a phone was left dark and rotated with nothing
-tracking it.
-
-So:
+[Device-state](/verikun/reference/device-state/) snapshots live in the run file, so a rollover
+has to carry them:
 
 - On a **same-device** rollover, unrestored overrides are carried **forward** into the new
   run.
-- On a **device-change** rollover, verikun warns loudly with the exact
-  `vk device set … --device <serial>` needed to undo it. It cannot drive the old device from a
-  process pointed at the new one, and restoring one device's values onto another would be
-  worse than leaving them.
+- On a **device-change** rollover, verikun warns with the exact
+  `vk device set … --device <serial>` needed to undo them — it cannot drive the old device
+  from a process pointed at the new one.
 
 ## The suite manifest: `index.json`
 
-A stable, `schemaVersion`ed manifest written to `./.verikun/suites/<id>/`. This is the
-**output contract for reporting** — publish steps compose over it rather than verikun growing
-upload plugins.
+A stable, `schemaVersion`ed manifest written to `./.verikun/suites/<id>/`. Publish steps in
+CI compose over it.
 
 | Field | Meaning |
 |---|---|
@@ -178,9 +156,9 @@ upload plugins.
 | `server` | `--server` runs only: `{url, verikun, reads}` — which server drove the device, on which version, and whether it read the hierarchy via the [companion](/verikun/guides/companion/) or the stock dump |
 | `tests[]` | Per-test: pass/fail, step count, cost, duration, run id |
 | `tests[].modelRepairs` | How many steps the model repaired. `0` on a clean replay — gate on it to [fail a build that needed healing](/verikun/guides/self-healing-in-ci/#if-you-want-the-strict-gate-anyway) |
-| `tests[].planSteps` | Top-level steps in the plan that ran — the **compile's** size, unlike `steps`, which counts what executed. Comparable across a pass and a failure, so a compile that came out unusually short is visible when diffing runs of the same unchanged test |
+| `tests[].planSteps` | Top-level steps in the plan that ran — the **compile's** size, unlike `steps`, which counts what executed. Comparable across a pass and a failure, so an unusually short compile is visible when diffing runs of the same test |
 | `tests[].flaky` / `.attempts` | Present when `--retries` recovered the test |
-| `tests[].device` | Which device ran this test. Set on a [parallel suite](/verikun/guides/suites/), where the assignment is dynamic — and where, against a pooled server, only the lease ever knew the answer |
+| `tests[].device` | Which device ran this test. Set on a [parallel suite](/verikun/guides/suites/), where the assignment is dynamic |
 | `concurrency` | How many devices ran the suite at once. Absent (or `1`) for a serial suite |
 | `totals` | Suite-level counts |
 | `totals.durationMs` | **Device time** — the sum of every test's duration. Equal to elapsed time serially; across N devices it is what the gate cost in device-seconds |
@@ -192,9 +170,8 @@ On an abort, the not-run tests get **no rows and no place in `totals`**, so
 `passed + failed === tests` still holds and nothing downstream mistakes a skipped test for a
 regression.
 
-`concurrency`, `wallClockMs`, `tests[].device`, `tests[].planSteps` and `aborted.kind` are all
-additive, so `schemaVersion` stays `1`. A manifest written before they existed simply omits them — treat a
-missing `concurrency` as `1`, where `durationMs` and elapsed time were the same number.
+Fields added since the first schema are all additive. A manifest written before they existed
+simply omits them — treat a missing `concurrency` as `1`.
 
 ## Disabling recording
 
@@ -202,5 +179,5 @@ missing `concurrency` as `1`, where `durationMs` and elapsed time were the same 
 VERIKUN_NO_RUN=1 vk tap @x
 ```
 
-`beginStep` returns null, so every `note`, `attachImage` and `attachLog` is a no-op. Useful
-when driving a device interactively and you do not want a report.
+Nothing is recorded, captured or attached. Useful when driving a device interactively and
+you do not want a report.

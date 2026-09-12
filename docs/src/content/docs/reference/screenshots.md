@@ -37,35 +37,23 @@ can outweigh dozens of `vk ui` calls.
 **A screenshot taken purely as report evidence and never read back costs no tokens** — so
 when driving a flow to produce a report, capture liberally around transitions and before
 verification steps, and leave the PNGs in the report.
+[`vk ai`](/verikun/guides/natural-language-tests/) does this automatically.
 
-It is not free in *wall clock*, though. A capture is a device round trip like any other:
-measured on a physical mid-range phone (SM-A415F), about **1.1s**. That is cheap next to a
-hierarchy read but it is not zero, so a long flow that screenshots every step will feel it.
-See [what a step costs](/verikun/guides/troubleshooting/#why-a-test-run-takes-as-long-as-it-does).
-
-[`vk ai`](/verikun/guides/natural-language-tests/) does this automatically — the compiler
-inserts `screenshot` steps around transitions and inside loops.
+It is not free in *wall clock*: a capture is a device round trip, around a second on a
+mid-range phone, so a long flow that screenshots every step will feel it. See
+[what a step costs](/verikun/guides/troubleshooting/#why-a-test-run-takes-as-long-as-it-does).
 
 ## The resampler
 
-Resizing is a dependency-free, pure-Node resample using a box filter, and it never upscales.
-
-On **Android** the pixels come off the device uncompressed (`screencap` with no `-p`) and are
-PNG-encoded here, which skips a device-side encode of an image we are about to shrink anyway.
-That is worth roughly half the capture: on an SM-A415F, 2.5s → 1.1s. The bigger transfer costs
-far less than the encode it avoids, and the resulting PNG is byte-for-byte the same.
-
-Where a backend hands over a PNG instead (**iOS**, via `simctl` — already ~0.2s, so there is
-nothing to win), it is parsed, inflated, unfiltered, box-averaged and re-encoded. **PNGs that
-cannot safely be resampled are written through untouched**, with the reason noted on stderr:
-palette, 16-bit and interlaced images. A screenshot is therefore never corrupted — only
-sometimes left full-size.
+Resizing happens on the host, in pure Node with no dependencies, and never upscales. **PNGs
+that cannot safely be resampled are written through untouched**, with the reason noted on
+stderr: palette, 16-bit and interlaced images. A screenshot is therefore never corrupted —
+only sometimes left full-size.
 
 ## Failure evidence stays full-resolution
 
 Screenshots captured automatically as failure evidence in test-run reports are **not**
 downscaled. Humans read those, and a debugging session is exactly when you want the detail.
-
 Only agent-facing captures go through the downscaler.
 
 ## Setting a different default

@@ -6,10 +6,10 @@ sidebar:
 ---
 
 Android is the fullest surface. iOS reaches parity for the loop that matters — inspect, act,
-assert — and where it cannot, it **says so** rather than half-implementing: a named error and
-an exit code, never a command that quietly does nothing.
+assert — and where it cannot, it **says so**: a named error and an exit code, never a command
+that quietly does nothing.
 
-This page is the canonical matrix. Every other page links here rather than restating it.
+This page is the canonical matrix. Other pages link here rather than restating it.
 
 ## How to read the tables
 
@@ -20,35 +20,18 @@ This page is the canonical matrix. Every other page links here rather than resta
 | ⊘ | Accepted and exits `0`, but does nothing, or answers with a placeholder. The intent is already satisfied, or there is nothing to report. |
 | ❌ | Refused with a named reason and a non-zero exit — `3` for an environment/capability gap, `2` for a usage error. Never a silent no-op. |
 
-The distinction between ⊘ and ❌ is deliberate. A no-op is only honest when the intent is
-*already true* (a simulator never sleeps, so `stay-awake` has nothing to do). Everything else
-refuses, because a testing tool reporting success for something that did not happen is the
-worst failure mode it has.
+A ⊘ is only used where the intent is already true (a simulator never sleeps, so `stay-awake`
+has nothing to do). Everything else refuses rather than reporting a success that did not happen.
 
-## The two axes are not symmetric
+The two Android columns differ on exactly one row: a phone and an emulator run the same code.
+What varies on Android is the **device**, and three differences bite in practice:
 
-Before reading the matrix, know why two of its columns are near-identical:
-
-- **Android has no physical-vs-emulator branch.** The only place verikun looks at the *shape*
-  of an Android serial is to classify the transport as `usb`, `tcp` or `emulator`, and the
-  only consumer of that is the refusal to enable airplane mode over wireless adb. Every other
-  command is the same code path on a phone and on an emulator. The two Android columns below
-  differ on exactly **one row**.
-- **iOS branches in six places** — screenshots, launch, stop, logs, the device clock, and
-  device settings. Everything else (hierarchy, tap, swipe, typing, keys, install) runs one path
-  on both.
-
-So Android variation is *device* variation rather than emulator-ness, and it does not fit in a
-column. The three that bite in practice:
-
-- **OEM skins silently ignore `settings put` / `svc` / `cmd`.** This is why every device-state
-  write is [verified by reading it back](/verikun/reference/device-state/#every-write-is-verified-by-readback)
-  instead of trusting the exit code.
-- **`monkey -c LAUNCHER` hangs indefinitely on some skins** (MIUI/HyperOS), which is why
-  `launch` resolves the activity and uses `am start` instead.
-- **Effective font scale depends on the API level, not the hardware.** `font-scale=1.3` lands
-  at `1.30` on API 31 and about `1.26` on API 34, which applies non-linear scaling. Assert that
-  a scale grew and was restored, never that it equals a literal.
+- **OEM skins silently ignore `settings put` / `svc` / `cmd`.** Every device-state write is
+  therefore [verified by reading it back](/verikun/reference/device-state/#every-write-is-verified-by-readback).
+- **Effective font scale depends on the API level.** `font-scale=1.3` lands at `1.30` on
+  API 31 and about `1.26` on API 34, which scales non-linearly. Assert that a scale grew and
+  was restored, never that it equals a literal.
+- **Some skins break individual commands.** Known cases are noted beside the command below.
 
 ## Commands
 
@@ -105,48 +88,41 @@ column. The three that bite in practice:
 
 Notes on the rows that carry a caveat:
 
-- **`--tree` renders flat on iOS.** `idb`'s accessibility list carries no nesting depth, so
-  every element reports depth zero. `ui` and `find` are unaffected — only the indentation is
-  lost.
-- **`text --clear` is Android in practice.** It sizes the deletion from the resolved element's
-  `text`, and on iOS an element's `text` is its accessibility *label*, not its contents. A
-  field labelled "Username" holding `someone@example.com` reports `text="Username"`, so the
-  deletion is the wrong length. There is also no way to read back what was typed.
+- **`--tree` renders flat on iOS.** `idb`'s accessibility list carries no nesting depth. `ui`
+  and `find` are unaffected; only the indentation is lost.
+- **`text --clear` is Android in practice.** It sizes the deletion from the element's `text`,
+  and on iOS that is the accessibility *label*, not the field's contents, so the deletion is
+  the wrong length. There is also no way to read back what was typed.
 - **`key` covers a different set per platform.** Android-only: `back`, `menu`, `search`,
   `center`, `app_switch` / `recents`, `volume_up`, `volume_down`, `mute`. iOS-only: `lock`,
   `side_button`, `siri`, `apple_pay`. An unknown key exits `2` listing what is available.
-  Reach the back control by label instead of by key — that is portable, and on Android it also
+  Reach the back control by label instead of by key: that is portable, and on Android it also
   avoids the soft keyboard swallowing the press.
-- **`swipe --duration` is ignored on iOS.** `idb` paces a swipe by pixels-per-step rather than
-  milliseconds, and the flag that sets it varies by idb version, so verikun passes coordinates
-  only. [Auto-scroll](/verikun/reference/auto-wait/#auto-scroll-into-view) still works; it just
-  cannot pace the gesture on iOS.
-- **`suite --app` does not reset app data on iOS.** It degrades to a force-stop. If your test
-  depends on starting logged-out, that assumption does not hold there — see
+- **`swipe --duration` is ignored on iOS.** `idb` paces a swipe in pixels per step, so
+  verikun passes coordinates only. [Auto-scroll](/verikun/reference/auto-wait/#auto-scroll-into-view)
+  still works; it cannot pace the gesture there.
+- **`suite --app` does not reset app data on iOS.** It degrades to a force-stop, so a test
+  that depends on starting logged-out does not hold there — see
   [Suites](/verikun/guides/suites/).
 - **`install` replaces a differently-signed build on Android only.** Android refuses to update
-  a package across signing keys, which is routine on a shared device — a release build from one
-  job, a debug build from another. On Android verikun removes the installed build and installs
-  again, warning on stderr that its app data is gone; a same-key install still keeps its data.
-  On iOS the install simply fails, for the same reason failover cannot read `idb`'s output:
-  its failure vocabulary is not the `INSTALL_FAILED_*` set and verikun has not measured it.
+  a package across signing keys, which is routine on a shared device. verikun removes the
+  installed build and installs again, warning on stderr that its app data is gone; a same-key
+  install keeps its data. On iOS the install simply fails.
 - **A device pool is one platform.** `vk server --devices` serves one platform per server, and
-  `vk suite --servers a,b` refuses (exit `2`) when the servers report different ones. A pool is
-  a set of *interchangeable* devices; running one suite on Android and iOS is a matrix, which
-  you express by running it twice — see
+  `vk suite --servers a,b` exits `2` when the servers report different ones. Run a suite on
+  both platforms by running it twice — see
   [Suites](/verikun/guides/suites/#running-across-several-devices).
-- **`doctor --fix` is Android-only, and is an alias for `device prep`.** It therefore inherits
-  prep's gate: on a **physical** device it refuses unless the serial was named with `--device`,
-  because prep changes settings that outlive the run. iOS has no equivalent knob;
-  `vk doctor --ios` still checks the toolchain.
-- **`device prep` needs an explicit `--device` on a physical phone.** Naming the serial *is* the
-  opt-in — there is no `trust` verb and no allow-list. An emulator is auto-selected, matching
-  `devices start|stop|restart`, which likewise refuses to power-cycle a physical device.
-- **`companion` is Android-only**, and exits `3` on iOS. It is **on by default**
-  (`VERIKUN_COMPANION=0` opts out). It speeds up the UI-hierarchy read,
-  which on Android costs ~2.4s per call because `uiautomator dump` starts a fresh VM every
-  time. iOS has no equivalent problem: `idb` already keeps a companion process alive and
-  reads in ~0.2s, so there is nothing to win. See the companion guide.
+- **`doctor --fix` is Android-only** and an alias for `device prep`, so on a physical device it
+  needs the serial named with `--device`. `vk doctor --ios` still checks the toolchain.
+- **`device prep` needs an explicit `--device` on a physical phone.** Naming the serial is the
+  opt-in. An emulator is auto-selected, as it is for `devices start|stop|restart`, which
+  likewise never power-cycles a physical device. On Android 9 the `dnd` knob is not scriptable
+  and prep fails on it ([#103](https://github.com/ddikman/verikun/issues/103)).
+- **`companion` is Android-only** and exits `3` on iOS. It is on by default
+  (`VERIKUN_COMPANION=0` opts out) and makes the hierarchy read roughly ten times faster; iOS
+  reads are already fast. On HyperOS (Android 15) it currently fails to start and every read
+  silently takes the slow path ([#87](https://github.com/ddikman/verikun/issues/87)). See
+  [The Android companion](/verikun/guides/companion/).
 
 ## Selectors and state modifiers
 
@@ -163,18 +139,14 @@ Notes on the rows that carry a caveat:
 </tbody>
 </table>
 
-`selected` and `focused` are not merely unset on iOS — `idb ui describe-all` has **no such key
-in its schema at all**. There are no accessibility traits to carry them and nothing to derive
-them from, so no app can supply them. A filter that could only ever match zero elements would
-burn the full auto-wait window and then report "no element matched", which is an untrue claim
-about the screen and precisely the false signal these modifiers were added to prevent. So they
-refuse instead. `checked` *is* derivable, from the element type plus its value, which is why it
-survives.
+`idb` reports no `selected` or `focused` state at all, so a filter on either could only ever
+match nothing; verikun refuses it with exit `3` instead of burning the wait window and
+reporting "no element matched". `checked` is derived from the element type and value.
 
-Which **kind** of selector to reach for is a separate question, and the answer is the same on
-both platforms: `@id` first, `text:` second, `desc:` never. See
-[Selectors](/verikun/reference/selectors/#which-selector-to-reach-for) for why, and for what
-each kind maps to per platform.
+Which **kind** of selector to reach for is the same on both platforms: `@id` first, `text:`
+second, `desc:` never. See
+[Selectors](/verikun/reference/selectors/#which-selector-to-reach-for) for what each kind
+maps to per platform.
 
 ## Device settings
 
@@ -199,27 +171,17 @@ how the snapshot-and-restore works and what each value domain accepts.
 </tbody>
 </table>
 
-Four things this table says that nothing else did:
+- **A physical iOS device supports none of them.** `simctl` drives simulators only and `idb`
+  covers interaction, not preferences. Each key refuses with the manual equivalent named, so
+  `vk device prep` is Android-only in practice.
+- **`vk device caps --ios` reports the simulator answer either way.** The capability table is
+  static, so on a physical device `caps` says `dark` is supported and `set` exits `3`. Trust
+  this page, or `set`, over `caps` there.
+- **`font-scale` on iOS maps to the nearest Dynamic Type category.** The category applied is
+  printed to stderr; `1.3` can land at an effective ratio near `1.35`.
 
-- **A physical iOS device supports none of them.** `simctl` drives simulators only, and
-  `idb` covers interaction rather than preferences, so there is no scriptable settings surface
-  at all. Each key refuses with the manual equivalent named.
-- **`vk device prep` is therefore Android-only in practice.** On iOS every knob in the prep set
-  is a no-op or unsupported, so `prep` applies nothing and says so per key rather than failing.
-- **`vk device caps --ios` reports the *simulator* answer either way.** The capability table is
-  static and describes a simulator; only the driver knows what it resolved. So on a physical
-  device `caps` will say `dark` is supported and `set` will exit `3`. Trust this page, or trust
-  `set`, over `caps` there.
-- **`stay-awake` is a no-op on a simulator but a refusal on a device.** The no-op is honest —
-  a simulator never sleeps, so the intent already holds. A physical device has no way to
-  satisfy it, so it refuses rather than pretending.
-
-`font-scale` on iOS maps to the nearest named Dynamic Type category, because iOS has named
-sizes where Android has a float. The category actually applied is printed to stderr, so the
-mapping is never silent — but it does mean `1.3` can land at an effective ratio near `1.35`.
-
-An unsupported key exits `3` **before any device I/O**, and for `vk ai` and `vk suite` it is
-caught at plan-validation time. A suite asking for `rotation` on iOS therefore fails before the
+An unsupported key exits `3` **before any device I/O**. For `vk ai` and `vk suite` it is
+caught when the plan is validated, so a suite asking for `rotation` on iOS fails before the
 first tap rather than half-way through a half-modified device.
 
 ## Behaviour and reporting
@@ -248,33 +210,26 @@ first tap rather than half-way through a half-modified device.
 </tbody>
 </table>
 
-- **Failover reads the install output, and that output is platform-specific.** A device that
-  has gone *unreachable* is detected the same way everywhere (the server re-probes it), so that
-  row is four ✅. But telling "this device cannot take the build" from "this build is broken"
-  means reading `adb`'s `INSTALL_FAILED_*` vocabulary, which only Android has: `idb install`
-  reports failures in an entirely different shape that verikun has not measured. So on iOS a
-  full simulator will **not** trigger a move — the install simply fails, as it did before. See
-  [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
-- **Device claims are host-side, so they behave identically everywhere.** They coordinate
-  which *job* drives which device, and never touch the device itself — the four ✅ above are
-  literal, not approximate. The one asymmetry is remote: over `--server` the claim is held by
-  the server process on the host where the devices are. See
+- **Failover on iOS moves only for an unreachable device.** Telling "this device cannot take
+  the build" from "this build is broken" relies on `adb`'s `INSTALL_FAILED_*` vocabulary,
+  which `idb` does not share, so a full simulator does not trigger a move: the install fails.
+  See [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
+- **Device claims are host-side and identical everywhere.** Over `--server` the claim is held
+  by the server process on the host where the devices are. See
   [Device claims](/verikun/reference/device-claims/).
 - **The modal-barrier settle is Android-only.** Its dumper skips a sheet's contents until they
   are on screen; iOS has them in the first read. See
   [Auto-wait](/verikun/reference/auto-wait/#a-modal-barrier-is-not-an-absence).
 - **`offscreen` is mostly an iOS signal.** Android's dumper drops nodes it considers invisible
   and clips the rest to the display, so a fully off-screen element is usually not in the tree
-  at all. Do not write an Android test that expects `offscreen` to fire — its real failure
-  shape there is an element that *is* on screen but covered, or clipped to a sliver.
+  at all. Do not write an Android test that expects `offscreen` to fire.
 - **Auto-scroll is orientation-blind on iOS.** `idb` gives no orientation signal, so the
   viewport is treated as a square of the longest edge: exact along the axis a list scrolls,
-  permissive across it. Deliberately permissive — refusing to act on a reachable element would
-  be worse than a missed warning.
-- **Password redaction does not fire on iOS.** Redaction keys off the resolved element's
-  `password` flag, which comes from a secure-text element type. A Flutter field with
-  `obscureText: true` is reported by `idb` as a plain text field, so nothing marks it as
-  secret and the typed value is **not** redacted from the report. Do not rely on redaction
+  permissive across it.
+- **Password redaction does not fire on iOS.** Redaction keys off the element's `password`
+  flag, and `idb` reports a Flutter `obscureText` field as plain text, so the typed value
+  lands in the report unredacted
+  ([#44](https://github.com/ddikman/verikun/issues/44)). Do not rely on redaction
   cross-platform — see [Reports & test runs](/verikun/reference/reports-and-test-runs/#secrets).
 
 ## Toolchain
@@ -288,23 +243,17 @@ first tap rather than half-way through a half-modified device.
 | Check it | `vk doctor` | `vk doctor --ios` |
 
 `idb` is required to drive iOS **at all**, simulator or not. `simctl` covers screenshots,
-launch, stop and logs on a simulator, but the hierarchy and every interaction come from `idb`.
+launch, stop and logs on a simulator; the hierarchy and every interaction come from `idb`.
 Full setup: [iOS setup](/verikun/guides/ios-setup/).
 
-## What is measured, and what is asserted
+## Where these tables come from
 
-The Android columns and the iOS **simulator** column are measured. The repository ships a
-Flutter fixture app with controlled accessibility semantics, and its device suite runs the
-built CLI against real hardware — a Pixel 3a (API 32), a Samsung SM-A415F (API 31), a Pixel 6
-emulator (API 34) and an iPhone 17 Pro simulator (iOS 26.5).
-
-The iOS **physical device** column is asserted from the source, not measured. The fixture
-cannot be installed on one — that needs code signing, which is out of scope for the test suite
-— so no physical iPhone has been exercised end to end here. The entries are read off the six
-places the driver branches on simulator-versus-device, and they are the behaviour verikun
-*intends*. Treat them as reliable for what is refused, and report anything that disagrees.
-
-The measured findings, each with the hardware it was observed on, live in
+The Android columns and the iOS **simulator** column are measured, by running the built CLI
+against the repository's Flutter fixture app on real hardware and simulators. The iOS
+**physical device** column is read from the source rather than measured, so treat it as
+reliable for what is refused and
+[report anything that disagrees](https://github.com/ddikman/verikun/issues). The measured
+findings, with the hardware each was observed on, live in
 [`example/flutter-app/README.md`](https://github.com/ddikman/verikun/blob/main/example/flutter-app/README.md).
 
 ## Where to go next

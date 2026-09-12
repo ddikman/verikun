@@ -25,10 +25,8 @@ roughly \$0; you pay on first compile and on a genuine repair.
 That steady state assumes a machine that **keeps** `./.verikun/plans/`. A throwaway CI runner
 starts cold and recompiles every test on every run unless you persist it — see
 [Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache).
-
-For the arithmetic behind the number — when a model is called, how the estimate is computed,
-and why the `--max-cost-usd` ceiling is per test rather than per suite — see
-[Cost & budget](/verikun/reference/cost/).
+For when a model is called, how the estimate is computed, and why the `--max-cost-usd`
+ceiling is per test rather than per suite, see [Cost & budget](/verikun/reference/cost/).
 
 ```sh
 vk ai onboarding.md                       # first run: compile, then run
@@ -60,12 +58,17 @@ Guidance that materially improves the compiled plan:
 - **Prefer identifiers you know** over descriptions of appearance. "Tap `@get_started`" is
   compiled verbatim; "tap the big green button" is a guess.
 
+Two things the compiler cannot do yet: every line of the file is an instruction, so there is
+no way to leave a note for the next human that is not compiled as a step
+([#130](https://github.com/ddikman/verikun/issues/130)); and "the first match" has no
+compiled form, so name a unique id or text instead
+([#37](https://github.com/ddikman/verikun/issues/37)).
+
 ## Share a preamble between tests
 
 Every test in a suite tends to need the same opening — cold start, sign in, dismiss whatever
-post-auth screens appear, land on a known screen. Written out per test, that block is
-maintained N times and drifts. `@include <path>` on its own line splices another file's prose
-in where the line sits:
+post-auth screens appear, land on a known screen. `@include <path>` on its own line splices
+another file's prose in where the line sits:
 
 ```md title="tests/checkout.md"
 # Checkout
@@ -86,26 +89,23 @@ Repeat until the home tab (`@home`) is showing, tapping past any onboarding card
 - **Paths are relative to the including file**, so a fragment moves with the tests that use
   it. A fragment may include another; an include *cycle* is a usage error (exit `2`) naming
   the chain.
+- **The directive must be alone on its line.** `1. @include frag.md` is treated as prose and
+  handed to the model as an instruction
+  ([#115](https://github.com/ddikman/verikun/issues/115)).
 - **Name a fragment `_something.md`.** `vk suite` skips `_`-prefixed files, so a fragment
-  never runs as a test of its own — no report row, and no `--app` data reset that would
-  leave nothing behind for the test that included it. (A fragment in a subdirectory is
-  skipped too: suite discovery is not recursive.)
+  never runs as a test of its own. (A fragment in a subdirectory is skipped too: suite
+  discovery is not recursive.)
 - **The cache key is the resolved text**, so editing a fragment recompiles every test that
   includes it. It cannot silently replay a stale plan.
 - **Each chunk compiles and caches on its own**, and the compiled steps are spliced together.
-  A preamble shared by nine tests is compiled once; editing it costs one compile rather than
-  nine, because each test's own prose is still cached. Progress names the file and line each
-  chunk came from. "Once" holds across a [parallel suite](/verikun/guides/suites/) too — the
-  lanes share a cache, so the first to reach a fragment compiles it and the rest wait.
+  A preamble shared by nine tests is compiled once, also across a
+  [parallel suite](/verikun/guides/suites/), where the lanes share one cache.
 - **A fragment holds steps, not a whole test.** It is compiled knowing it is one section of
   a larger test, so it neither re-launches the app nor adds a teardown the surrounding test
   already owns.
-- **A title or a description is context, not a chunk.** Prose that states no step — a heading,
-  a sentence saying what the test checks — is folded into the chunk of its own file that states
-  the steps it describes, and is never compiled on its own. Without that, a description written
-  above the first `@include` became a chunk, and a chunk is a whole prompt: the summary was
-  compiled into a plan of its own and those invented steps ran before the preamble. Write the
-  description wherever reads best.
+- **A title or a description is context, not a chunk.** Prose that states no step — a
+  heading, a sentence saying what the test checks — is folded into the chunk of its own file
+  that states the steps, and is never compiled on its own. Write it wherever reads best.
 
 `@include` inside a fenced code block is left alone — that is documentation, not a directive.
 
@@ -121,9 +121,8 @@ Repeat until the home tab (`@home`) is showing, tapping past any onboarding card
 
 The CLI backends run read-only in a scratch directory, so they never touch your working
 tree. Their reported cost is `$0`, which also means `--max-cost-usd` and `--cost-override`
-are no-ops for them.
-
-See [AI plans & models](/verikun/reference/ai-plans/#models) for the full model list.
+are no-ops for them. See [AI plans & models](/verikun/reference/ai-plans/#models) for the
+full model list.
 
 :::caution
 Never inline a credential in the prose. Use a `{{env.NAME}}` placeholder — the value is read
@@ -149,12 +148,9 @@ Full grammar: [AI plans & models](/verikun/reference/ai-plans/).
 ### The `if-present` settle window
 
 An `if-present` guard **waits for its selector to settle** before deciding the optional UI is
-not there, so a dialog that animates in a beat after the transition is still caught.
-
-The window guarantees at least two looks at the screen. Wall-clock alone is not a usable
-unit here — a UI dump ranges from roughly 200 ms on a fast phone to 2.5 s on an emulator —
-so an absent guard costs about one extra dump. `VERIKUN_GUARD_SETTLE_MS` tunes it; `0`
-restores the old single-shot probe.
+not there, so a dialog that animates in a beat after the transition is still caught. The
+window guarantees at least two looks at the screen, so an absent guard costs about one extra
+hierarchy read. `VERIKUN_GUARD_SETTLE_MS` tunes it; `0` makes the guard look once.
 
 A loop's own exit check never pays this window: it is absent on every iteration by
 construction, which is what makes it a loop.
@@ -167,15 +163,16 @@ asks for a decision. There are exactly two answers:
 - **Repair** — the model returns one replacement command leaf that serves the same
   user-facing purpose. The run continues.
 - **Give up** — the live screen has nothing serving that intent (the flow drifted to the
-  wrong screen or app). This is **terminal**; the test fails.
-
-The give-up path is load-bearing. Without it, a "too kind" fallback tap onto an unrelated
-screen would pass as a false green — which is worse than a failure, because nobody
-investigates a green run.
+  wrong screen or app). This is **terminal**; the test fails, rather than a fallback tap onto
+  an unrelated screen passing as green.
 
 **An `assert` failure is never healed.** Healing a failed assertion would mask the exact
 regression the test exists to catch. See
 [Contracts](/verikun/internals/contracts/#heal-vs-terminal).
+
+Known gap: a step that accepts an OS permission dialog compiles to the button's English label,
+so on a device in another locale the branch never matches and the repair declines it
+([#116](https://github.com/ddikman/verikun/issues/116)).
 
 ## What a run gives you
 
@@ -192,21 +189,14 @@ regression the test exists to catch. See
   prose to stabilise the test and cut tokens.
 - **Review screenshots are inserted automatically.** The compiler adds `screenshot` steps
   around transitions and inside loops, so the report carries a before/after visual trail.
-  They are dumped for humans, never read back by the model (no token cost on replay), and
-  never gate the test — a capture that hiccups is logged and skipped, not a failure.
+  They are for humans, never read back by the model, and never gate the test — a capture
+  that hiccups is logged and skipped.
 
 ## When a plan is recompiled
 
-The cache is keyed by the test text and the app build, and gated by a **compiler
-fingerprint**. A cached plan is discarded — and the test recompiled — when:
-
-- the prose changed — including the prose of any fragment it `@include`s
-- the app build changed (`--app-build`)
-- verikun itself was updated, or its grammar or repair prompt changed
-
-That last one is deliberate: a plan an older compiler produced must never be replayed by a
-newer engine. Details in
-[Contracts](/verikun/internals/contracts/#the-plan-cache-fingerprint).
+A cached plan is discarded and the test recompiled when the prose changed (including any
+fragment it `@include`s), the app build changed (`--app-build`), or verikun itself was
+updated. Details: [the plan cache](/verikun/reference/ai-plans/#the-plan-cache).
 
 ## Example tests
 
@@ -231,5 +221,5 @@ vk suite example --model codex-cli
 
 - [Suites](/verikun/guides/suites/) — many tests, one gated run
 - [AI plans & models](/verikun/reference/ai-plans/) — the plan grammar and the model list
-- [Plan IR & the replay engine](/verikun/internals/plan-ir-and-engine/) — why the IR is
-  shaped the way it is
+- [Plan IR & the replay engine](/verikun/internals/plan-ir-and-engine/) — how the compiler
+  and the engine fit together

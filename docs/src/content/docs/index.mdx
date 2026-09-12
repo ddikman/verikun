@@ -1,8 +1,7 @@
 ---
 title: verikun
 description: Drive Android devices and iOS simulators the way Puppeteer drives a browser — for AI agents and CI.
-# `doc` rather than `splash` on purpose: splash is a full-width landing layout that drops the
-# sidebar and the table of contents, which hid the whole nav on the page most people land on.
+# `doc`, not `splash`: the landing page keeps the sidebar and the table of contents.
 template: doc
 hero:
   tagline: Agent-driven, natural-language mobile tests — during agent development or in CI. Self-healing, with cost caps and test reports.
@@ -39,7 +38,8 @@ or an iOS simulator or device — like Puppeteer drives a browser. Tap, type, sw
 screenshot, and above all **inspect the UI hierarchy by semantic identifiers**.
 
 It is built to be invoked by AI agents, so its output and exit codes are a deliberate
-machine contract rather than only human ergonomics.
+machine contract rather than only human ergonomics. It ships as a skill and a plugin rather
+than an MCP server — [why](/verikun/getting-started/using-from-an-agent/#why-a-skill-and-not-an-mcp-server).
 
 <CardGrid stagger>
   <Card title="Agent CLI" icon="laptop">
@@ -77,15 +77,3 @@ machine contract rather than only human ergonomics.
 | Look up a command, flag or exit code | [Reference](/verikun/reference/commands/) |
 | Understand why it is built this way | [Internals](/verikun/internals/architecture/) |
 | Work out what a failure means | [Troubleshooting](/verikun/guides/troubleshooting/) |
-
-## Skill and plugin, not MCP
-
-verikun ships as a skill and a plugin rather than an MCP server, and that is deliberate. A
-skill lets us **guide the agent on how to use verikun** — when to inspect the hierarchy,
-what to assert, which command fits the step, and how to read the result back. That domain
-knowledge travels with the tool, so the agent drives the device *well*, not merely
-correctly.
-
-There is also no need for MCP here: verikun runs locally with all its dependencies, and the
-agent calls it through the plain `vk` CLI — there is no shared session, data, or
-authentication to broker.

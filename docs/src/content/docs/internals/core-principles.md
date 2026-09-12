@@ -11,11 +11,10 @@ kind of bug that ships.
 ## Exit codes are an API
 
 `0` ok · `1` not found / assertion failed / wait timeout · `2` usage error, ambiguous
-selector, or a device another job holds · `3` environment error. They are carried by
-`CliError(message, exitCode)` (`src/errors.ts`) and mapped to a process exit in exactly one
-place, the `try`/`catch` in `run()`; a non-`CliError` throw becomes `3`. **Throw `CliError`
-with the right code rather than printing and returning.** Full contract:
-[Exit codes](/verikun/reference/exit-codes/).
+selector, or a device another job holds · `3` environment error. **Throw
+`CliError(message, exitCode)` with the right code rather than printing and returning**: the
+one `try`/`catch` in `run()` maps it to the process exit, and any other throw becomes `3`.
+Full contract: [Exit codes](/verikun/reference/exit-codes/).
 
 ## stdout is data; stderr is diagnostics
 
@@ -28,10 +27,7 @@ With `--json`, the catch in `run()` emits `{error, exitCode, errorKind}`. `error
 error's **class** — `SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`,
 `CliError`, `Error` — so a caller can tell "the app has not drawn yet" from "the device is
 gone" without matching on message text. New commands honour `--json` for success output too.
-
-The same field rides `vk server`'s error bodies, for the same reason: an error that loses its
-class at a boundary is read by its exit code alone, and exit `3` cannot distinguish a device
-that is gone from an app that is still drawing.
+The same field rides `vk server`'s error bodies, so the class survives the wire.
 
 ## No host shell, ever
 
@@ -50,12 +46,9 @@ its own dependency tree, which never enters the tarball.
 
 ## Pure layers stay pure
 
-These separations are load-bearing, and each has been violated at least once in a way that
-caused a real bug:
-
 | Layer | Must not know about |
 |---|---|
-| `ui/selector.ts` | **time** — matching is a pure function of one snapshot; waiting is layered on in `commands/auto-wait.ts` |
+| `ui/selector.ts` | **time** — matching is a pure function of one snapshot; waiting is layered on in `commands/auto-wait.ts`. Route a new selector-resolving command through `resolveOneWaiting()` / `matchWaiting()`, never a raw `resolveOne` / `matchElements` |
 | `ui/viewport.ts` | **the device** — it is geometry; the orchestration lives in `cli.ts` |
 | `image.ts` | **device I/O** — it is image maths |
 | `report.ts` | **the filesystem and the driver** — `RunState` in, strings out |
@@ -75,29 +68,21 @@ act is reserved for cases where acting would be **wrong**, not merely unverifiab
 
 ## Refuse rather than report a false positive
 
-The recurring theme, and the one worth internalising:
+A false green is worse than a failure, because nobody investigates a green run. So:
 
 - An **ambiguous selector** exits `2` and lists candidates rather than tapping a guess.
 - A **state modifier the platform cannot report** exits `3` rather than matching nothing.
-- **`airplane=on`** is verified by *effect* rather than by its flag, because reporting
-  "offline" while the app is still online would make an offline test pass for the wrong
-  reason.
-- A **`give_up`** from the repair model is terminal, because a fallback tap onto an unrelated
-  screen would pass as green.
+- A **`give_up`** from the repair model is terminal rather than a fallback tap.
 - A **failed run** can never archive with `failures="0"`.
-
-A false green is worse than a failure, because nobody investigates a green run.
 
 ## Documentation is part of the change
 
-`SKILL.md` is the agent-facing contract and `src/agent/grammar.ts` its compact runtime copy —
-keep them in sync — and every behaviour change updates `SKILL.md`, `README.md` and this site
-in the same commit: [Contributing](/verikun/internals/contributing/#the-documentation-site).
+`SKILL.md` is the agent-facing contract and `src/agent/grammar.ts` its compact runtime copy;
+keep them in sync. Every behaviour change updates `SKILL.md`, `README.md` and this site in
+the same commit: [Contributing](/verikun/internals/contributing/#the-documentation-site).
 
 ## Versioning
 
-The version is declared once, in `package.json`; `src/version.ts` is generated from it (never
-hand-edit it). Any
-behaviour change bumps it and adds a `CHANGELOG.md` line, and the rebuild rotates
-`COMPILER_FINGERPRINT` so a plan an older compiler produced is never replayed:
+The version is declared once, in `package.json`; `src/version.ts` is generated from it. Any
+behaviour change bumps it and adds a `CHANGELOG.md` line:
 [Contributing](/verikun/internals/contributing/#versioning-and-changelog).

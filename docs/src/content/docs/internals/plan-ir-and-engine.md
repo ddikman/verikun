@@ -7,12 +7,8 @@ sidebar:
 
 `vk ai` runs a natural-language test by treating an LLM as a **compiler, not a runtime**:
 compile the prose into a deterministic plan IR once, replay it model-free, and wake the model
-only to *repair* a step whose selector stops resolving.
-
-That is the cost model. A green suite costs roughly \$0 in tokens; you pay only on first
-compile and on a genuine repair, and a green run persists the repaired plan — on a machine that
-keeps the plan cache, which a disposable CI runner does not
-([Self-healing in CI](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache)).
+only to *repair* a step whose selector stops resolving. The cost model that follows from that
+is in [Natural-language tests](/verikun/guides/natural-language-tests/#the-cost-model).
 
 All of this lives in `src/agent/`. The rest of the CLI is **reused, not reinvented**.
 
@@ -21,13 +17,10 @@ All of this lives in `src/agent/`. The rest of the CLI is **reused, not reinvent
 `ir.ts` defines uniform typed nodes — a `command` leaf, or a control node
 (`if-present` / `repeat` / `when` / `while-present` / `read`).
 
-Control bodies hold **leaves only**, with one narrow exception. This shallowness is not a
-simplification for its own sake: it keeps the structured-output JSON schema
-(`PLAN_JSON_SCHEMA`) **non-recursive**, and the model APIs reject a recursive schema.
-
-The exception — `if-present` and `while-present` may nest one level deeper inside a
-`repeat { when { … } }` — exists because that shape appears in real flows and could not be
-expressed otherwise.
+Control bodies hold **leaves only**, with one narrow exception: `if-present` and
+`while-present` may nest one level deeper inside a `repeat { when { … } }`, because that
+shape appears in real flows. The shallowness keeps the structured-output JSON schema
+(`PLAN_JSON_SCHEMA`) **non-recursive**, which the model APIs require.
 
 `validateNode` is the grammar gate, applied to **both** compile output and every model
 repair. A hallucinated command is rejected, never run.
@@ -40,10 +33,8 @@ repair. A hallucinated command is rejected, never run.
 The seam into the existing CLI is **`executeOutcome`** in `cli.ts`: the recordable-command
 core, split out of `executeParsed`, returning `{code, error}` with the error *not* mapped to
 an exit code. That is what lets the engine distinguish a heal trigger from a terminal
-failure.
-
-Action handlers stay **untouched**. The resolved element they already record via `note()` is
-everything the engine needs.
+failure. Action handlers stay **untouched**; the resolved element they already record via
+`note()` is everything the engine needs.
 
 `cmdAi` builds one shared driver and one explicit run, then injects `executeOutcome` (bound
 to that driver) as the engine's `exec`. Per-step `out()` is suppressed via `setOutputQuiet`
@@ -51,11 +42,9 @@ so stdout stays the one final result while progress streams to stderr for CI liv
 
 ## Heal versus terminal
 
-A thrown selector miss (exit `1`) or ambiguity (exit `2`) heals via the model; an `assert`
-failure, a model `give_up` and a budget or timeout abort are terminal; an environment error
-(exit `3`) aborts without being recorded as a regression. `assert` **returns** exit `1` rather
-than throwing, and that is the whole mechanism — the engine heals only on a *thrown* selector
-error, so never make `assert` throw. The full matrix and the reasons:
+A thrown selector miss or ambiguity heals via the model; an `assert` failure, a model
+`give_up` and a budget or timeout abort are terminal. `assert` **returns** exit `1` rather
+than throwing, and that is the whole mechanism — never make `assert` throw. The full matrix:
 [Heal vs terminal](/verikun/internals/contracts/#heal-vs-terminal).
 
 ## A guard has two clocks, and only one of them can abort
@@ -71,37 +60,29 @@ slow device.
 
 **Is there a screen to ask at all?** That is `NoWindowError` — the app force-stopped,
 mid-launch, or busy mid-transition — and it gets its own **10s** grace instead, because it is
-not a fact about the selector. The two are independent on purpose: the grace applies only
-while *no* read has succeeded, so it can never make a merely absent selector more patient.
-
-Both are bounded by the run deadline, so no guard can overrun `--timeout`.
+not a fact about the selector. The grace applies only while *no* read has succeeded, so it
+can never make a merely absent selector more patient. Both are bounded by the run deadline,
+so no guard can overrun `--timeout`.
 
 A guard still blind when its grace runs out throws `GuardBlindError` and aborts the run
 (exit `3`). Reporting "absent" instead would skip the guarded body, and a guard-heavy plan
-would finish fully green having executed nothing.
-
-Why 10s rather than the 5s a leaf command auto-waits: measured post-`vk launch`, the first
-readable hierarchy arrives 4.7–6.2s later on a physical SM-A415F. A leaf that needs longer
-takes `--wait`; a guard's patience is internal and a test author cannot reach it, so it is set
-from the measurement instead. See [issue #80](https://github.com/ddikman/verikun/issues/80).
+would finish fully green having executed nothing. The 10s figure was set from how long the
+first readable hierarchy takes to arrive after `vk launch` on a physical phone; a guard's
+patience is internal, so a test author cannot reach it the way a leaf's `--wait` can.
 
 ## A repair is a decision, not a forced substitution
 
 The model returns a replacement leaf **or** `give_up` (`replaceStep: null`) when the live
 screen has no element serving the failed step's intent — the flow drifted to the wrong screen
-or app.
-
-A `give_up` is **terminal**. Without it, a "too kind" fallback tap onto an unrelated screen
-would pass as a false green. `REPAIR_DECISION_JSON_SCHEMA` plus the strict `REPAIR_GRAMMAR`
-enforce the two-way choice.
+or app. A `give_up` is **terminal**; `REPAIR_DECISION_JSON_SCHEMA` plus the strict
+`REPAIR_GRAMMAR` enforce the two-way choice.
 
 ## Loop safety
 
 Loops carry a hard cap **and** a structural no-progress early exit, computed from a sorted
-id-plus-text signature of the screen.
-
-The raw hierarchy is deliberately **not** hashed: its node order is nondeterministic, so a
-hash would report "changed" on every iteration and the early exit would never fire.
+id-plus-text signature of the screen. The raw hierarchy is deliberately **not** hashed: its
+node order is nondeterministic, so a hash would report "changed" on every iteration and the
+early exit would never fire.
 
 ## The provider seam
 
@@ -119,12 +100,10 @@ Both HTTP providers use structured output, a cached grammar prefix, and 429/5xx 
 
 The two CLI backends are served by the **single spec-parameterized** `cli-provider.ts`.
 Adding another CLI agent is a new `CliAgentSpec` plus a `MODELS` row plus a `CLI_SPECS` entry
-— **not a new class**.
-
-A CLI backend is billed to the user's subscription, so it reports empty `usage` (cost `$0`,
-with `--max-cost-usd` and `--cost-override` inert). It runs read-only in a neutral temp
-directory and — whether or not it has a native schema flag — is still gated by `parsePlan`
-and `validateNode` like every other provider.
+— **not a new class**. A CLI backend is billed to the user's subscription, so it reports empty
+`usage` (cost `$0`, with `--max-cost-usd` and `--cost-override` inert). It runs read-only in
+a neutral temp directory and is still gated by `parsePlan` and `validateNode` like every
+other provider.
 
 ## The grammar prompt is a cached prefix
 
@@ -138,20 +117,17 @@ runtime copy. **Keep the two in sync.**
 `grammar.ts` also exports `SECTION_NOTE`, added to the *user* message (not the cached system
 prefix) when compiling one chunk of an
 [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)d test. It
-exists because of a measured failure: a paragraph *summarising* a test is context when the
-whole test is compiled at once, but the entire prompt when that chunk is compiled alone — and
-the model turned one such summary into three steps the test never asked for. The note says the
-chunk is a section, that setup and teardown belong to its neighbours, and that emitting no
-steps is a valid answer. It is folded into the compiler fingerprint like the other two.
+says the chunk is a section, that setup and teardown belong to its neighbours, and that
+emitting no steps is a valid answer. It is folded into the compiler fingerprint like the
+other two.
 
-The note is the **second** line of defence, not the only one. Whether a summary reads as a spec
-is a model judgement, and it went the wrong way on 5 of 14 tests in one suite run — producing a
-confident, entirely fabricated plan spliced ahead of the launch. So `include.ts` no longer hands
-the model such a chunk at all: prose that states no step is folded into the chunk of its own file
-that states the steps it describes. The classifier there asks for *positive evidence* of a step
-(a list item of any kind, or a known verb anywhere in a line) rather than reusing `lint.ts`'s
-instruction count, whose deliberate undercount is safe as a coverage floor and would be a moved
-step here.
+The note is the second line of defence. The first is in `include.ts`: prose that states no
+step (a title, a summary of what the test checks) is folded into the chunk of its own file
+that states the steps it describes, and is never handed to the model as a chunk of its own —
+a summary compiled alone is a whole prompt, and the model invents steps for it. The classifier
+asks for *positive evidence* of a step (a list item of any kind, or a known verb anywhere in
+a line) rather than reusing `lint.ts`'s instruction count, whose deliberate undercount is safe
+as a coverage floor but would move a real step here.
 
 `compileUserPrompt` in `provider.ts` assembles that user message for all four providers, which
 differ only in how they send it.
@@ -170,37 +146,22 @@ written. Each buys one guided recompile, with the finding handed back as `retryF
 
 The two coverage rules are **fatal**: a plan that still trips one after that recompile is
 rejected rather than run, because a truncated plan does not fail — it asserts nothing, so it
-passes, and a pass is then cached and replayed against every later build. An ~85-step test
-compiled to 13 and reported success for exactly that reason. See
+passes, and a pass is then cached and replayed against every later build. See
 [AI plans & models](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) for the
 user-facing contract.
 
-There are two of them because the two observed truncations clear one check each. The floor
-sits at **0.35** of the prose's instruction count: the truncations ran ~85% short, while the
-widest ordinary variation between two passing runs of the same test was ~20%, and a healthy
-plan normally sits at or above 1.0. But a plan that stops after a long shared preamble is not
-obviously short at all — it just cannot name what the test's closing instructions name, which
-is what the tail-anchor rule asks. Both counters are biased to **undercount** the prose
-(several sentences on one line count once; unordered bullets never count), because an
-undercount only weakens detection while an overcount would reject a correct test — the worse
-defect of the two.
+The floor sits at **0.35** of the prose's instruction count — well below ordinary run-to-run
+variation of a healthy compile, and well above a truncation. A plan that stops after a long
+shared preamble is not obviously short at all, which is what the tail-anchor rule catches.
+Both counters are biased to **undercount** the prose (several sentences on one line count
+once; unordered bullets never count), because an undercount only weakens detection while an
+overcount would reject a correct test.
 
-Two supporting details live outside `lint.ts`, both in `cli.ts`:
-
-- an `@include` section that does not cover its own prose — zero steps where the prose states
-  two or more instructions, or a plan that trips a coverage rule — is **not cached** and drops
-  the split, so the test is recompiled whole rather than assembled with its body missing. A
-  fragment is keyed on its own text, so caching a short one shortens every test that includes
-  it. A single rationale line that happens to open with a verb is still tolerated.
-- `findSeed` ignores the compiler fingerprint by design, so a truncated plan already on disk
-  would keep being handed to the model as "adapt this". A seed that trips a coverage rule
-  against its own prose is discarded.
-
-## Before trusting seeding or shallow-IR depth
-
-Run the validation gate described in the design doc: hand-write the flakiest flow's plan and
-measure step survival across two builds. The shallow IR and the seed-from-prior-build
-behaviour are both bets, and that is how they get checked.
+Two supporting rules live in `cli.ts`: an `@include` section that does not cover its own
+prose is **not cached** and drops the split, so the test is recompiled whole rather than
+assembled with its body missing (a fragment is keyed on its own text, so caching a short one
+would shorten every test that includes it); and `findSeed`, which ignores the compiler
+fingerprint by design, discards a seed that trips a coverage rule against its own prose.
 
 ## Where to go next
 
