@@ -97,6 +97,7 @@ import { cmdSuite, AiRunResult, Lane } from './suite';
 import { classifyFailure } from './device/failover';
 import { sleep, DEFAULT_BOOT_TIMEOUT_MS, DEFAULT_STOP_TIMEOUT_MS } from './wait';
 import { VERSION } from './version';
+import { adbHealthProbe } from './adb-health';
 import { updateProbes } from './update-check';
 import type { Ctx } from './commands/context';
 import {
@@ -534,6 +535,11 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
 
   const adb = process.env.ADB || 'adb';
   if (!reportProbe(probeAdb())) return 3;
+  // adb being PRESENT is not the same as adb being WELL: a long-lived server leaks USB
+  // handles and starts dropping devices mid-run, and no device-level remedy reaches it
+  // (see adb-health.ts). Advisory and evidence-only, so a healthy host stays silent.
+  const adbRot = adbHealthProbe();
+  if (adbRot) reportProbe(adbRot);
 
   const devices = ctx.driver.listDevices();
   const usable = devices.filter((d) => d.state === 'device');

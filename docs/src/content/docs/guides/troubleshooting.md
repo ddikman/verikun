@@ -224,6 +224,29 @@ VERIKUN_NO_CLAIM=1 vk tap @x               # or opt out of coordination entirely
 A claim from a crashed job clears on its own. Full detail:
 [Device claims](/verikun/reference/device-claims/).
 
+### Devices keep dropping off adb
+
+Intermittent `device not found` / `no device` on a host that has been up for days, with no
+pattern you can pin to one phone, one cable or one test. The usual cause is not the device:
+it is the **host's adb server**, which leaks USB handles the longer it runs until it starts
+losing devices mid-run. `vk doctor` says so when it can measure it:
+
+```
+adb server: adb server is leaking USB handles (~120 kernel guard violations/min, up 216h) — devices will drop
+  restart it: `adb kill-server && adb start-server` (safe; devices reconnect in a few seconds)
+```
+
+The restart is safe — every device reconnects within a few seconds — but it is **host-wide**,
+so it also drops any other tool talking to `adb` on that machine.
+
+[`vk server`](/verikun/guides/remote-devices-and-ci/) does this for itself: when nothing is
+running it re-checks, and restarts a rotted adb server before the next job meets it. Set
+`VERIKUN_NO_ADB_RECYCLE=1` to stop it, if something else on the host uses `adb` too.
+
+The measurement is macOS-only (it reads the kernel's guard-violation log), so on Linux hosts
+doctor stays quiet and the server never recycles. If a long-lived Linux CI host starts dropping
+devices, restarting `adb` by hand is still worth a try.
+
 ### The display went to sleep
 
 A slept device does **not** reliably fail the read: it serves the **lock screen** as a

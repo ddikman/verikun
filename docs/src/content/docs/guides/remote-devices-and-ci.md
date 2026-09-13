@@ -358,6 +358,24 @@ There is **no** automatic mid-run restart: a reboot destroys the app session, so
 step would pass meaninglessly or cascade into confusing failures. Failover, below, never
 reboots and never replays a step.
 
+## It keeps the host's adb server healthy
+
+A host's adb server leaks USB handles the longer it runs, until it starts dropping devices
+mid-run. Nothing at the device level fixes that — failover would just move to another device
+behind the same broken adb — so the server handles it directly:
+
+```
+[server] adb server is leaking USB handles (~120 kernel guard violations/min, up 216h) — devices will drop
+[server] adb server restarted — devices reconnecting
+```
+
+It only acts when **nothing is running** and only when it can **measure** the fault, so a
+healthy server is never restarted. Every device reconnects within a few seconds.
+
+Because `adb kill-server` is host-wide, set `VERIKUN_NO_ADB_RECYCLE=1` if anything else on
+that machine drives `adb` alongside the server. The check is macOS-only; on Linux hosts the
+server never recycles.
+
 ## When the bound device fails
 
 When the device a server is bound to cannot serve a request, the server moves to another
