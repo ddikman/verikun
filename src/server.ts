@@ -43,7 +43,7 @@ import { CliError } from './errors';
 import { getDriver } from './drivers';
 import { releaseCompanionOn } from './companion/manager';
 import { ClaimOpts, claimDevice, claimsEnabled, releaseClaim, setProcessScoped, summarize } from './device/claims';
-import { classifyFailure, classifyInstallFailure, failoverCandidates, FailoverVerdict } from './device/failover';
+import { classifyFailure, classifyInstallFailure, failoverCandidates, FailoverKind, FailoverVerdict } from './device/failover';
 import { csvList, poolSerials, resolvePoolPlatform, type DevicePoolSpec } from './device/pool';
 import { err, setErrSink, setOutputQuiet } from './output';
 import { HttpError, encodeArtifacts, firstLine, flagsToSpecs, readBody, sendJson } from './server-http';
@@ -55,7 +55,7 @@ import type { WorkerExecResult } from './server-worker';
 import { InvalidPlanError, leafToFlags, validateNode } from './agent/ir';
 import {
   describeError, rebuildError, DeviceChange, DeviceListResponse, DeviceOpRequest, DeviceOpResponse,
-  ExecRequest, ExecResponse, HealthResponse, InstallResponse, LeaseResponse, LogsRequest,
+  ExecRequest, ExecResponse, HealthResponse, InstallResponse, InstallSkip, LeaseResponse, LogsRequest,
   LogsResponse, RpcErrorBody,
 } from './rpc';
 import { platformFromFlags, deviceFromFlags } from './cli';
@@ -587,8 +587,28 @@ export function buildServer(config: ServerConfig): Server {
   // Like the reconcile timer: must never hold the process open at Ctrl-C.
   recycleTimer?.unref?.();
 
-  const pickFailoverDevice = (failed: string, reason: string): Promise<string | null> =>
-    serializeFailover(() => pickFailoverDeviceLocked(failed, reason));
+  /**
+   * Is this failure grounds to REMOVE the device from the pool, rather than merely deal it
+   * last? Two conditions, and both are necessary.
+   *
+   * `unreachable` is the only kind that qualifies, because it is the only one that says the
+   * device is not there. Every other kind describes a device that is present and unhappy —
+   * a full disk, a wedged app, an exit 3 nobody has classified — and for those, demotion
+   * plus recovery-by-traffic is right and this must not change: they can still produce the
+   * traffic that clears them. An absent device cannot, which is the whole defect (#139): the
+   * demotion is a sort key (`leaseFor`), so "dealt last" is still dealt, every round, and
+   * `restoreDevice` can never fire for a device that will never answer again.
+   *
+   * And only on a POOLED server, because only a pooled server sweeps. `reconcileOnce`
+   * returns immediately without `poolSpec` (`wantedSerials`) and its timer is never even
+   * created — see `ServerConfig.poolSpec`, "deliberately does not reconcile". Shedding
+   * where nothing readmits would trade a device that fails loudly for a server that is
+   * empty until someone restarts it: a worse failure, and a new one.
+   */
+  const shedOnFailure = (kind: FailoverKind): boolean => kind === 'unreachable' && config.poolSpec !== undefined;
+
+  const pickFailoverDevice = (failed: string, reason: string, kind: FailoverKind): Promise<string | null> =>
+    serializeFailover(() => pickFailoverDeviceLocked(failed, reason, kind));
 
   /**
    * Bring in a healthy replacement for `failed`. Returns the serial moved to, or null
@@ -603,7 +623,7 @@ export function buildServer(config: ServerConfig): Server {
    * only reports ready once its OWN `preflight()` has passed, so starting the worker IS
    * the probe, run on the thread that will go on to use it.
    */
-  const pickFailoverDeviceLocked = async (failed: string, reason: string): Promise<string | null> => {
+  const pickFailoverDeviceLocked = async (failed: string, reason: string, kind: FailoverKind): Promise<string | null> => {
     const policy = config.failover;
     if (!policy) return null;
     // Idempotency, on a marker of its OWN. Not pool membership — a worker that dies
@@ -617,23 +637,29 @@ export function buildServer(config: ServerConfig): Server {
     // see and where the server will actually go cannot drift. A pool member's own driver
     // is not: it may be pointed at a corpse.
     /**
-     * Nothing healthier exists. Shed the failed device — continuing to hand it out is
-     * what makes a pool a coin flip per lease — but ONLY while another remains.
+     * Nothing healthier exists. Decide what becomes of the failed device itself — THREE
+     * outcomes, not two, and which one applies is `shedOnFailure`'s question:
      *
-     * The LAST device stays, deliberately. A server that shed it would answer every
-     * later request `503 no device attached`, replacing the device's own error (full
-     * disk, no space, whatever it actually was) with a message that names nothing. A
-     * caller stuck on one broken device is better served by the truth about it.
+     *  - GONE, on a pooled server — shed it. It cannot serve and cannot recover by
+     *    traffic, so leaving it in the pool means dealing it forever (#139). The sweep
+     *    owns readmission, so capacity comes back on its own.
+     *  - present but unhappy — demote it: worker, claim and slot kept, dealt last,
+     *    restored by the first command that works.
+     *  - already left on its own (its worker died) — nothing to remove, just clean up.
+     *
+     * The last two share a tail with the first, because "stop serving this device" has the
+     * same consequences however it came about.
      */
     const shrink = async (): Promise<null> => {
       // A device whose worker DIED is already out of the pool, so there is nothing left to
       // shed — but its holder still has to be evicted and its claim and companion handed
-      // back, and the "last device stays" guard below must not skip that. Asking whether
-      // it is still a member is what separates the two cases.
+      // back. Asking whether it is still a member is what separates that case from a
+      // device we are removing ourselves.
       const serving = pool.serials().includes(failed);
-      if (serving) {
-        // DEMOTE, never shed. The device keeps its worker, its claim and its place in the
-        // pool; it is simply dealt last until it does some work (see `degradeDevice`).
+      if (serving && !shedOnFailure(kind)) {
+        // DEMOTE — the device is still THERE. It keeps its worker, its claim and its place
+        // in the pool; it is simply dealt last until it does some work (see
+        // `degradeDevice`). Contrast the shed below, which is only for a device that is not.
         //
         // This replaces "nothing healthier to move to — X left the pool". That rule read
         // correctly on a SINGLE-device server, where it never actually fired (the last
@@ -641,10 +667,16 @@ export function buildServer(config: ServerConfig): Server {
         // verdict — because a pool's own members are excluded from its candidate list, so
         // "no candidate" is the normal case rather than the exceptional one. The argument
         // for shedding was that continuing to hand out a broken device makes a pool a coin
-        // flip per lease; that is answered by ORDERING (a degraded device is chosen only
-        // when nothing else is free), which costs no capacity. And it is the same judgement
-        // the last-device branch already made out loud: a caller stuck on one broken device
-        // is better served by the truth about it than by a server that quietly halved.
+        // flip per lease; for a device that is PRESENT that is answered by ORDERING (a
+        // degraded device is chosen only when nothing else is free), which costs no
+        // capacity, and a caller that does reach it is better served by the truth about it
+        // than by a server that quietly halved.
+        //
+        // Ordering answers it only while the device can still come back, though. It cannot
+        // answer for a device that is GONE — "dealt last" is still dealt once the healthy
+        // devices are busy, which on a suite sized to the pool is every round, and no
+        // amount of ordering produces the traffic `restoreDevice` needs. That case is
+        // shed above, by `shedOnFailure`.
         //
         // The holder keeps its lease too: its device did not go anywhere, so there is no
         // `deviceChanged` to send and nothing for the run to seal. The step that failed
@@ -653,7 +685,28 @@ export function buildServer(config: ServerConfig): Server {
         degradeDevice(failed, reason);
         return null;
       }
-      // NOT serving — its worker already died, so the device left on its own and there is
+      if (serving) {
+        // SHED. The device is gone and this server sweeps, so removing it is not the
+        // one-way ratchet it was before the sweep existed (#114): `reconcileOnce` lists it
+        // as missing from what `--devices` asked for, retries with backoff, and
+        // `rejoinDevice` readmits it — bringing it up to `lastInstall` first — the moment
+        // it answers again. Capacity returns without anyone restarting anything.
+        //
+        // It keeps its QUARANTINE, unlike the demote branch above, and that asymmetry is
+        // the point: quarantine means "not serving, and ruled out", degradation means
+        // "serving but suspect", and the two are disjoint precisely so `/v1/health` and
+        // `exhaustedNote` can be read. A shed device genuinely is not serving, so it
+        // belongs in the same list as one whose worker died — which is the tail below,
+        // reached from here. `rejoinDevice` clears it on evidence, never on a clock.
+        //
+        // `degraded` must be given up though: it is defined as pool MEMBERS that recently
+        // failed, and a non-member left in it would have `/v1/health` reporting a device it
+        // no longer serves, in a list whose whole meaning is that it still does.
+        pool.retire(failed);
+        degraded.delete(failed);
+        err(`[server] pool: ${failed} left the pool — ${reason} (the sweep readmits it when it answers again)`);
+      }
+      // NOT serving — its worker died, or the shed above just removed it, so there is
       // nothing to demote. The holder is EVICTED, not migrated: without a replacement there
       // is no `deviceChanged` to send, so the client never learns to seal its run — and
       // merely dropping the lease would let its next request silently draw some other device
@@ -759,9 +812,16 @@ export function buildServer(config: ServerConfig): Server {
    * Is this device actually gone? Two probes a second apart, because that gap is the only
    * thing separating a USB re-enumeration or a mid-`launch --clear` gap from a dead box —
    * and quarantining a healthy device is the expensive mistake here. Returns the reason
-   * when dead, undefined when it was a blip.
+   * AND the probe's own verdict kind when dead, undefined when it was a blip.
+   *
+   * The kind is carried out because the probe is often the better-classified of the two
+   * failures. The operation that brought us here may have failed with a string nothing
+   * recognises (an unclassified exit 3, which is what earns a probe in the first place),
+   * while `preflight` on a detached phone says `device '<serial>' not found` — the exact
+   * `UNREACHABLE_RULES` wording. Reporting the ORIGINAL verdict's kind there would decide
+   * "shed or demote" from the vaguer of two answers about the same device.
    */
-  const deviceIsDead = async (handle: DeviceHandle): Promise<string | undefined> => {
+  const deviceIsDead = async (handle: DeviceHandle): Promise<{ reason: string; kind: FailoverKind } | undefined> => {
     let last = '';
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -789,7 +849,7 @@ export function buildServer(config: ServerConfig): Server {
       err(`[server] probe on ${handle.serial}: ${verdict.reason} (${verdict.kind}) — a host problem, not this device`);
       return undefined;
     }
-    return last || 'the device stopped answering';
+    return { reason: last || 'the device stopped answering', kind: verdict.kind };
   };
 
   /**
@@ -828,6 +888,7 @@ export function buildServer(config: ServerConfig): Server {
     try {
       const verdict = classifyFailure(e);
       let reason = verdict.reason;
+      let kind = verdict.kind;
       if (!verdict.move) {
         // Only an unrecognised exit 3 earns a probe; `transient` and `toolchain` set
         // probe:false precisely so a mid-launch gap or a missing adb cannot become a move.
@@ -844,15 +905,21 @@ export function buildServer(config: ServerConfig): Server {
           err(`[server] ${what}: ${from} failed but probes healthy — staying (${verdict.reason})`);
           return undefined; // a blip — the test rerun is the right answer, not a new device
         }
-        reason = dead;
+        reason = dead.reason;
+        // The PROBE's verdict, not the original failure's. We are here because the
+        // operation failed with something nothing recognised; `preflight` on a detached
+        // phone says `device '<serial>' not found`, which is classified. Taking the vaguer
+        // of two answers about the same device is how a detachment that first showed up as
+        // an odd exit 3 would be demoted forever instead of shed.
+        kind = dead.kind;
         noteVerdict({ ...verdict, move: true }, e, what);
       }
       err(`[server] ${what}: FAILED on ${from} — ${reason}`);
       quarantineDevice(from, reason);
-      // pickFailoverDevice has already said which of the two no-move outcomes happened —
-      // the device was shed, or it was the last one and stayed. A second line here would
-      // contradict one of them.
-      const to = await pickFailoverDevice(from, reason);
+      // pickFailoverDevice has already said which no-move outcome happened — the device
+      // was shed, or demoted, or had already left. A second line here would contradict
+      // one of them.
+      const to = await pickFailoverDevice(from, reason, kind);
       if (!to) return undefined;
       return { from, to, reason, retried: false };
     } finally {
@@ -1026,6 +1093,9 @@ export function buildServer(config: ServerConfig): Server {
         3,
       );
     }
+    // An empty pool never reaches here: the deviceless guard in the router answers 503 for
+    // every route that takes a lease, and it names `lostDevice` while doing it. So `n` is
+    // always >= 1 and this only ever describes CONTENTION, which is what 409 means.
     const n = pool.serials().length;
     return new HttpError(
       409,
@@ -1271,9 +1341,9 @@ export function buildServer(config: ServerConfig): Server {
      * wrapper keeps no result on a throw), so dropping it leaves the operator holding a
      * serial the server has already left.
      */
-    const hopOrThrow = async (why: string, giveUp: unknown): Promise<string> => {
+    const hopOrThrow = async (why: string, giveUp: unknown, kind: FailoverKind): Promise<string> => {
       quarantineDevice(from, why);
-      const to = await pickFailoverDevice(from, why);
+      const to = await pickFailoverDevice(from, why, kind);
       if (to === null) {
         // A pool that emptied with nothing having moved keeps its own 503 — a more
         // accurate status than a wrapped 500.
@@ -1296,7 +1366,9 @@ export function buildServer(config: ServerConfig): Server {
         // reaches the failover machinery at all.
         const gone = firstError ?? new HttpError(503, `device ${from} is no longer attached`, 3);
         if (!config.failover || hop >= MAX_FAILOVER_HOPS) throw gone;
-        from = await hopOrThrow('the device left the pool mid-install', gone);
+        // `unreachable` is the literal truth — it is not in the pool — and it is also
+        // inert here: `shrink` sees a non-member and takes its cleanup tail either way.
+        from = await hopOrThrow('the device left the pool mid-install', gone, 'unreachable');
         continue;
       }
       try {
@@ -1310,7 +1382,7 @@ export function buildServer(config: ServerConfig): Server {
         // The artifact is broken / the caller is wrong / failover is off / we are out of
         // hops: report the first failure unchanged, exactly as before this feature.
         if (!verdict.move || !config.failover || hop >= MAX_FAILOVER_HOPS) throw firstError;
-        from = await hopOrThrow(verdict.reason, firstError);
+        from = await hopOrThrow(verdict.reason, firstError, verdict.kind);
       }
     }
   }
@@ -1371,6 +1443,12 @@ export function buildServer(config: ServerConfig): Server {
       );
       const failed = outcomes.filter((o) => o.error);
       const moved = outcomes.filter((o) => o.change);
+      // Where each outcome ENDED UP. An install that moved ran on its replacement, not on
+      // the serial it started from, so the device that holds this build — or conspicuously
+      // does not — is the last one it was on, never `o.serial`.
+      const landedOn = (o: (typeof outcomes)[number]): string => o.change?.to ?? o.serial;
+      const installed = outcomes.filter((o) => !o.error).map(landedOn);
+      let skipped: InstallSkip[] = [];
       if (failed.length) {
         // One artifact, many devices: if it failed everywhere the file is the suspect, so
         // surface the FIRST device's error unchanged rather than a summary that buries it.
@@ -1387,30 +1465,69 @@ export function buildServer(config: ServerConfig): Server {
           }
           throw failed[0].error;
         }
-        // Carry a move that DID happen even though the overall install failed: the
-        // client re-points its run context on `deviceChanged`, and dropping it here
-        // would leave the operator holding a serial the server has already left.
-        throw new HttpError(
-          500,
-          `install failed on ${failed.map((f) => `${f.serial} (${firstLine((f.error as Error).message)})`).join('; ')}`,
-          3,
-          moved[0]?.change,
+        // PARTIAL. Two healthy phones took the build and one did not. Answering 500 for the
+        // whole pool is what turned one detached device into a dead CI job (#139) — and it
+        // dies at the install step, so the run has already paid for an app build and tested
+        // nothing.
+        //
+        // What made the 500 defensible is the fan-out's own rule, one line up: a lane dealt
+        // a device that missed this build runs the PREVIOUS one and reports green, which is
+        // the worst result this server can produce. The answer is not to soften that rule
+        // but to SATISFY it — a device that did not take the build leaves the pool, so no
+        // lease can reach it. `rejoinDevice` already makes exactly this call out loud
+        // ("serving the wrong build is worse than not serving") and offers the same remedy:
+        // the sweep readmits it and installs `lastInstall` before it is dealt any work.
+        //
+        // Done regardless of `config.failover`. The kill switch governs MOVING BETWEEN
+        // devices; it was never a licence to serve a stale build, and the sweep that brings
+        // the device back is gated on `poolSpec`, not on failover.
+        skipped = failed.map((f) => {
+          const serial = landedOn(f);
+          const reason = firstLine((f.error as Error).message);
+          if (pool.serials().includes(serial)) {
+            pool.retire(serial);
+            // Same two rules as the shed in `shrink`: `degraded` is for MEMBERS, and a
+            // device that is not serving belongs in `quarantine` — which `rejoinDevice`
+            // clears on the evidence of a worker that started and a build that installed.
+            degraded.delete(serial);
+            quarantineDevice(serial, `did not take the current build — ${reason}`);
+            evictHoldersOf(serial, `${serial} left the pool without the current build`);
+            releaseCompanionOn(serial);
+            if (claimsEnabled(claimEnv)) releaseClaim(serial, { ...claimOpts, mineOnly: true });
+          }
+          return { serial, reason };
+        });
+        err(
+          `[server] install: partial — ${installed.join(', ')} took the build; ` +
+            `removed from the pool: ${skipped.map((s) => `${s.serial} (${s.reason})`).join('; ')}`,
         );
       }
       for (const m of moved) err(`[server] install: ${m.serial} → ${m.change!.to} (${m.moves} move(s))`);
-      err(`[server] install: done on ${pool.serials().join(', ')}`);
+      err(`[server] install: done on ${installed.join(', ')}`);
       // Retain the artifact so a device that rejoins later can be brought up to this build
       // (see `rejoinDevice`). Renamed out of the per-request temp name into one stable slot,
       // so at most one build is ever held and each install replaces the last.
+      //
+      // Reached on a PARTIAL install too, and load-bearing there: the devices just removed
+      // are precisely the ones the sweep will readmit, and `rejoinDevice` brings a returning
+      // device up to `lastInstall`. Retaining only on a clean sweep would hand each of them
+      // the PREVIOUS build on the way back in — and `rejoinDevice`'s own check would pass,
+      // because an install that succeeds is all it can see.
       retainInstall(tmpPath, ext);
       retained = true;
+      // Only a move whose destination SURVIVED is worth reporting. The client re-points its
+      // run context on `deviceChanged`, so naming a device the partial branch retired three
+      // lines ago would send its next step to a serial this server no longer serves.
+      const survivors = new Set(pool.serials());
+      const reportableMove = moved.map((m) => m.change!).find((c) => survivors.has(c.to));
       const body: InstallResponse = {
         ok: true,
         bytes: size,
         sha256: digest,
-        devices: pool.serials(),
+        devices: installed,
+        ...(skipped.length ? { skipped } : {}),
         // The wire field is singular; a pool that moved more than one device logs the rest.
-        ...(moved.length ? { deviceChanged: moved[0].change } : {}),
+        ...(reportableMove ? { deviceChanged: reportableMove } : {}),
       };
       sendJson(res, 200, body);
     } finally {
@@ -1434,10 +1551,12 @@ export function buildServer(config: ServerConfig): Server {
    * phone another job is mid-test on. Refusing plainly beats a rule nobody can predict.
    * The GET listing stays available, because reading what is attached is safe.
    *
-   * KNOWN COST, stated in the refusal so nobody has to discover it: this is also the only
-   * thing that clears a quarantine, so on a pool a device ruled out by failover stays out
-   * until the server is restarted. That is the price of refusing rather than guessing;
-   * lifting it would mean letting a NAMED, allowlisted target act on one pool member.
+   * This used to carry a known cost — that it was the ONLY thing clearing a quarantine, so
+   * on a pool a device ruled out by failover stayed out until the server was restarted.
+   * That is no longer true and the refusal no longer says it: `rejoinDevice` clears the
+   * quarantine (and `degraded`, and `failedOver`) when the sweep readmits a device, on the
+   * evidence of a worker that started and a build that installed. The refusal itself stands
+   * — power-cycling one member of a pool another job is mid-test on is what it prevents.
    */
   function requireSingleDevice(op: string): void {
     const n = pool.serials().length;

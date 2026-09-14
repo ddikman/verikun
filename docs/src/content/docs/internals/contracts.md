@@ -155,16 +155,24 @@ device outside the operator's set, never to one that is not already running, and
 | **The install classifier enumerates the FILE, not the device.** The file-attributable set is small and closed; everything else moves, including wordings nobody has met. The named device-state strings are a fast path, never the gate. | The device side is open-ended and OEM-specific. `tests/failover.test.ts` feeds the classifier gibberish that must still move. |
 | **On exhaustion the client gets the FIRST device's error.** A step keeps the opposite default — stay unless a two-probe re-check confirms the device dead — and the re-probe's own error is classified too. | Exit 3 on a step is dominated by transient noise; a wrong move must cost time, never the diagnosis. |
 | **An install that fails on EVERY device condemns the build, not the pool**: the per-device quarantines are rolled back. | The fan-out has just proved the artifact is the common factor. |
+| **An install that fails on SOME devices is a success**, reported as `devices` + `skipped`. Every device that missed the build leaves the pool first, and the build is retained either way. | The 500 existed to stop a lane running the previous build and reporting green. Removing the device answers that; failing the whole run does not, and cost a CI job per detached phone. Retaining is what stops the sweep readmitting a device onto the build before. |
 
 Operator view: [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
 
-## A pool degrades, it does not shrink
+## A pool degrades; it sheds only what is gone
 
 A pool's own members are excluded from its failover candidates, so on `--devices all`
 "nothing healthier to move to" is the **normal** case.
 
-- **Demote, never shed.** A failing member keeps its worker, claim and slot and is reported as
-  `degraded` (disjoint from `quarantined`). Only a device whose worker actually **died** leaves.
+- **Demote a device that is present; shed one that is gone.** A failing member keeps its
+  worker, claim and slot and is reported as `degraded` (disjoint from `quarantined`) — unless
+  the verdict is `unreachable`, which says the device is not there at all. Degradation is a
+  sort key in `leaseFor`, so "dealt last" is still dealt every round once the healthy devices
+  are busy, and recovery-by-traffic can never fire for a phone that will never answer: a
+  detached device kept being leased indefinitely. It now leaves.
+- **Only where something sweeps.** Shedding is bounded to a `--devices` server, because only
+  that one reconciles. On a single-device server there is nothing to bring the device back, so
+  it keeps the device and its error.
 - **Leases are dealt healthy-first, then least-recently-used.** First-fit would hand a broken
   device out most often, because it fails fastest.
 - **Recovery is proven by traffic, not a clock.** Any exec that is not an environment failure,

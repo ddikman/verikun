@@ -90,7 +90,7 @@ import { takePlanLock, planLockWaitMs } from './agent/plan-lock';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
 import { InvalidPlanError, Plan } from './agent/ir';
 import { ResolvedTest, Segment, resolveIncludes, segmentLabel } from './agent/include';
-import { DeviceChange, ErrorDescriptor, ExecBackend, HealthResponse, describeError, rebuildError } from './rpc';
+import { DeviceChange, ErrorDescriptor, ExecBackend, HealthResponse, InstallSkip, describeError, rebuildError } from './rpc';
 import { DevicePoolSpec, csvList, parseDevicePool, poolSerials, resolvePoolPlatform } from './device/pool';
 import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
 import { cmdSuite, AiRunResult, Lane } from './suite';
@@ -2240,6 +2240,10 @@ interface ResolvedBackend {
    *  transport pushes as it goes — so a caller reads it AFTER the work, not before.
    *  Always empty for a local backend, which has one device by construction. */
   moves: DeviceChange[];
+  /** Devices a pooled server could not install this build onto, and which therefore left its
+   *  pool. Live, like `moves`, and for the same reason: the transport learns it mid-call.
+   *  Always empty for a local backend and for any command that does not install. */
+  skipped: InstallSkip[];
 }
 
 /** The `--server` URL, or VERIKUN_SERVER. One helper, so `resolveBackend` and
@@ -2442,11 +2446,13 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       // every recorded command, which beats a timer: it fires when work happens.
       grant: processClaimGrant(device, releaseOwnClaims),
       moves: [],
+      skipped: [],
     };
   }
 
   let runCtx: { platform: string; device?: string } = { platform, device };
   const moves: DeviceChange[] = [];
+  const skipped: InstallSkip[] = [];
   /** Set by the last move; the preflight below reads it to decide whether re-asking is
    *  warranted, then clears it. */
   let movedDuringCall: DeviceChange | undefined;
@@ -2458,6 +2464,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     // so archive-time / vk log scoping works without a local driver.
     onStep: (step, artifacts, logStart) =>
       Recorder.appendForeignStep(step, artifacts, { ...runCtx, logStart }),
+    onInstallSkipped: (s) => skipped.push(...s),
     onDeviceChange: (c) => {
       moves.push(c);
       movedDuringCall = c;
@@ -2540,6 +2547,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     grant: leaseGrant(remote, serial),
     remote: { url: server, version: health.version, reads },
     moves,
+    skipped,
   };
 }
 
@@ -2860,7 +2868,7 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
   const path = resolve(process.cwd(), appPath);
   if (!existsSync(path)) throw new CliError(`install: '${appPath}' does not exist`, 2);
   const platform = platformFromFlags(flags);
-  const { backend, remote, moves } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
+  const { backend, remote, moves, skipped } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
   err(`[verikun] installing ${appPath}${remote ? ` via ${remote.url}` : ''}…`);
   try {
     await backend.install(path);
@@ -2876,10 +2884,21 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
   // device than the one the run started against, and a caller acting on the old serial
   // (`adb -s … shell am start`) would be driving a phone without the build.
   const moved = moves.length ? moves[moves.length - 1] : undefined;
+  // A pooled server may have installed on some devices and dropped the rest. That is a
+  // SUCCESS — the ones that missed the build are no longer leasable, so no later lane can
+  // run the previous build and report green — but it is not a silent one: capacity changed.
   if (flagBool(flags, 'json')) {
-    json({ installed: appPath, ...(remote ? { server: remote.url } : {}), ...(moved ? { deviceChanged: moved } : {}) });
+    json({
+      installed: appPath,
+      ...(remote ? { server: remote.url } : {}),
+      ...(moved ? { deviceChanged: moved } : {}),
+      ...(skipped.length ? { skipped } : {}),
+    });
   } else {
     out(`installed ${appPath}${moved ? ` on ${moved.to}` : ''}`);
+    if (skipped.length) {
+      out(`skipped ${skipped.length} device(s), now out of the pool: ${skipped.map((s) => s.serial).join(', ')}`);
+    }
   }
   return 0;
 }

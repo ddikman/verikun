@@ -530,10 +530,12 @@ device that failed and is now on another one. What that means depends on the lin
   the failure was real on A, and B has none of the state your flow built up. Start the
   flow again from the top if you want it on B.
 
-The server rules the bad device out until it is power-cycled;
-`vk devices --server <url>` shows why in its `NOTE` column. On a pool the replacement
-joins the pool, so capacity holds — and the last device is never shed, so its own error
-keeps reaching you rather than a bare "no device attached".
+The server rules the bad device out; `vk devices --server <url>` shows why in its `NOTE`
+column, and a pooled server re-adopts a device that comes back within a minute. A device
+that is still attached keeps its place and is simply dealt last, so its own error keeps
+reaching you rather than a bare "no device attached". A device that is **gone** leaves the
+pool — so `capacity` can drop mid-job, and an install can come back `exit 0` having skipped
+it. That is a success: nothing can be dealt a device running the previous build.
 
 ## The device is missing or wedged
 
