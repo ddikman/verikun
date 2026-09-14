@@ -56,15 +56,35 @@ export interface RemoteOpts {
   onInstallSkipped?: (skipped: InstallSkip[]) => void;
 }
 
+/**
+ * The ceiling NONE of the per-call timeouts below can exceed, whatever they say.
+ *
+ * Node's global `fetch` is undici, whose `headersTimeout` and `bodyTimeout` both default to
+ * 300s, and there is no dependency-free way to raise them: a `dispatcher` needs `undici`
+ * itself, which is bundled but not importable. The `AbortController` below is therefore a
+ * FLOOR on how long a call may take, never a ceiling — `EXEC_TIMEOUT_MS` says 600s and gets
+ * 300s.
+ *
+ * MEASURED on Node v20.20.2 against a server that held its headers for 310s: the fetch
+ * rejected at 301s with `TypeError: fetch failed`, cause `HeadersTimeoutError`, code
+ * `UND_ERR_HEADERS_TIMEOUT`. The bare `fetch failed` is the whole problem — `describeStatus`
+ * never sees it, the suite reads the resulting exit 3 as the DEVICE being unreachable, and a
+ * healthy phone gets retired for a client-side clock. Named in `request` below so it says so.
+ */
+const FETCH_HEADERS_CEILING_MS = 300_000;
+
 // Per-call ceilings. exec is generous: a single leaf may legitimately block for its
-// whole auto-wait window or an explicit `wait --timeout`, plus device time.
+// whole auto-wait window or an explicit `wait --timeout`, plus device time. Anything here
+// above FETCH_HEADERS_CEILING_MS is aspirational — see that constant.
 const HEALTH_TIMEOUT_MS = 10_000;
 const ELEMENTS_TIMEOUT_MS = 60_000;
 const EXEC_TIMEOUT_MS = 10 * 60_000;
 const INSTALL_TIMEOUT_MS = 15 * 60_000;
 const DEVICE_LIST_TIMEOUT_MS = 30_000;
-// Above the server's own 4-minute boot ceiling, so the SERVER reports why a boot
-// timed out rather than the client aborting into a generic "timed out after 300s".
+// Meant to sit above the server's own 4-minute boot ceiling, so the SERVER reports why a
+// boot timed out rather than the client aborting first. It is exactly AT
+// FETCH_HEADERS_CEILING_MS, so a boot that runs the full four minutes and then some is a
+// photo finish — which is survivable only because `transportReason` now names the loser.
 const DEVICE_START_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_STOP_TIMEOUT_MS = 60_000;
 
@@ -106,6 +126,30 @@ export function describeStatus(status: number, body: RpcErrorBody | null, url: s
   return new CliError(`verikun server error ${status} at ${url}${detail}`, exitCode);
 }
 
+/**
+ * Why the transport failed, in words an operator can act on. PURE — exported for the tests.
+ *
+ * The undici arm is the one that earns its keep. `fetch` reports its own header/body
+ * timeouts as a bare `TypeError: fetch failed` with the real cause one level down, and that
+ * string is indistinguishable from a server that is genuinely unreachable — which is how a
+ * five-minute install came to look like a dead phone, and how a lane came to be retired for
+ * it. Say which clock ran out, and say whose it was.
+ */
+export function transportReason(e: unknown, timeoutMs: number): string {
+  const ex = e as { name?: string; message?: string; cause?: { code?: string } };
+  if (ex?.name === 'AbortError') return `timed out after ${Math.round(timeoutMs / 1000)}s`;
+  const code = ex?.cause?.code;
+  if (code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT') {
+    const what = code === 'UND_ERR_HEADERS_TIMEOUT' ? 'send a response' : 'finish its response';
+    return (
+      `the server did not ${what} within ${Math.round(FETCH_HEADERS_CEILING_MS / 1000)}s — ` +
+      "this is Node's own fetch ceiling on the CLIENT, not the device. " +
+      'The server may still be working; check its log before blaming the device'
+    );
+  }
+  return ex?.message ?? String(e);
+}
+
 async function readBody<T>(res: Response): Promise<T | null> {
   try {
     return (await res.json()) as T;
@@ -142,8 +186,7 @@ class RemoteTransport {
         signal: controller.signal,
       });
     } catch (e) {
-      const reason = (e as Error).name === 'AbortError' ? `timed out after ${Math.round(timeoutMs / 1000)}s` : (e as Error).message;
-      throw new CliError(`cannot reach verikun server at ${url} (${reason})`, 3);
+      throw new CliError(`cannot reach verikun server at ${url} (${transportReason(e, timeoutMs)})`, 3);
     } finally {
       clearTimeout(timer);
     }

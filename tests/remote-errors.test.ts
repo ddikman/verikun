@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { describeStatus } from '../src/agent/remote';
+import { describeStatus, transportReason } from '../src/agent/remote';
 import type { RpcErrorBody } from '../src/rpc';
 import { CliError, DumpKilledError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
 
@@ -76,4 +76,45 @@ test('describeStatus: an unknown kind from a newer server degrades, it does not 
   // plain error rather than crash the client parsing its own transport.
   const e = describeStatus(500, { error: 'from the future', exitCode: 3, errorKind: 'SomethingNew' as never }, URL);
   assert.equal(e.message, 'from the future');
+});
+
+// --- transportReason --------------------------------------------------------
+//
+// The OTHER half of the boundary: a request that never produced a status at all. Node's
+// global fetch reports its own header/body timeouts as a bare `TypeError: fetch failed`
+// with the cause one level down — indistinguishable, in the message, from a server that is
+// genuinely unreachable. That is how a five-minute install came to read as a dead phone.
+
+test('transportReason: the caller aborting names its own budget', () => {
+  const e = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+  assert.equal(transportReason(e, 90_000), 'timed out after 90s');
+});
+
+test("transportReason: undici's header timeout says whose clock ran out", () => {
+  // MEASURED on Node v20.20.2: a server holding its headers for 310s rejects the fetch at
+  // 301s with exactly this shape, whatever the caller's AbortController was set to.
+  const e = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('Headers Timeout Error'), { code: 'UND_ERR_HEADERS_TIMEOUT' }),
+  });
+  const reason = transportReason(e, 15 * 60_000);
+  assert.match(reason, /300s/, "the REAL ceiling, not the caller's 900s");
+  assert.match(reason, /CLIENT, not the device/, 'the whole point: do not blame the phone');
+  assert.doesNotMatch(reason, /^fetch failed$/);
+});
+
+test('transportReason: a body timeout is named separately from a header one', () => {
+  const e = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' }),
+  });
+  assert.match(transportReason(e, 60_000), /finish its response/);
+});
+
+test('transportReason: anything else is passed through untouched', () => {
+  // A genuinely unreachable server must keep reading as one — this may not become a
+  // catch-all that blames Node for every connection error.
+  const e = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4400'), { code: 'ECONNREFUSED' }),
+  });
+  assert.equal(transportReason(e, 10_000), 'fetch failed');
+  assert.equal(transportReason(new Error('socket hang up'), 10_000), 'socket hang up');
 });
