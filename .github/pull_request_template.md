@@ -48,9 +48,12 @@
 
 ### Docs & contracts
 
-<!-- Tick what applies; delete this block if the PR touches none of it. -->
+<!--
+  Tick what applies; delete this block if the PR touches none of it. An ordinary bug fix —
+  behaviour now matches what the docs already say — ticks nothing here and is changelog-only.
+-->
 
-- [ ] CLI behaviour changed (command / flag / selector / exit code) → updated `README.md` **and** `.claude/skills/verikun/SKILL.md`
+- [ ] A contract moved or arrived (command / flag / default / exit code / report format / `device set` key / platform capability), or a doc is now false → updated `README.md`, `.claude/skills/verikun/SKILL.md` **and** the owning `docs/` page
 - [ ] New command → added to `usageText()` (+ `RECORDABLE` in `run.ts` if it should record)
 - [ ] New pure core function → added a `tests/<module>.test.ts` case
 

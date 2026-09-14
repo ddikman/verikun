@@ -79,8 +79,9 @@ A false green is worse than a failure, because nobody investigates a green run. 
 ## Documentation is part of the change
 
 `SKILL.md` is the agent-facing contract and `src/agent/grammar.ts` its compact runtime copy;
-keep them in sync. Every behaviour change updates `SKILL.md`, `README.md` and this site in
-the same commit: [Contributing](/verikun/internals/contributing/#the-documentation-site).
+keep them in sync. A change that **moves a contract**, or leaves a sentence **false**, updates
+`SKILL.md`, `README.md` and this site in the same commit; an ordinary bug fix takes a changelog
+line and nothing else: [Contributing](/verikun/internals/contributing/#the-documentation-site).
 
 ## Versioning
 

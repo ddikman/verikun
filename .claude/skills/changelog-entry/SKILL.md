@@ -45,15 +45,16 @@ For calibration, median words per bullet in the changelogs this style is drawn f
 ## What belongs somewhere else
 
 This is the whole trick. Long entries happen because good engineering content has nowhere else to
-go — so give it a home rather than deleting it. In this repo every one of these homes is already
-required by `CLAUDE.md` in the *same commit*, which means a paragraph in the changelog is usually
-a third copy of something `docs/` now owns.
+go — so give it a home rather than deleting it. Where a change moved a contract, `CLAUDE.md` already
+required the owning `docs/` page in the *same commit*, so a paragraph here is a third copy of it.
+Where it did not — an ordinary bug fix, which `CLAUDE.md` makes changelog-only — the home is the PR
+body and the commit, never this file.
 
 | Content | Where it goes |
 |---|---|
 | Root cause; why the fix is shaped this way | commit body / PR description |
 | Benchmark tables, measurement runs, before/after timings | PR description (keep the single headline number in the entry) |
-| Design rationale, alternatives rejected, "the obvious approach doesn't work" | `CLAUDE.md` or `docs/internals/` |
+| Design rationale, alternatives rejected, "the obvious approach doesn't work" | `CLAUDE.md` (or `docs/internals/contracts.md`, compressed to the rule and what breaks) |
 | A gotcha a future maintainer must not undo | a code comment at the site |
 | How to use the new thing | the owning `docs/` page + `SKILL.md` |
 
