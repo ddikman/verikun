@@ -438,8 +438,8 @@ Failed to install '…apk': adb: device offline
 With [`--devices`](#serving-several-devices-from-one-address) the same machinery keeps the pool
 at **full capacity**: a healthy unclaimed device that is attached and not yet a member joins,
 the failed one leaves, and every other lease keeps serving. Usually there is no such spare,
-because `--devices all` already pooled everything attached. Then the failing device is
-**demoted, not dropped**:
+because `--devices all` already pooled everything attached. Then a device that is still
+attached is **demoted, not dropped**:
 
 - It keeps its worker, its claim and its place in the pool, and `/v1/health` lists it under
   `degraded` rather than `quarantined`.
@@ -450,7 +450,10 @@ because `--devices all` already pooled everything attached. Then the failing dev
 - **The lease follows the move.** The run whose device failed lands on the replacement
   without losing its place in the queue; the failing step is still not replayed — the client
   seals that run and opens a fresh one on the new device, so no report spans two.
-- **The last device is never shed.** A server down to its final device stays on it.
+- **A device that is GONE leaves the pool** — unplugged, offline, unauthorized. `/v1/health`
+  drops it from `capacity` and `devices` and lists it under `quarantined`, and the run holding
+  it is evicted. A `--devices` server sheds even its last device, down to `capacity: 0`, because
+  the sweep below brings it back; a plain `vk server` keeps its only device.
 
 ### A device that comes back rejoins by itself
 
@@ -473,11 +476,12 @@ Single-device servers do not sweep.
 
 ### What was ruled out, and how to clear it
 
-A quarantine says "never move *onto* this device". It lasts as long as the server process and
-has no timer — a device that ran out of disk ten minutes ago is still out of disk. A
-successful `vk devices restart|start|stop` for that device clears it, and so does rejoining
-the pool. An install that fails on *every* device is read as a bad build, not a bad pool, so
-the quarantines that attempt set are rolled back.
+A quarantine says "never move *onto* this device", and is also where a device that has **left**
+the pool is listed. It lasts as long as the server process and has no timer — a device that ran
+out of disk ten minutes ago is still out of disk. A successful `vk devices restart|start|stop`
+for that device clears it, and so does rejoining the pool. An install that fails on *every*
+device is read as a bad build, not a bad pool, so the quarantines that attempt set are rolled
+back.
 
 ```sh
 curl -s "$VERIKUN_SERVER/v1/health" | jq '{capacity, devices, degraded, quarantined}'

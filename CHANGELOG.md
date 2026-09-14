@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **`vk server --devices`** drops a device that is gone from the pool instead of dealing it
+  forever; the sweep readmits it when it returns. ([#139])
+- **`vk install --server`** exits `0` when some pooled devices take the build, naming the rest
+  as `skipped`; only a build that fails everywhere is an error. ([#139])
+
+### Changed
+- **`/v1/health` `capacity` can now drop mid-job** on a pooled server, to `0`. A plain
+  `vk server` still keeps its only device and answers with that device's own error. ([#139])
+- **`POST /v1/install`** answers `200 {devices, skipped}` where it used to answer `500` on a
+  partial failure. Older clients see a success with an unknown field. ([#139])
+
+[#139]: https://github.com/ddikman/verikun/issues/139
+
 ## [0.27.1] - 2026-09-14
 
 A hierarchy read the device killed is now waited out instead of ending the test.

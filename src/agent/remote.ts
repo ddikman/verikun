@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { CliError } from '../errors';
+import { err } from '../output';
 import type { Element } from '../types';
 import type { RunStep } from '../run';
 import {
@@ -25,6 +26,7 @@ import {
   DeviceOpResponse,
   HealthResponse,
   InstallResponse,
+  InstallSkip,
   LeaseResponse,
   LogsResponse,
   RpcErrorBody,
@@ -48,6 +50,10 @@ export interface RemoteOpts {
    * client still needs to know the ground shifted.
    */
   onDeviceChange?: (change: DeviceChange) => void;
+  /** Devices a pooled server could not install this build onto, and which therefore left
+   *  its pool. Same shape of side-channel as `onDeviceChange`: the caller keeps the list,
+   *  because `Driver.install` returns void and this is remote-only by nature. */
+  onInstallSkipped?: (skipped: InstallSkip[]) => void;
 }
 
 // Per-call ceilings. exec is generous: a single leaf may legitimately block for its
@@ -281,6 +287,16 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
       // Install is the one operation the server replays elsewhere, so a move here means
       // the build DID land — on a different device than the one we started with.
       if (res.deviceChanged) opts.onDeviceChange?.(res.deviceChanged);
+      // A PARTIAL install is a success, and it must not be a silent one: capacity just
+      // dropped, and the operator's next question is which phone to go and look at.
+      if (res.skipped?.length) {
+        err(
+          `[verikun] server installed on ${(res.devices ?? []).join(', ') || '(none)'}; ` +
+            `${res.skipped.length} device(s) could not take this build and left the pool — ` +
+            res.skipped.map((s) => `${s.serial} (${s.reason})`).join('; '),
+        );
+        opts.onInstallSkipped?.(res.skipped);
+      }
     },
 
     async reset(appId: string): Promise<void> {

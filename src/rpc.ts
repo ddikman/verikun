@@ -76,6 +76,12 @@ export interface ElementsResponse {
   elements: Element[];
 }
 
+/** One device a build could not be installed on, and the reason it could not. */
+export interface InstallSkip {
+  serial: string;
+  reason: string;
+}
+
 /** Body of a successful POST /v1/install. */
 export interface InstallResponse {
   ok: true;
@@ -84,6 +90,12 @@ export interface InstallResponse {
   /** Every device the build landed on. A pooled server installs on ALL of them, or the
    *  later lanes of a parallel suite would run the previous build. Absent on older servers. */
   devices?: string[];
+  /** Devices that could NOT take this build, and why. They have left the pool — that is what
+   *  makes a partial install a success rather than a 500: no lease can reach a device that
+   *  missed the build, so no lane can run the previous one and report green. The sweep
+   *  readmits each one and installs this build before dealing it work. Absent when empty,
+   *  and on older servers, which answered 500 instead. */
+  skipped?: InstallSkip[];
   /** Set when a device failed and the build went on to another. `retried: true`. On a pool
    *  that moved more than one device this is the first move; the server logs the rest. */
   deviceChanged?: DeviceChange;
