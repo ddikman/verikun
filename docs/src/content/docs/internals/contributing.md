@@ -136,8 +136,15 @@ shell's Node is probably too old — `nvm use 22` first, or the build dies with
 It deploys to GitHub Pages from `.github/workflows/pages.yml` on every push to `main` that
 touches `docs/`. Pull requests build the site as a check without deploying.
 
-**If you change CLI behaviour, update `SKILL.md`, `README.md` and this site in the same
-change.**
+**Two changes oblige a docs edit in the same change**, and only two: one that **moves or adds a
+contract** — a command, flag, default, exit code, report format, `device set` key or platform
+capability someone could have scripted against — and one that leaves a sentence here **false**.
+Update `SKILL.md`, `README.md` and the owning page; for a false sentence, delete the stale clause
+rather than restate it. An ordinary bug fix, where behaviour now matches what these pages already
+say, takes a `CHANGELOG.md` line and nothing else.
+
+These pages state the rule. The reasoning behind it lives in `CLAUDE.md` and in code comments, so a
+page gains prose only when a reader must act on it.
 
 ## Versioning and changelog
 

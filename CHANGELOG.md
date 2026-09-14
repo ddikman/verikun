@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Docs rule**: a bug fix is changelog-only; `docs/` changes only when a contract moves or a page
+  went false. ([#140])
+
+[#140]: https://github.com/ddikman/verikun/issues/140
+
 ## [0.28.0] - 2026-09-14
 
 A device that has gone now leaves a pooled `vk server` instead of being dealt out until
@@ -26,7 +32,6 @@ somebody notices.
   partial failure. Older clients see a success with an unknown field. ([#139])
 
 [#139]: https://github.com/ddikman/verikun/issues/139
-
 ## [0.27.1] - 2026-09-14
 
 A hierarchy read the device killed is now waited out instead of ending the test.
