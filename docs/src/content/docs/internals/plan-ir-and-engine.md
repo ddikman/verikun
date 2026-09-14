@@ -58,9 +58,10 @@ otherwise pay the window `cap` times. Any non-zero window buys at least **two** 
 regardless of the clock, because one hierarchy read can cost more than the whole window on a
 slow device.
 
-**Is there a screen to ask at all?** That is `NoWindowError` — the app force-stopped,
-mid-launch, or busy mid-transition — and it gets its own **10s** grace instead, because it is
-not a fact about the selector. The grace applies only while *no* read has succeeded, so it
+**Is there a screen to ask at all?** That is a `TransientReadError` — `NoWindowError` (the app
+force-stopped, mid-launch, or busy mid-transition) or `DumpKilledError` (the dump killed under
+memory pressure) — and it gets its own **10s** grace instead, because it is not a fact about
+the selector. The grace applies only while *no* read has succeeded, so it
 can never make a merely absent selector more patient. Both are bounded by the run deadline,
 so no guard can overrun `--timeout`.
 

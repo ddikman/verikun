@@ -20,11 +20,17 @@ violated.
 | Budget / timeout abort | **Terminal** — a bound that heals is not a bound |
 | Environment error, exit `3` | **Aborts**, not recorded as a regression |
 | **`NoWindowError`, exit `3`** | **Ridden out** for 10s, then aborts — the app has not drawn yet, which is not a broken box |
+| **`DumpKilledError`, exit `3`** | **Ridden out** for 10s, then aborts — the dump was killed under memory pressure, which is not a broken box either |
 
-`NoWindowError` is told apart from other exit-3 errors **by class, never by exit code**, so
-its class must survive every boundary it crosses: worker → main thread, child process →
-parent (`errorKind` in `--json`), and server → client (`errorKind` on the error body). Any
-new boundary owes the same field.
+Both are `TransientReadError`s, and they are told apart from other exit-3 errors **by class,
+never by exit code**, so the class must survive every boundary it crosses: worker → main
+thread, child process → parent (`errorKind` in `--json`), and server → client (`errorKind` on
+the error body). Any new boundary owes the same field.
+
+Absorbed is not believed: a read that did not happen may not **satisfy** a predicate, because
+`--gone` passes on an empty tree and that is exactly what an absorbed read returns. A window
+that never once read the screen re-throws a kill rather than claim an absence nobody observed;
+a null root is the device *answering*, so a window ending in one reports its ordinary miss.
 
 `assert` is unhealable because it **returns** exit `1` rather than throwing; the engine heals
 only on a *thrown* selector error. If you ever make `assert` throw, you silently make

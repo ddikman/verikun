@@ -340,8 +340,8 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
 
     test('an animating spinner does not prevent a hierarchy dump', () => {
       // uiautomator needs the window to reach idle, and AdbDriver.dumpXml retries
-      // three times before giving up. A CircularProgressIndicator animates
-      // continuously, so this is the check that it does not wedge the dump.
+      // before giving up. A CircularProgressIndicator animates continuously, so
+      // this is the check that it does not wedge the dump.
       assert.equal(vk(['tap', '@vk_delay_8']).code, 0);
       assert.equal(vk(['tap', '@vk_load']).code, 0);
 

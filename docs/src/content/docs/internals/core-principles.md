@@ -25,8 +25,9 @@ warnings all go to **stderr**, so a caller parsing stdout never has to strip one
 
 With `--json`, the catch in `run()` emits `{error, exitCode, errorKind}`. `errorKind` is the
 error's **class** — `SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`,
-`CliError`, `Error` — so a caller can tell "the app has not drawn yet" from "the device is
-gone" without matching on message text. New commands honour `--json` for success output too.
+`DumpKilledError`, `CliError`, `Error` — so a caller can tell "the app has not drawn yet" or
+"the dump was killed" from "the device is gone" without matching on message text. New commands
+honour `--json` for success output too.
 The same field rides `vk server`'s error bodies, so the class survives the wire.
 
 ## No host shell, ever

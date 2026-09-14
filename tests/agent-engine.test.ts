@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { runPlan, EngineDeps, ExecFn, ExecOutcome } from '../src/agent/engine';
 import { Plan, PlanNode, LeafStep, IfPresentNode, RepeatNode } from '../src/agent/ir';
-import { SelectorNotFoundError, AmbiguousSelectorError, NoWindowError, envError } from '../src/errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, DumpKilledError, NoWindowError, envError } from '../src/errors';
 import { CostTracker } from '../src/agent/cost';
 import { AgentProvider } from '../src/agent/provider';
 import { makeEl, asLeaf } from './helpers';
@@ -824,7 +824,7 @@ test('runPlan: a repeat guard rides out a transient "no window" instead of abort
   assert.equal(calls.length, 0, 'the loop exited on its target, without running the body');
 });
 
-test('runPlan: only NoWindowError buys the grace — another env error still blinds at once', async () => {
+test('runPlan: only a TRANSIENT read buys the grace — another env error still blinds at once', async () => {
   // The narrowness IS the feature. A missing adb or a wedged dumper is a machine to fix, and
   // polling it is spending someone\'s budget to learn nothing. If this ever starts passing
   // because the grace widened, a broken toolchain costs every guard 10s before saying so.
@@ -845,6 +845,45 @@ test('runPlan: only NoWindowError buys the grace — another env error still bli
   assert.equal(r.abortedForEnv, true);
   assert.equal(reads, 2, 'exactly one present() pass: two attempts, then give up');
   assert.ok(Date.now() - started < 1000, 'and no waiting at all');
+});
+
+test('runPlan: a guard rides out a KILLED dump on the same clock (issue #137)', async () => {
+  // The grace is gated on the class, and both transient reads now share a base. A phone under
+  // memory pressure reaps the dumper while the app cold-starts; that clears, and a guard that
+  // aborted for it would kill a run over a busy device.
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  let n = 0;
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:End', cap: 5, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      getElements: () => {
+        if (++n <= 6) throw new DumpKilledError();
+        return [makeEl({ text: 'End' })];
+      },
+    }),
+  );
+  assert.equal(r.ok, true, 'the device was busy, not broken');
+  assert.equal(r.abortedForEnv, undefined);
+  assert.equal(calls.length, 0, 'the loop exited on its target, without running the body');
+});
+
+test('runPlan: a kill that never clears still aborts rather than answering "absent"', async () => {
+  // Same half as the no-window case: answering "absent" would skip the guarded body and let a
+  // guard-heavy plan finish GREEN having executed nothing.
+  const { fn } = execFrom([{ code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'repeat', selector: 'text:End', cap: 5, body: [leaf('swipe', ['up'])] }),
+    deps({
+      exec: fn,
+      deadline: Date.now() + 300, // the run deadline clamps the grace, so this stays fast
+      getElements: () => {
+        throw new DumpKilledError();
+      },
+    }),
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.abortedForEnv, true);
 });
 
 test('runPlan: a "no window" that never clears still aborts once its grace runs out', async () => {

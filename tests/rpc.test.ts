@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { describeError, rebuildError } from '../src/rpc';
 import type { ExecResponse, RpcErrorBody } from '../src/rpc';
-import { CliError, SelectorNotFoundError, AmbiguousSelectorError, NoWindowError, isEnvError, envError } from '../src/errors';
+import { CliError, SelectorNotFoundError, AmbiguousSelectorError, DumpKilledError, NoWindowError, dumpKilledMessage, isEnvError, envError } from '../src/errors';
 import { makeEl } from './helpers';
 
 // The error codec is what lets the `vk ai` engine keep its heal-vs-terminal
@@ -91,6 +91,17 @@ test('rpc codec: NoWindowError survives — it must not flatten into a bare CliE
   assert.ok(rebuilt instanceof CliError, 'still a CliError');
   assert.equal((rebuilt as CliError).exitCode, 3, 'a caller with no budget still exits 3');
   assert.equal(isEnvError(rebuilt), true);
+});
+
+test('rpc codec: DumpKilledError survives, and does not flatten into NoWindowError', () => {
+  // Issue #137 was reported through a POOLED vk server, so the whole fix crosses this wire.
+  // Both arms sit before the CliError one; collapsing them would cost the killed dump its
+  // ride-out on exactly the setup it was reported from.
+  const rebuilt = rebuildError(wire(describeError(new DumpKilledError(dumpKilledMessage('Killed')))));
+  assert.ok(rebuilt instanceof DumpKilledError, 'instanceof DumpKilledError');
+  assert.equal(rebuilt instanceof NoWindowError, false, 'a sibling, not the same signal');
+  assert.equal((rebuilt as CliError).exitCode, 3);
+  assert.match(rebuilt.message, /\(Killed\)$/, 'the device evidence rides along, unwrapped');
 });
 
 test('rpc wire: errorKind is optional on an error body — old servers simply omit it', () => {

@@ -4,7 +4,7 @@
 // DESIGN: an install failure moves unless it names the FILE (the enumerable side), while
 // `exec`/`elements` keep the opposite default. Why: CLAUDE.md, "Server device failover".
 
-import { CliError, NoWindowError } from '../errors';
+import { CliError, DumpKilledError, TransientReadError } from '../errors';
 import type { DeviceInfo } from '../types';
 
 export type FailoverKind =
@@ -131,16 +131,24 @@ function exitCodeOf(e: unknown): number {
 
 const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e ?? ''));
 
+/** Why this device stays. Named per class so the operator reads the actual cause, not
+ *  "transient" — the two want different responses (wait vs free some memory). */
+const transientReason = (e: TransientReadError): string =>
+  e instanceof DumpKilledError
+    ? 'the hierarchy dump was killed — the device is under memory pressure, not broken'
+    : 'the app has not drawn yet — this clears on its own';
+
 /**
  * The arms share everything except what an unrecognised exit-3 means, so they share
  * this and differ only in `fallback`.
  */
 function classify(e: unknown, fallback: FailoverVerdict): FailoverVerdict {
-  // Identity first, never message text: NoWindowError is exit 3 and its wording could
-  // plausibly be matched by another rule, and getting this one wrong means rotating the
-  // pool every time an app is mid-launch.
-  if (e instanceof NoWindowError) {
-    return { move: false, kind: 'transient', reason: 'the app has not drawn yet — this clears on its own' };
+  // Identity first, never message text: both transient reads are exit 3 and their wording could
+  // plausibly be matched by another rule, and getting this one wrong means rotating the pool
+  // every time an app is mid-launch — or, for a killed dump, retiring a phone for being busy
+  // (issue #137).
+  if (e instanceof TransientReadError) {
+    return { move: false, kind: 'transient', reason: transientReason(e) };
   }
   const code = exitCodeOf(e);
   if (code === 0 || code === 1) return { move: false, kind: 'app', reason: 'the app failed, not the device' };
@@ -189,7 +197,7 @@ export function classifyInstallFailure(e: unknown): FailoverVerdict {
   const code = exitCodeOf(e);
   // Only an environment failure is ever the device's fault; a usage error (a rejected
   // extension, an unreadable path) is the caller's and no device fixes it.
-  if (code === 3 && !(e instanceof NoWindowError)) {
+  if (code === 3 && !(e instanceof TransientReadError)) {
     const message = messageOf(e);
     // Same order as `classify` below, so the two arms can only ever differ in their
     // DEFAULT — which is the one difference between them that is meant to exist.

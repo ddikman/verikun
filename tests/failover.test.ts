@@ -12,7 +12,7 @@ import {
   failoverCandidates,
   isUsableState,
 } from '../src/device/failover';
-import { CliError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError, probeFailure } from '../src/errors';
+import { CliError, DumpKilledError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError, probeFailure } from '../src/errors';
 import type { DeviceInfo } from '../src/types';
 
 /** The shape AdbDriver.install actually throws: a prefix, then adb's collapsed output. */
@@ -137,6 +137,24 @@ test('both arms: NoWindowError never moves and never probes', () => {
     assert.equal(v.kind, 'transient');
     assert.ok(!v.probe, 'probing a mid-launch device would upgrade a blip into a move');
   }
+});
+
+test('both arms: a killed dump never moves and never probes either (issue #137)', () => {
+  // A phone under memory pressure is BUSY, not broken. Moving off it costs the pool a healthy
+  // device, and `lanePreflight` reads the same verdict to decide whether to retire a lane.
+  const e = new DumpKilledError();
+  for (const v of [classifyFailure(e), classifyInstallFailure(e)]) {
+    assert.equal(v.move, false);
+    assert.equal(v.kind, 'transient');
+    assert.ok(!v.probe, 'a probe under memory pressure can fail for the same reason');
+  }
+});
+
+test('the two transient reads give the operator DIFFERENT reasons', () => {
+  // "transient" is a verdict, not a diagnosis — and waiting for a redraw and freeing memory
+  // are different responses.
+  assert.match(classifyFailure(new NoWindowError('x')).reason, /has not drawn yet/);
+  assert.match(classifyFailure(new DumpKilledError()).reason, /memory pressure/);
 });
 
 test('both arms: a missing toolchain never moves and never probes', () => {

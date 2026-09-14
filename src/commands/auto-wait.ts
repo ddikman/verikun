@@ -10,7 +10,7 @@
 // CLAUDE.md, "Selector auto-wait".
 
 import { Flags, flagBool, flagNum } from '../args';
-import { CliError, NoWindowError, SelectorNotFoundError } from '../errors';
+import { CliError, DumpKilledError, SelectorNotFoundError, TransientReadError } from '../errors';
 import type { Element } from '../types';
 import { barrierClause, modalBarrierOnly } from '../ui/barrier';
 import { MatchResult, MatchTier, Selector, matchElements, resolveOne } from '../ui/selector';
@@ -49,46 +49,62 @@ export function pollStep(flags: Flags, deadline: number): number {
 }
 
 /**
- * Read the hierarchy for a caller that is polling, treating "no window yet" as "nothing on
- * screen yet" rather than a fatal environment error.
+ * Read the hierarchy for a caller that is polling, treating a read that will clear on its own
+ * as "nothing on screen yet" rather than as a fatal environment error.
  *
- * A `NoWindowError` means the device genuinely had nothing to show — `launch --clear` and
- * `launch` both leave a gap where the app has been stopped and has not drawn. That clears in
- * a second or two, so a caller that has a wait budget should keep polling; escalating to
+ * A `TransientReadError` means the device could not answer *right now* — `launch --clear` and
+ * `launch` both leave a gap where the app has been stopped and has not drawn (`NoWindowError`),
+ * and a memory-pressured phone SIGKILLs the dumper outright (`DumpKilledError`, issue #137).
+ * Both clear in seconds, so a caller that has a wait budget should keep polling; escalating to
  * exit 3 throws away the budget it was explicitly given. MEASURED: a `wait --timeout 120000`
- * used to abort at ~20s with 100 seconds unspent.
+ * used to abort at ~20s with 100 seconds unspent, and a `wait --timeout 30000` at 2.5s.
  *
  * Every OTHER capture failure still propagates untouched — a missing adb, an unauthorised
  * device or a wedged dumper is a machine to fix, and polling it for two minutes helps nobody.
+ *
+ * Pass the tally so the window can tell "the screen said nothing was there" from "nobody ever
+ * read the screen"; see `ReadTally.rethrowIfBlind`.
  */
-export function readForPoll(ctx: Ctx, opts: { all?: boolean } = {}): Element[] {
+export function readForPoll(ctx: Ctx, tally?: ReadTally, opts: { all?: boolean } = {}): Element[] {
   try {
-    return ctx.driver.getElements(opts);
+    const els = ctx.driver.getElements(opts);
+    return tally ? tally.note(els) : els;
   } catch (e) {
-    if (e instanceof NoWindowError) return [];
+    if (e instanceof TransientReadError) {
+      tally?.noteBlind(e);
+      return [];
+    }
     throw e;
   }
 }
 
 /**
- * Keeps track of whether the snapshots a poll loop read were barrier-only trees (see
- * ui/barrier.ts), so the failure at the end can say so instead of "never appeared".
+ * What every read in ONE poll window saw. This is the only layer that sees all of them, so
+ * both of the things a miss message needs to be honest about live here.
  *
- * A sheet's barrier that outlives the whole wait is the report behind issue #131: the
- * step waited 30s on a painted sheet and the message sent the reader looking for a missing
- * identifier in app code. Naming the barrier is the cheap half of that fix, and it belongs
- * to whoever owns the wait — this is the only layer that saw every read.
+ * **Was the tree barrier-only?** (issue #131) A sheet's barrier that outlives the whole wait
+ * made the step report "never appeared", sending the reader looking for a missing identifier
+ * in app code. Naming the barrier is the cheap half of that fix.
+ *
+ * **Did anyone ever read the screen at all?** (issue #137) An absorbed `DumpKilledError` costs
+ * a read and yields no elements, and a window made entirely of those has no grounds to call
+ * anything absent — see `rethrowIfBlind`.
  */
-export class BarrierTally {
+export class ReadTally {
   private reads = 0;
+  private okReads = 0;
   private barrierReads = 0;
   private last: Element | null = null;
+  private blind: TransientReadError | undefined;
+  private lastBlind = false;
 
   constructor(private readonly ctx: Ctx) {}
 
   /** Record one snapshot. Returns it, so it can wrap a read in place. */
   note(els: Element[]): Element[] {
     this.reads++;
+    this.okReads++;
+    this.lastBlind = false;
     this.last = modalBarrierOnly(els, this.ctx.driver.viewport());
     if (this.last) this.barrierReads++;
     return els;
@@ -98,6 +114,47 @@ export class BarrierTally {
   clause(): string {
     if (!this.last) return '';
     return barrierClause(this.last, this.barrierReads === this.reads);
+  }
+
+  /** Record a read that never happened — a transient failure `readForPoll` absorbed as `[]`. */
+  noteBlind(e: TransientReadError): void {
+    this.reads++;
+    this.blind = e;
+    this.lastBlind = true;
+    this.last = null; // a read that did not happen is not a barrier, and must not read as one
+  }
+
+  /**
+   * Did the most recent read fail to happen? Then it proves NOTHING, and least of all an
+   * absence — which `--gone` counts as a pass.
+   *
+   * Separate from `rethrowIfBlind`, and it has to be: that one asks about the whole window and
+   * fires at the deadline, but a `--gone` predicate is satisfied by the FIRST empty read and
+   * returns from inside the poll loop, so a window-level check never runs. MEASURED on a
+   * Pixel 3a while fixing #137: `wait --gone` under a kill storm exited 0 reporting "gone".
+   *
+   * Both `NoWindowError` and `DumpKilledError` count here. Unlike the deadline rule, the two
+   * need no asymmetry: an absorbed read yielded no elements to judge either way, so polling
+   * once more is right for both and costs a merely-absent selector nothing.
+   */
+  lastWasBlind(): boolean {
+    return this.lastBlind;
+  }
+
+  /**
+   * Refuse to report an absence this window never actually observed (issue #137).
+   *
+   * ONLY for a killed dump. The asymmetry is the point: a null root is the device ANSWERING
+   * "nothing is drawn", so "the selector is absent" is a true reading of it and
+   * `NoWindowError` keeps its existing behaviour exactly. A kill is no answer at all — and
+   * `assert --gone` turns "absent" into a PASS, so absorbing it silently would manufacture a
+   * green from a screen nobody could read.
+   *
+   * Gated on `okReads === 0`, the same `everRead` rule the engine's guard grace uses: one good
+   * read anywhere in the window means the screen was legible and an ordinary miss is honest.
+   */
+  rethrowIfBlind(): void {
+    if (this.okReads === 0 && this.blind instanceof DumpKilledError) throw this.blind;
   }
 }
 
@@ -110,12 +167,17 @@ export async function matchWaiting(
   ctx: Ctx,
   sel: Selector,
   opts: { all?: boolean } = {},
-): Promise<MatchResult & { barrier: BarrierTally }> {
+): Promise<MatchResult & { barrier: ReadTally }> {
   const deadline = Date.now() + waitWindowMs(ctx.flags);
-  const barrier = new BarrierTally(ctx);
+  const barrier = new ReadTally(ctx);
   for (;;) {
-    const res = matchElements(barrier.note(readForPoll(ctx, opts)), sel);
-    if (res.matches.length > 0 || Date.now() >= deadline) return { ...res, barrier };
+    const res = matchElements(readForPoll(ctx, barrier, opts), sel);
+    if (res.matches.length > 0) return { ...res, barrier };
+    if (Date.now() >= deadline) {
+      // Before ANY caller can read this as an absence — `assert --gone` calls it a pass.
+      barrier.rethrowIfBlind();
+      return { ...res, barrier };
+    }
     await sleep(pollStep(ctx.flags, deadline));
   }
 }
@@ -133,9 +195,9 @@ export async function resolveOneWaiting(
   const windowMs = waitWindowMs(ctx.flags);
   const start = Date.now();
   const deadline = start + windowMs;
-  const barrier = new BarrierTally(ctx);
+  const barrier = new ReadTally(ctx);
   for (;;) {
-    const els = barrier.note(readForPoll(ctx, opts));
+    const els = readForPoll(ctx, barrier, opts);
     if (matchElements(els, sel).matches.length >= 1) {
       const { element, tier } = resolveOne(els, sel); // 1 → resolved; >1 → throws ambiguity
       // The snapshot rides along: scroll-into-view needs the scrollable containers
@@ -144,6 +206,7 @@ export async function resolveOneWaiting(
       return { element, tier, waitedMs: Date.now() - start, elements: els };
     }
     if (Date.now() >= deadline) {
+      barrier.rethrowIfBlind();
       const waited = windowMs > 0 ? ` after ${(windowMs / 1000).toFixed(1)}s` : '';
       throw new SelectorNotFoundError(
         `No element matched selector '${sel.raw}'${waited}.${barrier.clause()} Run \`verikun ui\` to inspect the current screen.`,
