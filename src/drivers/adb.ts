@@ -6,7 +6,7 @@ import {
 } from '../types';
 import type { RawImage } from '../image';
 import { Companion, barrierRecycleDue, companionEnabled, releaseCompanionOn } from '../companion/manager';
-import { CliError, NoWindowError, probeFailure } from '../errors';
+import { CliError, DumpKilledError, NoWindowError, dumpKilledMessage, probeFailure } from '../errors';
 import { runText, runBinary, sleepSync, commandExists, spawnDetached, TextResult } from '../exec';
 import { isInteresting, parseHierarchy, parseRotation } from '../ui/android-parse';
 import { describeBarrier, modalBarrierOnly } from '../ui/barrier';
@@ -200,6 +200,29 @@ const BARRIER_SETTLE_MS = 300;
  *  companion reports the same condition from getRootInActiveWindow(). Transient — see
  *  NoWindowError. */
 const NULL_ROOT = /null root node/i;
+
+/** 128 + SIGKILL — what a shell reports for a command the kernel killed outright. */
+const EXIT_SIGKILL = 137;
+
+/** The device shell's word for it, when the shell itself survived to say so. */
+const KILLED_TEXT = /\bKilled\b/;
+
+/**
+ * Was this read SIGKILLed rather than merely unsuccessful? (issue #137)
+ *
+ * THE EXIT CODE IS THE PRIMARY SIGNAL, not the text. MEASURED on a Pixel 3a: in the
+ * `adb shell '<cmd>'` form the device shell prints NOTHING when it is killed — both streams
+ * come back empty and only the status says 137. That is why the old message read
+ * "Failed to capture UI hierarchy after 3 attempts." with nothing after it. The word "Killed"
+ * does appear on some shells (issue #137 was reported with it), so it is kept as a second
+ * signal for an adb too old to propagate the remote status — but a matcher built on the text
+ * alone would have missed the very device this was reported from.
+ *
+ * Pure and exported for the unit suite only; nothing else imports it.
+ */
+export function dumpWasKilled(code: number, text: string): boolean {
+  return code === EXIT_SIGKILL || KILLED_TEXT.test(text);
+}
 
 /** Header sizes `screencap` writes before the pixels: width/height/format, plus a
  *  colorspace word since Android 9. Newest first — see `screenshotRaw`. */
@@ -959,6 +982,16 @@ export class AdbDriver implements Driver {
       // times as fast; hand it up to whoever knows how long they are willing to wait.
       if (NULL_ROOT.test(lastErr)) {
         throw new NoWindowError();
+      }
+      // A KILLED dump is the same deal, with one difference: attempt 0 has a real cure for
+      // one of its two causes (a companion holding the UiAutomation connection SIGKILLs a
+      // competing dump), so it still gets the remedy below and one more try. Once THAT is
+      // killed too, stop — a third back-to-back attempt is a third sample of the same instant
+      // (#137 measured all three losing), and the caller's poll interval is the spacing that
+      // actually helps. Judged on the DUMP's own result, never the combined text: a `cat` that
+      // reports a missing file is the kill's consequence, not evidence of one.
+      if (attempt > 0 && dumpWasKilled(dump.code, `${dump.stdout} ${dump.stderr}`)) {
+        throw new DumpKilledError(dumpKilledMessage(lastErr));
       }
       if (attempt === 0) {
         // A sleeping display is the other documented cause of a failed read. `ensureAwake` ran

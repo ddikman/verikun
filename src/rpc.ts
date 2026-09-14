@@ -8,7 +8,7 @@
 // Pure types + pure functions only: no http, no fetch, no fs — so both sides (and the
 // unit tests) can import it without dragging in transport code.
 
-import { CliError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from './errors';
+import { CliError, DumpKilledError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from './errors';
 import type { DeviceInfo, Element, HierarchySource, Platform } from './types';
 import type { RunStep } from './run';
 
@@ -22,7 +22,7 @@ export interface ExecRequest {
 
 export interface ErrorDescriptor {
   /** Which class to rebuild. 'Error' covers a non-CliError throw (exit 3 semantics). */
-  kind: 'CliError' | 'SelectorNotFoundError' | 'AmbiguousSelectorError' | 'NoWindowError' | 'Error';
+  kind: 'CliError' | 'SelectorNotFoundError' | 'AmbiguousSelectorError' | 'NoWindowError' | 'DumpKilledError' | 'Error';
   name: string;
   message: string;
   exitCode: number;
@@ -239,11 +239,15 @@ export function describeError(e: Error): ErrorDescriptor {
   if (e instanceof SelectorNotFoundError) {
     return { kind: 'SelectorNotFoundError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
-  // BEFORE the CliError arm — NoWindowError extends it, so a subclass check must come
-  // first or the identity is flattened away. device/failover.ts classifies on
-  // `instanceof NoWindowError` deliberately ("identity first, never message text"), and
-  // losing it turns every mid-launch gap into an unknown that costs two device probes and
-  // can quarantine a perfectly healthy phone.
+  // BEFORE the CliError arm — both transient reads extend it, so a subclass check must come
+  // first or the identity is flattened away. device/failover.ts classifies on the CLASS
+  // deliberately ("identity first, never message text"), and losing it turns every mid-launch
+  // gap into an unknown that costs two device probes and can quarantine a perfectly healthy
+  // phone. Flattening DumpKilledError also costs a poller its ride-out, which is the whole of
+  // issue #137 — and #137 was reported through a pooled `vk server`, i.e. across this wire.
+  if (e instanceof DumpKilledError) {
+    return { kind: 'DumpKilledError', name: e.name, message: e.message, exitCode: e.exitCode };
+  }
   if (e instanceof NoWindowError) {
     return { kind: 'NoWindowError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
@@ -263,6 +267,8 @@ export function rebuildError(d: ErrorDescriptor): Error {
       return new SelectorNotFoundError(d.message);
     case 'NoWindowError':
       return new NoWindowError(d.message);
+    case 'DumpKilledError':
+      return new DumpKilledError(d.message);
     case 'CliError':
       return new CliError(d.message, d.exitCode);
     default: {

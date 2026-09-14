@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { describeStatus } from '../src/agent/remote';
 import type { RpcErrorBody } from '../src/rpc';
-import { CliError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
+import { CliError, DumpKilledError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
 
 // How a `--server` client turns a non-2xx into an error. This is the boundary that used to
 // destroy the thrown error's class: `/v1/exec` answers a failed step with a 200 carrying a
@@ -21,6 +21,15 @@ test('describeStatus: a 500 carrying errorKind rebuilds the original class', () 
   assert.ok(e instanceof NoWindowError, 'the engine decides on this instanceof');
   assert.equal((e as CliError).exitCode, 3);
   assert.equal(e.message, 'No window to read: …', 'the server’s own message, unwrapped');
+});
+
+test('describeStatus: a killed dump rebuilds as its own class, not a bare CliError', () => {
+  // The half of #80 that #137 inherits: without this the pooled-server runs where #137 was
+  // measured would see an anonymous exit-3 and abort instead of polling through.
+  const body: RpcErrorBody = { error: 'The UI hierarchy dump was killed …', exitCode: 3, errorKind: 'DumpKilledError' };
+  const e = describeStatus(500, body, URL);
+  assert.ok(e instanceof DumpKilledError, 'readForPoll and the guard grace both decide on this');
+  assert.equal((e as CliError).exitCode, 3);
 });
 
 test('describeStatus: a selector error keeps its heal-trigger identity and exit code', () => {

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Element, Platform } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
 import { assertStateSupported } from '../ui/state-support';
-import { SelectorNotFoundError, AmbiguousSelectorError, NoWindowError, isEnvError } from '../errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, TransientReadError, isEnvError } from '../errors';
 import { sleep } from '../wait';
 import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
@@ -187,8 +187,10 @@ export const DEFAULT_GUARD_SETTLE_MS = 1500;
 const GUARD_POLL_MS = 150;
 
 /**
- * How long a guard keeps looking at a screen it cannot read at all, when the reason is
- * NoWindowError — the app was force-stopped or is mid-launch and has genuinely not drawn.
+ * How long a guard keeps looking at a screen it cannot read at all, when the reason is one
+ * that CLEARS ON ITS OWN (`TransientReadError`): the app force-stopped or mid-launch and not
+ * yet drawn (`NoWindowError`), or the dumper SIGKILLed under memory pressure
+ * (`DumpKilledError`, issue #137).
  *
  * Separate from `settleMs`, which answers "how long before I believe this selector is
  * absent?". This answers "how long before I believe there is no screen to ask?" — a
@@ -211,7 +213,7 @@ const GUARD_POLL_MS = 150;
  * Not configurable on purpose: a dial here is one more thing to explain, and every value a
  * user might pick is worse than the measurement.
  */
-const NO_WINDOW_GRACE_MS = 10_000;
+const TRANSIENT_READ_GRACE_MS = 10_000;
 
 /** Consecutive identical screen snapshots before a loop is believed to be stuck.
  *
@@ -303,8 +305,9 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
    *      probe a loop-exit check needs.
    *  So one dump attempt always happens regardless of the window.
    *
-   *  A THIRD clock sits beside both: a screen that cannot be read because the app has not
-   *  drawn (NoWindowError) is retried against NO_WINDOW_GRACE_MS, not against `settleMs`.
+   *  A THIRD clock sits beside both: a screen that is not READABLE AT ALL for a reason that
+   *  clears on its own (a TransientReadError) is retried against TRANSIENT_READ_GRACE_MS,
+   *  not against `settleMs`.
    *  That is deliberately independent — "is this selector absent?" and "is there a screen to
    *  ask at all?" are different questions, and only the second one aborts the run.
    *
@@ -325,10 +328,10 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     // body — the plan is unrunnable HERE and must say so, not quietly do nothing.
     if (deps.platform) assertStateSupported(sel, deps.platform);
     const deadline = Date.now() + Math.max(0, settleMs);
-    // A screen that cannot be read AT ALL gets its own, longer clock — see NO_WINDOW_GRACE_MS.
+    // A screen that cannot be read AT ALL gets its own, longer clock — see TRANSIENT_READ_GRACE_MS.
     // Clamped by the run deadline so a guard can never push a run past --timeout: the grace
     // exists to spend budget the caller already has, never to invent more.
-    const noWindowDeadline = Math.min(Date.now() + NO_WINDOW_GRACE_MS, deps.deadline ?? Infinity);
+    const transientDeadline = Math.min(Date.now() + TRANSIENT_READ_GRACE_MS, deps.deadline ?? Infinity);
     // A non-zero window must buy at least one SECOND look, independent of the clock.
     // Measured on emulator-5554: one uiautomator dump costs ~2.4s, which already exceeds
     // a 1.5s window — so a purely time-boxed loop returns after a single dump and the
@@ -373,7 +376,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
         // One successful read — even an empty tree — and the ordinary semantics resume exactly:
         // settleMs=0 is still a single-shot probe. It must never make a merely ABSENT selector
         // more patient, or every guard silently costs 10s.
-        if (!everRead && lastErr instanceof NoWindowError && Date.now() < noWindowDeadline) {
+        if (!everRead && lastErr instanceof TransientReadError && Date.now() < transientDeadline) {
           await sleep(GUARD_POLL_MS);
           continue;
         }

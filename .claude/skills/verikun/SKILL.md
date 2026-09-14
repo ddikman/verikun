@@ -613,7 +613,7 @@ owns the redaction and the review-first flow.
 ## Gotchas
 
 - **Prepare the device once** for reliable dumps: `vk device prep` (a physical device
-  needs `--device <serial>`). Live animations can make `vk ui` flaky (it already retries 3×).
+  needs `--device <serial>`). Live animations can make `vk ui` flaky.
 - **A slept device returns the LOCK SCREEN, not an error.** The dump succeeds and hands
   back `com.android.systemui` — so selectors miss for a reason unrelated to the app.
   verikun detects this, wakes the device and clears a *swipe* lock automatically; on a

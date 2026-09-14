@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { BarrierTally, matchWaiting, resolveOneWaiting } from '../src/commands/auto-wait';
+import { ReadTally, matchWaiting, resolveOneWaiting } from '../src/commands/auto-wait';
 import type { Ctx } from '../src/commands/context';
-import { SelectorNotFoundError } from '../src/errors';
+import { DumpKilledError, NoWindowError, SelectorNotFoundError } from '../src/errors';
 import { parseSelector } from '../src/ui/selector';
 import type { Element } from '../src/types';
 import { makeDriver, makeEl } from './helpers';
@@ -87,17 +87,133 @@ test('matchWaiting: hands the tally back so find/assert can use the same clause'
   assert.equal(hit.barrier.clause(), '', 'a hit never carries a barrier clause');
 });
 
-test('BarrierTally: an empty snapshot is not a barrier, and resets the verdict', () => {
-  const tally = new BarrierTally(ctxWith([]));
+test('ReadTally: an empty snapshot is not a barrier, and resets the verdict', () => {
+  const tally = new ReadTally(ctxWith([]));
   tally.note([content(), scrim()]);
   assert.match(tally.clause(), /whole wait/);
   tally.note([]);
   assert.equal(tally.clause(), '', 'a blank read (NoWindowError absorbed as []) is a different signal');
 });
 
-test('BarrierTally: the viewport comes from the driver, so the size floor applies', () => {
+test('ReadTally: the viewport comes from the driver, so the size floor applies', () => {
   // With the viewport known, a lone small tap target is a screen, not a barrier.
-  const tally = new BarrierTally(ctxWith([]));
+  const tally = new ReadTally(ctxWith([]));
   tally.note([makeEl({ desc: 'OK', clickable: true, bounds: { x1: 390, y1: 1100, x2: 690, y2: 1200 } })]);
   assert.equal(tally.clause(), '');
+});
+
+// --- a window that never once read the screen (issue #137) ---------------------------
+//
+// A killed dump is absorbed like a no-window, so a caller with a budget polls through it.
+// The difference is what happens when the budget runs out: a null root is the device ANSWERING
+// "nothing is drawn", so "absent" is a true reading of it — a kill is no answer at all.
+
+/** A ctx whose driver throws `e` for the first `n` reads, then serves `els`. */
+function ctxThrowing(e: Error, n: number, els: Element[] = [content()]): Ctx {
+  let i = 0;
+  const driver = makeDriver({
+    getElements: () => {
+      if (i++ < n) throw e;
+      return els;
+    },
+    viewport: () => VP,
+  });
+  return { driver, platform: 'android', positionals: [], flags: { wait: '200', interval: '5' } };
+}
+
+test('resolveOneWaiting: a killed dump is polled through, not fatal', async () => {
+  // The bug: three back-to-back driver attempts lost the same race and a `wait` with a
+  // two-minute budget aborted at ~2.5s. The budget is the caller's to spend.
+  const ctx = ctxThrowing(new DumpKilledError(), 3, [content(), confirm()]);
+  const { element } = await resolveOneWaiting(ctx, parseSelector('@vk_sheet_confirm'));
+  assert.equal(element.idShort, 'vk_sheet_confirm');
+});
+
+test('resolveOneWaiting: a window of NOTHING but killed dumps fails as the environment', async () => {
+  // Never "no element matched": reporting an absence nobody observed sends the reader looking
+  // for a missing identifier in app code, when the answer is that the phone is out of memory.
+  const ctx = ctxThrowing(new DumpKilledError(), Infinity);
+  await assert.rejects(resolveOneWaiting(ctx, parseSelector('@vk_sheet_confirm')), (e: unknown) => {
+    assert.ok(e instanceof DumpKilledError, 'exit 3, and the class survives for the failover classifier');
+    assert.equal((e as DumpKilledError).exitCode, 3);
+    return true;
+  });
+});
+
+test('resolveOneWaiting: ONE good read is enough to make an ordinary miss honest again', async () => {
+  // The `everRead` gate, mirroring the engine's guard grace. The screen WAS legible at some
+  // point in the window, so "the selector is not there" is a fair answer.
+  const ctx = ctxThrowing(new DumpKilledError(), 1, [content()]);
+  await assert.rejects(resolveOneWaiting(ctx, parseSelector('@vk_sheet_confirm')), (e: unknown) => {
+    assert.ok(e instanceof SelectorNotFoundError, 'a miss, not an environment failure');
+    return true;
+  });
+});
+
+test('resolveOneWaiting: a no-window window still reports an ordinary miss, unchanged', async () => {
+  // The asymmetry, pinned. A null root IS an answer, and flipping this to exit 3 would break
+  // every `--gone` assertion issued in the gap after `launch`.
+  const ctx = ctxThrowing(new NoWindowError(), Infinity);
+  await assert.rejects(resolveOneWaiting(ctx, parseSelector('@vk_sheet_confirm')), (e: unknown) => {
+    assert.ok(e instanceof SelectorNotFoundError);
+    return true;
+  });
+});
+
+test('matchWaiting: a blind window throws rather than handing back an empty match set', async () => {
+  // matchWaiting feeds `assert --gone`, where empty is a PASS. Absorbing a kill silently
+  // would manufacture a green earned from a screen nobody could read.
+  const ctx = ctxThrowing(new DumpKilledError(), Infinity);
+  await assert.rejects(matchWaiting(ctx, parseSelector('@vk_sheet_confirm')), (e: unknown) => e instanceof DumpKilledError);
+});
+
+test('matchWaiting: --no-wait reaches the blind check too, on its single shot', async () => {
+  // A zero window returns from a different branch than the polling one, and it must not be
+  // the one path where a kill still reads as an absence.
+  const ctx = ctxThrowing(new DumpKilledError(), Infinity);
+  ctx.flags = { 'no-wait': true };
+  await assert.rejects(matchWaiting(ctx, parseSelector('@vk_sheet_confirm')), (e: unknown) => e instanceof DumpKilledError);
+});
+
+test('ReadTally: a blind read is not a barrier, so it cannot borrow the barrier wording', () => {
+  const tally = new ReadTally(ctxWith([[]]));
+  tally.note([content(), scrim()]);
+  tally.noteBlind(new DumpKilledError());
+  assert.equal(tally.clause(), '', 'the last read saw nothing at all — a different signal');
+});
+
+// --- a blind read must not SATISFY a predicate, only fail to contradict one ------------
+//
+// Caught on a Pixel 3a while fixing #137, in the fix's own first cut: `--gone` is satisfied by
+// an EMPTY tree, which is exactly what an absorbed transient hands back. The end-of-window
+// check never ran because the predicate returned from inside the poll loop. `lastWasBlind()`
+// is the per-read half of the rule; `rethrowIfBlind()` is the per-window half.
+
+test('ReadTally: the last read is blind after an absorbed failure, and not after a real one', () => {
+  const tally = new ReadTally(ctxWith([[]]));
+  assert.equal(tally.lastWasBlind(), false, 'nothing absorbed yet');
+  tally.noteBlind(new DumpKilledError());
+  assert.equal(tally.lastWasBlind(), true);
+  tally.note([content()]);
+  assert.equal(tally.lastWasBlind(), false, 'a real read clears it — the screen came back');
+});
+
+test('ReadTally: a no-window read is blind too, even though it ends a window differently', () => {
+  // The per-READ rule needs no asymmetry: an absorbed read yielded nothing to judge either
+  // way. Only the per-WINDOW rule distinguishes them.
+  const tally = new ReadTally(ctxWith([[]]));
+  tally.noteBlind(new NoWindowError());
+  assert.equal(tally.lastWasBlind(), true);
+  tally.rethrowIfBlind(); // ...and still reports an ordinary miss, never throwing
+});
+
+test('ReadTally: a good read early does NOT license a pass from a blind read later', () => {
+  // The subtle one. `okReads === 0` is the right gate for "report a miss or throw", and the
+  // WRONG gate for "may this read satisfy --gone": one good read at the start of a window
+  // would otherwise bank a green off every killed read after it.
+  const tally = new ReadTally(ctxWith([[]]));
+  tally.note([content()]);
+  tally.noteBlind(new DumpKilledError());
+  assert.equal(tally.lastWasBlind(), true, 'this read still proves nothing');
+  tally.rethrowIfBlind(); // and the window as a whole was readable, so no throw
 });

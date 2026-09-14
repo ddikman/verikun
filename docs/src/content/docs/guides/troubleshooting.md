@@ -92,9 +92,8 @@ all.
 ### `vk ui` reads a screen mid-transition
 
 **Prepare the device once**: `vk device prep` (a physical device needs `--device <serial>`).
-Live animations are the main cause of flaky dumps — verikun already retries a dump 3 times, but
-a running animation defeats that — and prep turns them off along with the other knobs that make
-reads trustworthy. See [Device state](/verikun/reference/device-state/#preparing-a-test-device).
+Live animations are the main cause of flaky dumps, and prep turns them off along with the other
+knobs that make reads trustworthy. See [Device state](/verikun/reference/device-state/#preparing-a-test-device).
 
 ### Why a test run takes as long as it does
 

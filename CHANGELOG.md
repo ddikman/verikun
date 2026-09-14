@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-09-14
+
+A hierarchy read the device killed is now waited out instead of ending the test.
+
+### Fixed
+- **Hierarchy reads** ride out a dump the device killed, for the caller's full wait budget,
+  instead of aborting after three fast retries. ([#137])
+- **`assert --gone` / `wait --gone`** no longer count a killed read as an absence; a window of
+  only killed reads exits `3` instead of reporting a miss. ([#137])
+
+### Changed
+- **A killed dump** names memory pressure and is never failed over or retired — the device is
+  busy, not broken. ([#137])
+
+[#137]: https://github.com/ddikman/verikun/issues/137
+
 ## [0.27.0] - 2026-09-13
 
 ### Added

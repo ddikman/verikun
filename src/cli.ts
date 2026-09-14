@@ -101,7 +101,7 @@ import { adbHealthProbe } from './adb-health';
 import { updateProbes } from './update-check';
 import type { Ctx } from './commands/context';
 import {
-  BarrierTally,
+  ReadTally,
   matchWaiting,
   parseDuration,
   pollStep,
@@ -1003,11 +1003,14 @@ async function cmdWait(ctx: Ctx): Promise<number> {
   const timeout = flagNum(ctx.flags, 'timeout') ?? 10000;
   const interval = flagNum(ctx.flags, 'interval') ?? 400;
   const deadline = Date.now() + timeout;
-  const barrier = new BarrierTally(ctx);
+  const barrier = new ReadTally(ctx);
 
   while (Date.now() < deadline) {
-    const { matches, tier } = matchElements(barrier.note(readForPoll(ctx)), sel);
-    if (gone ? matches.length === 0 : matches.length > 0) {
+    const { matches, tier } = matchElements(readForPoll(ctx, barrier), sel);
+    // A read that did not happen proves nothing, and `--gone` is satisfied by an EMPTY one —
+    // so without this a kill storm answers "gone" on its first poll, exit 0. Absence has to be
+    // observed. (Measured on a Pixel 3a while fixing #137.)
+    if (!barrier.lastWasBlind() && (gone ? matches.length === 0 : matches.length > 0)) {
       ctx.record?.note({ selector: sel, tier, element: matches[0], message: gone ? 'gone' : `${matches.length} match(es)` });
       if (gone) out(`gone: '${sel.raw}'`);
       else out(formatCompact(matches));
@@ -1015,6 +1018,11 @@ async function cmdWait(ctx: Ctx): Promise<number> {
     }
     await sleep(interval);
   }
+  // A window that never once READ the screen has no timeout to report — it has an environment
+  // failure, and it throws (issue #137) rather than reaching the `return 1` below. That is also
+  // what a killed dump did before this fix, so the recorded step keeps its `error` shape
+  // instead of turning into a `failure`.
+  barrier.rethrowIfBlind();
   // A barrier can only explain a miss: with --gone the element is absent and the wait passed above.
   const why = withStop(gone ? '' : barrier.clause());
   ctx.record?.note({ selector: sel, message: `timeout after ${timeout}ms${gone ? ' (still present)' : ' (never appeared)'}${why}` });
@@ -1069,12 +1077,23 @@ async function cmdAssert(ctx: Ctx): Promise<number> {
   // Auto-wait subsumes the common "wait then assert": poll until the assertion
   // passes or the window elapses. `--gone` therefore waits for disappearance.
   const deadline = Date.now() + waitWindowMs(ctx.flags);
-  const barrier = new BarrierTally(ctx);
-  let result = evalAssert(barrier.note(readForPoll(ctx)), sel, ctx.flags);
+  const barrier = new ReadTally(ctx);
+  // A verdict is only worth banking if the read behind it happened. `--gone` (and `--count 0`)
+  // pass on an EMPTY tree, which is exactly what an absorbed transient hands back — so a single
+  // killed dump mid-window could otherwise bank a green the screen never showed. Poll again
+  // instead; `rethrowIfBlind()` below handles a window that stayed blind to the end.
+  const look = (): ReturnType<typeof evalAssert> => {
+    const result = evalAssert(readForPoll(ctx, barrier), sel, ctx.flags);
+    return barrier.lastWasBlind() ? { ...result, pass: false } : result;
+  };
+  let result = look();
   while (!result.pass && Date.now() < deadline) {
     await sleep(pollStep(ctx.flags, deadline));
-    result = evalAssert(barrier.note(readForPoll(ctx)), sel, ctx.flags);
+    result = look();
   }
+  // `--gone` PASSES on an empty read, so a window of nothing but killed dumps would report a
+  // green earned from a screen nobody could read. Checked before `pass` is consumed (issue #137).
+  barrier.rethrowIfBlind();
   const { pass, matches } = result;
   // Only a "not found" can be explained by a barrier: `--gone` passed if the tree was
   // barrier-only, and a text mismatch found the element.
