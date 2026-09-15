@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { describeStatus, transportReason } from '../src/agent/remote';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRemoteBackend, describeStatus, transportReason } from '../src/agent/remote';
 import type { RpcErrorBody } from '../src/rpc';
 import { CliError, DumpKilledError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
 
@@ -117,4 +122,33 @@ test('transportReason: anything else is passed through untouched', () => {
   });
   assert.equal(transportReason(e, 10_000), 'fetch failed');
   assert.equal(transportReason(new Error('socket hang up'), 10_000), 'socket hang up');
+});
+
+test('remote install uses the long-running HTTP transport, not fetch\'s 300s ceiling', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vk-remote-install-'));
+  const app = join(dir, 'app.apk');
+  writeFileSync(app, 'APKBYTES');
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const body = JSON.stringify({ ok: true, bytes: 8, sha256: 'test', devices: ['device-a'] });
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+      res.end(body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error('install must not call fetch'); }) as typeof fetch;
+  try {
+    const backend = createRemoteBackend(
+      { url: base },
+      { ok: true, version: 'test', platform: 'android', serial: 'device-a', installEnabled: true },
+    );
+    await backend.install(app);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

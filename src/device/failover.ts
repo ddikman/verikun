@@ -75,6 +75,7 @@ const TRANSIENT_RULES: readonly Rule[] = [[/INSTALL_FAILED_ABORTED/, 'the instal
 // --- fast paths: name the reason and skip the probe. NEVER the gate. ----------
 
 const UNREACHABLE_RULES: readonly Rule[] = [
+  [/stopped responding.*install/i, 'the device stopped responding during install'],
   [/device (?:'[^']*' )?not found/i, 'the device is not attached'],
   [/no devices\/emulators found/i, 'no device is attached'],
   [/device offline/i, 'the device is offline'],
@@ -217,8 +218,9 @@ export function classifyInstallFailure(e: unknown): FailoverVerdict {
     if (named) return { move: true, kind: 'device-state', reason: named };
 
     // The inversion. Not in the denylist ⇒ it is about the device, even though we have
-    // never seen this wording. Bounded by MAX_FAILOVER_HOPS, and the caller reports the
-    // FIRST device's error on exhaustion, so a wrong guess costs time, not diagnosis.
+    // never seen this wording. Bounded by the request-derived install hop limit, and the
+    // caller reports the FIRST device's error on exhaustion, so a wrong guess costs time,
+    // not diagnosis.
     return { move: true, kind: 'device-state', reason: 'the device could not install this build', unclassified: true };
   }
   return classify(e, UNKNOWN_STAY);

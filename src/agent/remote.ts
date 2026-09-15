@@ -10,8 +10,11 @@
 
 import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { extname } from 'node:path';
 import { CliError } from '../errors';
+import { REMOTE_INSTALL_TIMEOUT_MS } from '../install-timeouts';
 import { err } from '../output';
 import type { Element } from '../types';
 import type { RunStep } from '../run';
@@ -57,13 +60,13 @@ export interface RemoteOpts {
 }
 
 /**
- * The ceiling NONE of the per-call timeouts below can exceed, whatever they say.
+ * The ceiling fetch-based calls below cannot exceed, whatever their own budgets say.
  *
  * Node's global `fetch` is undici, whose `headersTimeout` and `bodyTimeout` both default to
  * 300s, and there is no dependency-free way to raise them: a `dispatcher` needs `undici`
- * itself, which is bundled but not importable. The `AbortController` below is therefore a
- * FLOOR on how long a call may take, never a ceiling — `EXEC_TIMEOUT_MS` says 600s and gets
- * 300s.
+ * itself, which is bundled but not importable. Long-running install uploads therefore use
+ * Node's built-in http/https client instead; its explicit 15-minute timer is the real
+ * upload-and-response ceiling. The other AbortControllers remain a floor when set above 300s.
  *
  * MEASURED on Node v20.20.2 against a server that held its headers for 310s: the fetch
  * rejected at 301s with `TypeError: fetch failed`, cause `HeadersTimeoutError`, code
@@ -75,11 +78,10 @@ const FETCH_HEADERS_CEILING_MS = 300_000;
 
 // Per-call ceilings. exec is generous: a single leaf may legitimately block for its
 // whole auto-wait window or an explicit `wait --timeout`, plus device time. Anything here
-// above FETCH_HEADERS_CEILING_MS is aspirational — see that constant.
+// above FETCH_HEADERS_CEILING_MS is aspirational unless it uses requestWithNodeHttp.
 const HEALTH_TIMEOUT_MS = 10_000;
 const ELEMENTS_TIMEOUT_MS = 60_000;
 const EXEC_TIMEOUT_MS = 10 * 60_000;
-const INSTALL_TIMEOUT_MS = 15 * 60_000;
 const DEVICE_LIST_TIMEOUT_MS = 30_000;
 // Meant to sit above the server's own 4-minute boot ceiling, so the SERVER reports why a
 // boot timed out rather than the client aborting first. It is exactly AT
@@ -89,6 +91,59 @@ const DEVICE_START_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_STOP_TIMEOUT_MS = 60_000;
 
 const trimUrl = (url: string): string => url.replace(/\/+$/, '');
+
+/**
+ * A dependency-free request path whose caller-owned timeout covers BOTH upload and response.
+ *
+ * Global fetch cannot wait past undici's fixed 300s header/body ceilings. An install may
+ * legitimately need 15 minutes, so it uses Node's native protocol clients instead of claiming
+ * a budget the transport cannot honor. Buffering the response preserves the Response boundary
+ * used below; install responses are small JSON descriptors, never artifacts.
+ */
+function requestWithNodeHttp(
+  url: string,
+  method: 'GET' | 'POST',
+  headers: Record<string, string>,
+  body: Buffer | string | undefined,
+  timeoutMs: number,
+): Promise<Response> {
+  const endpoint = new URL(url);
+  const send = endpoint.protocol === 'http:' ? httpRequest : endpoint.protocol === 'https:' ? httpsRequest : null;
+  if (!send) return Promise.reject(new Error(`unsupported server protocol '${endpoint.protocol}'`));
+  const payload = body === undefined ? undefined : Buffer.isBuffer(body) ? body : Buffer.from(body);
+  const requestHeaders = {
+    ...headers,
+    ...(payload ? { 'content-length': String(payload.byteLength) } : {}),
+  };
+
+  return new Promise<Response>((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn();
+    };
+    const req = send(endpoint, { method, headers: requestHeaders }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      res.on('error', (e) => finish(() => reject(e)));
+      res.on('aborted', () => finish(() => reject(new Error('the server aborted its response'))));
+      res.on('end', () => {
+        const status = res.statusCode ?? 500;
+        finish(() => resolve(new Response(Buffer.concat(chunks), { status })));
+      });
+    });
+    req.on('error', (e) => finish(() => reject(e)));
+    timer = setTimeout(() => {
+      const timeout = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+      req.destroy(timeout);
+    }, timeoutMs);
+    timer.unref?.();
+    req.end(payload);
+  });
+}
 
 /**
  * Turn a non-2xx into the error the caller sees.
@@ -173,22 +228,27 @@ class RemoteTransport {
     return h;
   }
 
-  async request<T>(method: 'GET' | 'POST', path: string, body: Buffer | string | undefined, timeoutMs: number, extraHeaders: Record<string, string> = {}): Promise<T> {
+  async request<T>(method: 'GET' | 'POST', path: string, body: Buffer | string | undefined, timeoutMs: number, extraHeaders: Record<string, string> = {}, transport: 'fetch' | 'node-http' = 'fetch'): Promise<T> {
     const url = `${this.base}${path}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timer: NodeJS.Timeout | undefined;
     let res: Response;
     try {
-      res = await fetch(url, {
-        method,
-        headers: this.headers(extraHeaders),
-        body,
-        signal: controller.signal,
-      });
+      if (transport === 'node-http') {
+        res = await requestWithNodeHttp(url, method, this.headers(extraHeaders), body, timeoutMs);
+      } else {
+        const controller = new AbortController();
+        timer = setTimeout(() => controller.abort(), timeoutMs);
+        res = await fetch(url, {
+          method,
+          headers: this.headers(extraHeaders),
+          body,
+          signal: controller.signal,
+        });
+      }
     } catch (e) {
       throw new CliError(`cannot reach verikun server at ${url} (${transportReason(e, timeoutMs)})`, 3);
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
     if (!res.ok) {
       const body = await readBody<RpcErrorBody>(res);
@@ -322,11 +382,11 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
         throw new CliError(`install: cannot read '${appPath}' (${(e as Error).message})`, 2);
       }
       const sha256 = createHash('sha256').update(buf).digest('hex');
-      const res = await t.request<InstallResponse>('POST', '/v1/install', buf, INSTALL_TIMEOUT_MS, {
+      const res = await t.request<InstallResponse>('POST', '/v1/install', buf, REMOTE_INSTALL_TIMEOUT_MS, {
         'content-type': 'application/octet-stream',
         'x-verikun-ext': ext,
         'x-verikun-sha256': sha256,
-      });
+      }, 'node-http');
       // Install is the one operation the server replays elsewhere, so a move here means
       // the build DID land — on a different device than the one we started with.
       if (res.deviceChanged) opts.onDeviceChange?.(res.deviceChanged);

@@ -6,11 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-09-15
+
+### Fixed
+- **`vk install --server`** sheds a pooled device whose install stalls, while the client now
+  honors its 15-minute request budget. ([#143])
+
 ### Changed
 - **Docs rule**: a bug fix is changelog-only; `docs/` changes only when a contract moves or a page
   went false. ([#140])
 
 [#140]: https://github.com/ddikman/verikun/issues/140
+[#143]: https://github.com/ddikman/verikun/issues/143
 
 ## [0.28.0] - 2026-09-14
 
