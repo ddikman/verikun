@@ -1036,6 +1036,68 @@ test('install: reaches EVERY device, or the later lanes would run the previous b
   assert.deepEqual(((await res.json()) as { devices: string[] }).devices.sort(), ['a', 'b', 'c']);
 });
 
+test('install: a hanging device hits its own deadline and leaves while healthy installs finish', async () => {
+  const { lc } = fakeLifecycle({ list: () => attached('hung', 'healthy') });
+  await start({
+    serials: ['hung', 'healthy'],
+    poolSpec: { all: false, serials: ['hung', 'healthy'] },
+    reconcileMs: 0,
+    allowInstall: true,
+    failover: { allowedTargets: [] },
+    lifecycle: lc,
+    installAttemptMs: 20,
+    onInstall: (serial) => serial === 'hung' ? new Promise<void>(() => undefined) : Promise.resolve(),
+  });
+
+  const res = await install();
+  assert.equal(res.status, 200, 'one wedged device does not hold the fan-out open');
+  const body = (await res.json()) as InstallResponse;
+  assert.deepEqual(body.devices, ['healthy']);
+  assert.deepEqual(body.skipped?.map((s) => s.serial), ['hung']);
+  assert.match(body.skipped![0].reason, /per-device deadline/);
+
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.deepEqual(health.devices, ['healthy']);
+  assert.equal(health.quarantined?.some((q) => q.serial === 'hung'), true);
+});
+
+test('install: all-device timeouts keep their quarantines instead of blaming the build', async () => {
+  const { lc } = fakeLifecycle({ list: () => attached('hung-a', 'hung-b') });
+  await start({
+    serials: ['hung-a', 'hung-b'],
+    poolSpec: { all: false, serials: ['hung-a', 'hung-b'] },
+    reconcileMs: 0,
+    allowInstall: true,
+    failover: { allowedTargets: [] },
+    lifecycle: lc,
+    installAttemptMs: 20,
+    onInstall: () => new Promise<void>(() => undefined),
+  });
+
+  assert.equal((await install()).status, 500);
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(health.capacity, 0);
+  assert.deepEqual(health.quarantined?.map((q) => q.serial).sort(), ['hung-a', 'hung-b']);
+});
+
+test('install: a timeout with failover disabled still releases the dead lane', async () => {
+  const { lc } = fakeLifecycle({ list: () => attached('hung') });
+  await start({
+    serials: ['hung'],
+    poolSpec: { all: false, serials: ['hung'] },
+    reconcileMs: 0,
+    allowInstall: true,
+    lifecycle: lc,
+    installAttemptMs: 20,
+    onInstall: () => new Promise<void>(() => undefined),
+  });
+
+  assert.equal((await install()).status, 500);
+  const health = (await (await call('/v1/health')).json()) as HealthResponse;
+  assert.equal(health.capacity, 0);
+  assert.equal(health.quarantined?.some((q) => q.serial === 'hung'), true);
+});
+
 test('install: refused while another run holds a device', async () => {
   await start({ serials: ['a', 'b'], allowInstall: true });
   await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-A' });

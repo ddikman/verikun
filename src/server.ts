@@ -40,6 +40,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Flags, flagStr, flagBool, flagNum } from './args';
 import { CliError } from './errors';
+import { INSTALL_DEVICE_TIMEOUT_MS, MAX_INSTALL_FAILOVER_HOPS } from './install-timeouts';
 import { getDriver } from './drivers';
 import { releaseCompanionOn } from './companion/manager';
 import { ClaimOpts, claimDevice, claimsEnabled, releaseClaim, setProcessScoped, summarize } from './device/claims';
@@ -87,10 +88,6 @@ const INSTALL_BODY_CAP = 512 * 1024 * 1024; // 512 MB app build
 // to survive a client-side compile/repair pause, short enough that a crashed
 // caller doesn't wedge the device.
 const LOCK_IDLE_MS = 5 * 60 * 1000;
-// How many times ONE request may move device. 2 moves = 3 devices tried, which sits
-// comfortably inside the client's 15-minute install ceiling at ~1 minute an install,
-// while a farm of ten wedged emulators cannot burn ten installs inside one request.
-const MAX_FAILOVER_HOPS = 2;
 // How often to ask whether the host's adb server has rotted. Generous on purpose: the
 // check shells out to `log show` (~1s) and the condition it looks for accumulates over
 // DAYS, so a tight interval would buy nothing and spend host time on every idle server.
@@ -110,6 +107,19 @@ const ADB_RECYCLE_CHECK_MS = 10 * 60 * 1000;
 const RECONCILE_INTERVAL_MS = 60_000;
 
 const PROBE_RETRY_MS = 1000;
+
+/** Kept distinct so an all-device timeout is never mistaken for evidence of a bad build. */
+class InstallAttemptTimeoutError extends CliError {
+  constructor(serial: string, timeoutMs: number) {
+    const duration = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`;
+    super(`device ${serial} stopped responding: install exceeded its ${duration} per-device deadline`, 3);
+    this.name = 'InstallAttemptTimeoutError';
+  }
+}
+
+/** Failover wraps an exhausted attempt in HttpError, so retain a wire-safe marker too. */
+const isInstallAttemptTimeout = (e: unknown): boolean =>
+  e instanceof InstallAttemptTimeoutError || (e instanceof Error && /per-device deadline/.test(e.message));
 // Deliberately below the client's 5-minute ceiling, so a slow boot is reported by the
 // side that knows WHY ("did not finish booting within 240s") rather than as a generic
 // client-side abort.
@@ -174,6 +184,9 @@ export interface ServerConfig {
    *  coming back from a long client-side pause keeps ITS OWN phone — is otherwise five
    *  minutes away and would go unpinned. */
   idleMs?: number;
+  /** Per-device install deadline. A short value keeps the hang path unit-testable; the
+   *  production default is INSTALL_DEVICE_TIMEOUT_MS. */
+  installAttemptMs?: number;
 }
 
 export function buildServer(config: ServerConfig): Server {
@@ -1326,7 +1339,11 @@ export function buildServer(config: ServerConfig): Server {
    * On exhaustion it throws the FIRST device's error, never the last. That inversion is
    * what makes move-by-default safe: a wrong move costs time, not the diagnosis.
    */
-  async function installWithFailover(serial: string, tmpPath: string): Promise<{ change?: DeviceChange; moves: number }> {
+  async function installWithFailover(
+    serial: string,
+    tmpPath: string,
+    timedOut: Set<string>,
+  ): Promise<{ change?: DeviceChange; moves: number }> {
     let change: DeviceChange | undefined;
     let moves = 0;
     let firstError: unknown;
@@ -1365,14 +1382,37 @@ export function buildServer(config: ServerConfig): Server {
         // are still on our disk), so it hops rather than throwing a bare 503 that never
         // reaches the failover machinery at all.
         const gone = firstError ?? new HttpError(503, `device ${from} is no longer attached`, 3);
-        if (!config.failover || hop >= MAX_FAILOVER_HOPS) throw gone;
+        if (!config.failover || hop >= MAX_INSTALL_FAILOVER_HOPS) throw gone;
         // `unreachable` is the literal truth — it is not in the pool — and it is also
         // inert here: `shrink` sees a non-member and takes its cleanup tail either way.
         from = await hopOrThrow('the device left the pool mid-install', gone, 'unreachable');
         continue;
       }
       try {
-        await handle.install(tmpPath);
+        const timeoutMs = config.installAttemptMs ?? INSTALL_DEVICE_TIMEOUT_MS;
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const finish = (fn: () => void): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            fn();
+          };
+          const timer = setTimeout(() => {
+            const timeout = new InstallAttemptTimeoutError(from, timeoutMs);
+            // A race alone would leave the worker blocked in adb forever. Retiring it is
+            // what releases the transport and makes the deadline a recovery mechanism.
+            timedOut.add(from);
+            quarantineDevice(from, timeout.message);
+            pool.retire(from);
+            finish(() => reject(timeout));
+          }, timeoutMs);
+          timer.unref?.();
+          void handle.install(tmpPath).then(
+            () => finish(resolve),
+            (e) => finish(() => reject(e)),
+          );
+        });
         return { change, moves };
       } catch (e) {
         if (firstError === undefined) firstError = e;
@@ -1381,7 +1421,17 @@ export function buildServer(config: ServerConfig): Server {
         noteVerdict(verdict, e, 'install');
         // The artifact is broken / the caller is wrong / failover is off / we are out of
         // hops: report the first failure unchanged, exactly as before this feature.
-        if (!verdict.move || !config.failover || hop >= MAX_FAILOVER_HOPS) throw firstError;
+        if (!verdict.move || !config.failover || hop >= MAX_INSTALL_FAILOVER_HOPS) {
+          // A timeout retired its worker before this catch. If it cannot move, finish the
+          // cleanup that pickFailoverDevice would otherwise own; especially, never leave
+          // a host-global claim pinned to a worker that no longer exists.
+          if (isInstallAttemptTimeout(e)) {
+            evictHoldersOf(from, `${from} left the pool after its install timed out`);
+            releaseCompanionOn(from);
+            if (claimsEnabled(claimEnv)) releaseClaim(from, { ...claimOpts, mineOnly: true });
+          }
+          throw firstError;
+        }
         from = await hopOrThrow(verdict.reason, firstError, verdict.kind);
       }
     }
@@ -1432,10 +1482,11 @@ export function buildServer(config: ServerConfig): Server {
         throw new HttpError(503, `no device is left to install onto${lostDevice ? ` — last loss: ${lostDevice}` : ''}`, 3);
       }
       err(`[server] install: received ${size} bytes (.${ext}), installing on ${targets.join(', ')}…`);
+      const timedOut = new Set<string>();
       const outcomes = await Promise.all(
         targets.map(async (serial) => {
           try {
-            return { serial, ...(await installWithFailover(serial, tmpPath)), error: null as unknown };
+            return { serial, ...(await installWithFailover(serial, tmpPath, timedOut)), error: null as unknown };
           } catch (e) {
             return { serial, change: undefined, moves: 0, error: e };
           }
@@ -1459,9 +1510,20 @@ export function buildServer(config: ServerConfig): Server {
           // polarity, since the device side is open-ended and OEM-specific. That is right
           // for ONE device failing; applied to every device at once it condemns the whole
           // pool for what this very branch has just concluded is a bad build. Undo them.
-          const condemned = targets.filter((t) => quarantine.delete(t));
-          if (condemned.length) {
-            err(`[server] install: failed on every device, so the build is the suspect — un-quarantining ${condemned.join(', ')}`);
+          const hasTimeout = timedOut.size > 0;
+          if (!hasTimeout) {
+            // No lane succeeded and none hung: the common input is now the stronger
+            // suspect, so undo the per-device quarantines made by the move-by-default
+            // classifier.
+            const condemned = targets.filter((t) => quarantine.delete(t));
+            if (condemned.length) {
+              err(`[server] install: failed on every device, so the build is the suspect — un-quarantining ${condemned.join(', ')}`);
+            }
+          } else {
+            // A deadline is direct evidence about a device, not the artifact. Preserve
+            // every quarantine when any lane timed out; otherwise the next request could
+            // immediately be dealt the same wedged worker again.
+            err('[server] install: every device failed and at least one timed out — keeping the device quarantines');
           }
           throw failed[0].error;
         }
@@ -1484,11 +1546,14 @@ export function buildServer(config: ServerConfig): Server {
         skipped = failed.map((f) => {
           const serial = landedOn(f);
           const reason = firstLine((f.error as Error).message);
-          if (pool.serials().includes(serial)) {
-            pool.retire(serial);
-            // Same two rules as the shed in `shrink`: `degraded` is for MEMBERS, and a
-            // device that is not serving belongs in `quarantine` — which `rejoinDevice`
-            // clears on the evidence of a worker that started and a build that installed.
+          const serving = pool.serials().includes(serial);
+          if (serving) pool.retire(serial);
+          // Same two rules as the shed in `shrink`: `degraded` is for MEMBERS, and a
+          // device that is not serving belongs in `quarantine` — which `rejoinDevice`
+          // clears on the evidence of a worker that started and a build that installed.
+          // The timeout path retired its worker already, but still needs this common
+          // bookkeeping tail. Other already-absent failures keep their existing handling.
+          if (serving || isInstallAttemptTimeout(f.error)) {
             degraded.delete(serial);
             quarantineDevice(serial, `did not take the current build — ${reason}`);
             evictHoldersOf(serial, `${serial} left the pool without the current build`);
