@@ -114,6 +114,13 @@ test('both arms: an offline device moves as unreachable, with no probe needed', 
   }
 });
 
+test('install: a per-device deadline is an unreachable device, not an artifact failure', () => {
+  assert.deepEqual(
+    classifyInstallFailure(new CliError('device a stopped responding: install exceeded its 240s per-device deadline', 3)),
+    { move: true, kind: 'unreachable', reason: 'the device stopped responding during install' },
+  );
+});
+
 test('both arms: a preflight refusal moves as unreachable', () => {
   // The real shape AdbDriver.preflight throws, hint and all.
   const e = probeFailure({
