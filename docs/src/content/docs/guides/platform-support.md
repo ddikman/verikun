@@ -60,7 +60,7 @@ What varies on Android is the **device**, and three differences bite in practice
 <tr><td><code>launch</code> / <code>open</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--clear</code> exits <code>3</code></td><td>⚠️ <code>--clear</code> exits <code>3</code></td></tr>
 <tr><td><code>stop</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>clear</code></td><td>✅ <code>pm clear</code></td><td>✅</td><td>❌ <code>3</code> — no per-app reset</td><td>❌ <code>3</code> — no per-app reset</td></tr>
-<tr><td><code>install</code></td><td>✅ <code>.apk</code> — replaces a differently-signed build</td><td>✅ <code>.apk</code> — replaces a differently-signed build</td><td>⚠️ <code>.ipa</code> or <code>.app</code> — no replace</td><td>⚠️ <code>.ipa</code> or <code>.app</code> — no replace</td></tr>
+<tr><td><code>install</code></td><td>✅ <code>.apk</code> — replaces a differently-signed build, allows a downgrade</td><td>✅ <code>.apk</code> — replaces a differently-signed build, allows a downgrade</td><td>⚠️ <code>.ipa</code> or <code>.app</code> — no replace</td><td>⚠️ <code>.ipa</code> or <code>.app</code> — no replace</td></tr>
 <tr><th colspan="5">Device state</th></tr>
 <tr><td><code>device set</code></td><td>✅ all eight keys</td><td>✅ all eight keys</td><td>⚠️ four of eight</td><td>❌ <code>3</code> — none</td></tr>
 <tr><td><code>device get</code></td><td>✅</td><td>✅</td><td>⚠️ four of eight</td><td>⊘ <code>n/a</code> for every key</td></tr>
@@ -108,6 +108,10 @@ Notes on the rows that carry a caveat:
   a package across signing keys, which is routine on a shared device. verikun removes the
   installed build and installs again, warning on stderr that its app data is gone; a same-key
   install keeps its data. On iOS the install simply fails.
+- **`install` allows a version downgrade on Android when the build is debuggable.** verikun
+  always installs with `adb install -d`; Android only honors that flag for a debuggable build
+  (the common CI/test case), so a release-signed build still fails with
+  `INSTALL_FAILED_VERSION_DOWNGRADE`.
 - **A device pool is one platform.** `vk server --devices` serves one platform per server, and
   `vk suite --servers a,b` exits `2` when the servers report different ones. Run a suite on
   both platforms by running it twice — see
