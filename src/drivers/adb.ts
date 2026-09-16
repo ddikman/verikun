@@ -1177,21 +1177,27 @@ export class AdbDriver implements Driver {
   }
 
   /**
-   * One `adb install -r` attempt: null on success, else adb's collapsed output.
+   * One `adb install -r -d` attempt: null on success, else adb's collapsed output.
    *
    * Returns rather than throws because the caller has to READ the failure to decide
    * whether it is recoverable — and a thrown-and-caught CliError would put the final
    * message's own prefix inside the message it is composing.
    *
    * `-r` reinstalls over an existing package keeping its data (the common
-   * update-the-build-under-test case). A large APK can legitimately take minutes to
-   * stream + install, so the timeout is far above the 30s default. adb reports failures
-   * both as a non-zero exit AND as a `Failure [REASON]` line on stdout with exit 0
-   * (varies by adb version) — check both, and require `Success` positively rather than
-   * merely inferring it from the absence of `Failure`.
+   * update-the-build-under-test case). `-d` allows a lower versionCode to replace a
+   * higher one already on the device — unconditional here, not a retry like the
+   * signature-conflict replace below, because it carries no data-loss trade-off (inert
+   * when there is no downgrade, and keeps data the same way `-r` does when there is).
+   * Android only honors it for a debuggable build, so a release-signed downgrade still
+   * surfaces `INSTALL_FAILED_VERSION_DOWNGRADE` unresolved — see the comment on that
+   * code in `device/failover.ts`. A large APK can legitimately take minutes to stream +
+   * install, so the timeout is far above the 30s default. adb reports failures both as a
+   * non-zero exit AND as a `Failure [REASON]` line on stdout with exit 0 (varies by adb
+   * version) — check both, and require `Success` positively rather than merely inferring
+   * it from the absence of `Failure`.
    */
   private tryInstall(appPath: string): string | null {
-    const r = runText(ADB, this.withSerial(['install', '-r', appPath]), { timeout: 10 * 60 * 1000 });
+    const r = runText(ADB, this.withSerial(['install', '-r', '-d', appPath]), { timeout: 10 * 60 * 1000 });
     const combined = `${r.stdout}\n${r.stderr}`;
     if (r.code !== 0 || /^Failure\b/im.test(combined) || !/^Success\b/im.test(combined)) {
       return combined.replace(/\s+/g, ' ').trim() || `exit code ${r.code}`;

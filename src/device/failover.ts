@@ -93,6 +93,9 @@ const DEVICE_STATE_RULES: readonly Rule[] = [
   // `install` already tried removing it and reinstalling (drivers/adb.ts); reaching here
   // means that did not work, so the wording must not imply nothing was attempted.
   [/INSTALL_FAILED_UPDATE_INCOMPATIBLE/, 'a differently-signed build could not be replaced on the device'],
+  // `install` already retries with `-d` (drivers/adb.ts); reaching here means the build
+  // or device isn't debuggable, so Android is still refusing — a genuine per-device
+  // conflict, not a sign the retry never ran.
   [/INSTALL_FAILED_VERSION_DOWNGRADE/, 'the device holds a newer build of this package'],
   [/INSTALL_FAILED_ALREADY_EXISTS/, 'the package is already installed on the device'],
   [/INSTALL_FAILED_DUPLICATE_PERMISSION/, 'another app on the device declares one of these permissions'],

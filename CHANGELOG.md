@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-16
+
+### Changed
+- **`vk install`** (Android) allows a version downgrade by default (`adb install -d`),
+  instead of failing with `INSTALL_FAILED_VERSION_DOWNGRADE`, when the build is debuggable.
+
 ## [0.28.1] - 2026-09-15
 
 ### Fixed

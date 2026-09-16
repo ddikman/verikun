@@ -514,6 +514,11 @@ installs again, warning on stderr that **that build's app data is gone**. A same
 install still keeps its data. Do not treat the warning as a failure — it is how the
 install succeeded. iOS has no equivalent recovery; the install just fails there.
 
+**`vk install` also allows a version downgrade by default, when the build is debuggable.**
+A build with a lower version code than what's already on the device installs normally
+instead of failing with `INSTALL_FAILED_VERSION_DOWNGRADE`. A release-signed build is a
+genuine exception — Android still refuses it, and that is not something to retry.
+
 `vk server --devices all` (or `all-android` / `all-ios` / a serial list) serves a **pool**
 from one address. Each run leases one device for its whole life, so a run's steps and
 repairs always land on the same phone. `vk install --server` then installs on every device;
