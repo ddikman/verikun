@@ -112,8 +112,9 @@ Then print the issue URL `gh` returns. (No `--label` — the repo doesn't use la
 `.context/vk-improve-<fp-slug>-comment.md`, raise it, and only on a go-ahead run
 `gh issue comment <n> --repo ddikman/verikun --body-file "<that file>"`.
 
-**No `gh`?** Hand over the file path and <https://github.com/ddikman/verikun/issues/new> for
-the user to paste into. Never block a run on any of this.
+**No `gh`?** Hand over the file path and
+<https://github.com/ddikman/verikun/issues/new?template=improvement.md> (it opens pre-filled
+with this report's fields) for the user to paste the draft over. Never block a run on any of this.
 
 ## Keep it light — the report shape
 
