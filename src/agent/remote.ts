@@ -13,7 +13,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { extname } from 'node:path';
-import { CliError } from '../errors';
+import { CliError, NoFreeDeviceError, RunEvictedError } from '../errors';
 import { REMOTE_INSTALL_TIMEOUT_MS } from '../install-timeouts';
 import { err } from '../output';
 import type { Element } from '../types';
@@ -148,9 +148,18 @@ function requestWithNodeHttp(
 /**
  * Turn a non-2xx into the error the caller sees.
  *
- * The 401/409/503 arms come FIRST and stay class-free on purpose: those describe the
+ * The 401/409/503 arms come FIRST and never rebuild a driver error: those describe the
  * TRANSPORT (wrong key, device leased, nothing attached), not something a driver threw, so
  * there is no device-error identity to restore and their wording is what a user acts on.
+ * Two of them do carry a class of their own, because a parallel suite has to act on the
+ * difference (#147) — both still exit 3:
+ *
+ *  - on the LEASE route (`opts.lease`), 409 and 503 are `NoFreeDeviceError`: the run never
+ *    started. The route decides, not the body — every run mints a fresh token, so a lease can
+ *    be refused but never evicted.
+ *  - elsewhere, a 409 the server tagged `RunEvictedError` is one: the run lost its device
+ *    part-way. That is the ONLY kind a 409 honours. Anything else a body carries is ignored,
+ *    and an untagged 409 (an older server) stays the plain error it always was.
  *
  * Everything else prefers the server's `errorKind`. That field is what stops a `--server` run
  * reading a mid-launch `NoWindowError` as a fatal environment error: the class survives the
@@ -158,16 +167,20 @@ function requestWithNodeHttp(
  * `CliError` (issue #80). No field — an older server, or a failure with no class worth
  * naming — falls through to exactly the previous behaviour.
  */
-export function describeStatus(status: number, body: RpcErrorBody | null, url: string): Error {
+export function describeStatus(status: number, body: RpcErrorBody | null, url: string, opts: { lease?: boolean } = {}): Error {
   const detail = body?.error ? `: ${body.error}` : '';
   if (status === 401) {
     return new CliError(`verikun server rejected the auth key (401)${detail}. Check --auth-key / VERIKUN_SERVER_AUTH_KEY.`, 3);
   }
   if (status === 409) {
-    return new CliError(`verikun server device is busy (409)${detail || ' — another run holds the device; retry when it finishes'}.`, 3);
+    const busy = `verikun server device is busy (409)${detail || ' — another run holds the device; retry when it finishes'}.`;
+    if (opts.lease) return new NoFreeDeviceError(busy);
+    if (body?.errorKind === 'RunEvictedError') return new RunEvictedError(`verikun server ended this run (409)${detail}.`);
+    return new CliError(busy, 3);
   }
   if (status === 503) {
-    return new CliError(`verikun server has no device attached (503)${detail}.`, 3);
+    const none = `verikun server has no device attached (503)${detail}.`;
+    return opts.lease ? new NoFreeDeviceError(none) : new CliError(none, 3);
   }
   // The server sends the intended exit code (usage 2 / env 3) in the body; fall
   // back on the HTTP class when it didn't.
@@ -217,6 +230,9 @@ class RemoteTransport {
   private readonly base: string;
   /** One token per backend = one logical run holding the server's device lock. */
   readonly runToken = randomUUID();
+  /** The server has said this run was evicted. Latched, because the request that hears it is
+   *  usually not the step that failed — see ExecBackend.wasEvicted. */
+  evicted = false;
 
   constructor(private readonly opts: RemoteOpts) {
     this.base = trimUrl(opts.url);
@@ -255,7 +271,9 @@ class RemoteTransport {
       // Before throwing: a failing request may still have moved the device, and that is
       // exactly the case a caller must not miss (an exhausted install, a dead-device read).
       if (body?.deviceChanged) this.opts.onDeviceChange?.(body.deviceChanged);
-      throw describeStatus(res.status, body, url);
+      const error = describeStatus(res.status, body, url, { lease: path === '/v1/lease' });
+      if (error instanceof RunEvictedError || body?.evicted) this.evicted = true;
+      throw error;
     }
     const parsed = await readBody<T>(res);
     if (parsed === null) throw new CliError(`verikun server at ${url} returned a non-JSON response`, 3);
@@ -286,6 +304,22 @@ export async function pingServer(opts: RemoteOpts): Promise<HealthResponse> {
     throw new CliError(`'${trimUrl(opts.url)}' does not look like a verikun server (unexpected /v1/health payload).`, 3);
   }
   return health;
+}
+
+/**
+ * What a `vk server` is serving, and what it has ruled out, in one line from one
+ * `/v1/health`. Carried on every "no free device" so the reader learns WHICH phone left and
+ * the server's own reason, not the lane slot (`host:port#1`) that happened to notice (#147).
+ * A device the server shed keeps its quarantine, which is what makes it nameable here.
+ */
+export function poolNote(health: HealthResponse): string {
+  const serving = health.devices ?? (health.serial ? [health.serial] : []);
+  const count = health.capacity ?? serving.length;
+  const out = serving.length ? ` (${serving.join(', ')})` : '';
+  const ruledOut = health.quarantined?.length
+    ? `; ruled out: ${health.quarantined.map((q) => `${q.serial} (${q.reason})`).join(', ')}`
+    : '';
+  return `pool: ${count} serving${out}${ruledOut}`;
 }
 
 /**
@@ -345,6 +379,9 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
     if (record && res.step) opts.onStep?.(res.step, decodeArtifacts(res.artifacts), res.logStart);
     // A failing step is a 200, so this is the ordinary path for a mid-run device death.
     if (res.deviceChanged) opts.onDeviceChange?.(res.deviceChanged);
+    // …and for the eviction that death caused: the step keeps the phone's own error, and this
+    // response is the only one that says the run is over (see ExecResponse.evicted).
+    if (res.evicted) t.evicted = true;
     return { code: res.code, error: res.error ? rebuildError(res.error) : undefined };
   };
 
@@ -355,7 +392,14 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
       // Feature-detect on a FIELD, never on the version: `capacity` and /v1/lease landed
       // together, and a client cannot otherwise tell "old server" from "new server".
       if (health.capacity === undefined) return null;
-      return t.postJson<LeaseResponse>('/v1/lease', {}, HEALTH_TIMEOUT_MS);
+      try {
+        return await t.postJson<LeaseResponse>('/v1/lease', {}, HEALTH_TIMEOUT_MS);
+      } catch (e) {
+        // Say what the pool looks like. `health` was read moments ago, on the way here, and
+        // it is what names a phone that left — the refusal itself only counts devices.
+        if (e instanceof NoFreeDeviceError) throw new NoFreeDeviceError(`${e.message} [${poolNote(health)}]`);
+        throw e;
+      }
     },
 
     async getElements(): Promise<Element[]> {
@@ -410,6 +454,8 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
       const { code, error } = await execRaw({ command, positionals: [appId], flags: {} }, false);
       if (code !== 0) throw error ?? new CliError(`reset (${command} ${appId}) failed on the server (exit ${code})`, 3);
     },
+
+    wasEvicted: () => t.evicted,
 
     async close(): Promise<void> {
       // Free the server's device lock so the next command (a fresh run token, e.g.

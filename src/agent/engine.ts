@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Element, Platform } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
 import { assertStateSupported } from '../ui/state-support';
-import { SelectorNotFoundError, AmbiguousSelectorError, TransientReadError, isEnvError } from '../errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, RunEvictedError, TransientReadError, isEnvError } from '../errors';
 import { sleep } from '../wait';
 import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
@@ -118,6 +118,17 @@ class GuardBlindError extends Error {
     this.name = 'GuardBlindError';
   }
 }
+
+/**
+ * A run the server EVICTED cannot continue: its phone left the pool, and every later call is
+ * refused the same way. So the catches below that absorb a failed READ — a guard's retry, the
+ * empty-tree fallback, a repair that could not be made — must let it through. Absorbed, a lost
+ * phone read as an absent guard, a "read found no element" FAIL or a failed repair, and a
+ * parallel suite lost the class it needs to re-run the test as a fresh run (#147).
+ */
+const rethrowIfEvicted = (e: unknown): void => {
+  if (e instanceof RunEvictedError) throw e;
+};
 
 const describe = (leaf: LeafStep): string =>
   [leaf.command, ...leaf.positionals, ...leaf.flags.map((f) => (f.value === 'true' ? `--${f.name}` : `--${f.name} ${f.value}`))]
@@ -287,7 +298,8 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
   const safeElements = async (): Promise<Element[]> => {
     try {
       return await deps.getElements();
-    } catch {
+    } catch (e) {
+      rethrowIfEvicted(e);
       return [];
     }
   };
@@ -351,6 +363,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
           els = await deps.getElements();
           everRead = true;
         } catch (e) {
+          rethrowIfEvicted(e);
           els = undefined; // transient dump failure — retry once before concluding "absent"
           lastErr = e;
         }
@@ -463,6 +476,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
         if (node.type !== 'command') throw new InvalidPlanError('repair must be a single command step');
         repaired = node;
       } catch (e) {
+        rethrowIfEvicted(e);
         const msg = e instanceof Error ? e.message : String(e);
         return { status: 'fail', where, reason: `repair failed: ${msg}` };
       }

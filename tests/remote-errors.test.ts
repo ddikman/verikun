@@ -5,9 +5,11 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRemoteBackend, describeStatus, transportReason } from '../src/agent/remote';
+import { createRemoteBackend, describeStatus, poolNote, transportReason } from '../src/agent/remote';
 import type { RpcErrorBody } from '../src/rpc';
-import { CliError, DumpKilledError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from '../src/errors';
+import {
+  CliError, DumpKilledError, NoWindowError, NoFreeDeviceError, RunEvictedError, SelectorNotFoundError, AmbiguousSelectorError,
+} from '../src/errors';
 
 // How a `--server` client turns a non-2xx into an error. This is the boundary that used to
 // destroy the thrown error's class: `/v1/exec` answers a failed step with a 200 carrying a
@@ -74,6 +76,151 @@ test('describeStatus: 401/409/503 keep their transport wording, kind or no kind'
 
   assert.match(describeStatus(409, { error: 'held', exitCode: 3 }, URL).message, /device is busy \(409\)/);
   assert.match(describeStatus(503, { error: 'none', exitCode: 3 }, URL).message, /no device attached \(503\)/);
+});
+
+const LEASE_URL = 'http://host:8391/v1/lease';
+
+test('describeStatus: a refused LEASE is a NoFreeDeviceError — the run never started (#147)', () => {
+  // On the lease route both answers mean "no device for a new run right now": every device
+  // leased (409) or none serving (503). A parallel suite hands such a test back to its
+  // queue instead of recording a failure for a test that never ran — but only if it can
+  // tell this apart from a device that broke, which is what the class is for.
+  const busy = describeStatus(409, { error: 'all 2 devices are leased by other active runs — retry when one finishes', exitCode: 3 }, LEASE_URL, { lease: true });
+  assert.ok(busy instanceof NoFreeDeviceError);
+  assert.equal((busy as CliError).exitCode, 3, 'still an environment exit');
+  assert.match(busy.message, /device is busy \(409\): all 2 devices are leased/, 'the transport wording is kept');
+
+  const empty = describeStatus(503, { error: 'this verikun server has no device left to serve', exitCode: 3 }, LEASE_URL, { lease: true });
+  assert.ok(empty instanceof NoFreeDeviceError);
+  assert.match(empty.message, /no device attached \(503\)/);
+
+  // A fresh run token cannot have been evicted, so on this route a tag changes nothing.
+  const tagged = describeStatus(409, { error: 'x', exitCode: 3, errorKind: 'RunEvictedError' }, LEASE_URL, { lease: true });
+  assert.ok(tagged instanceof NoFreeDeviceError);
+});
+
+test('describeStatus: a 409 the server TAGGED as an eviction is a RunEvictedError', () => {
+  const e = describeStatus(
+    409,
+    { error: 'this run lost its device: a left the pool — this one cannot continue on another device', exitCode: 3, errorKind: 'RunEvictedError' },
+    URL,
+  );
+  assert.ok(e instanceof RunEvictedError);
+  assert.equal((e as CliError).exitCode, 3);
+  assert.match(e.message, /a left the pool/, "the server's reason survives");
+  assert.doesNotMatch(e.message, /busy/, 'nothing was busy — the run lost its phone');
+});
+
+test('describeStatus: an untagged 409 off the lease route stays a plain CliError', () => {
+  // An OLDER server tags nothing, and its evictions must stay ordinary attempts rather than
+  // be guessed at from the wording. And a 409 honours ONLY the eviction tag: any other kind a
+  // body carries is ignored, as it always was.
+  for (const body of [
+    { error: 'the device this run was using left the pool', exitCode: 3 },
+    { error: 'held', exitCode: 3, errorKind: 'NoWindowError' as const },
+  ]) {
+    const e = describeStatus(409, body, URL);
+    assert.equal(e instanceof RunEvictedError, false);
+    assert.equal(e instanceof NoFreeDeviceError, false);
+    assert.equal(e instanceof NoWindowError, false);
+    assert.match(e.message, /device is busy \(409\)/);
+  }
+  assert.equal(describeStatus(503, { error: 'none', exitCode: 3 }, URL) instanceof NoFreeDeviceError, false);
+});
+
+test('a remote backend tells a refused lease from an evicted step by the ROUTE it hit', async () => {
+  // The wiring half: `request()` has to know which call it is making. A 409 on /v1/lease is
+  // a run that never started; the same status on /v1/exec is one that lost its device.
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const evicted = req.url === '/v1/exec';
+      const body = JSON.stringify(
+        evicted
+          ? { error: 'this run lost its device: a left the pool', exitCode: 3, errorKind: 'RunEvictedError' }
+          : { error: 'all 2 devices are leased by other active runs', exitCode: 3 },
+      );
+      res.writeHead(409, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+      res.end(body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const backend = createRemoteBackend(
+      { url: base },
+      {
+        ok: true, version: 'test', platform: 'android', serial: null, capacity: 1, devices: ['b'], installEnabled: false,
+        quarantined: [{ serial: 'a', reason: 'the device is not attached' }],
+      },
+    );
+    await assert.rejects(
+      () => backend.lease(),
+      (e: unknown) =>
+        e instanceof NoFreeDeviceError &&
+        // …and says which phone is missing and why, from the health read on the way in.
+        /ruled out: a \(the device is not attached\)/.test(e.message),
+    );
+    assert.equal(backend.wasEvicted?.(), false, 'a refused lease is not an eviction');
+    await assert.rejects(() => backend.exec('tap', ['@go'], {}), (e: unknown) => e instanceof RunEvictedError);
+    // Remembered: the step that died with the phone never hears it, only a later request does.
+    assert.equal(backend.wasEvicted?.(), true);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('poolNote: names the devices a server is serving and the ones it ruled out, with the reason', () => {
+  const health = {
+    ok: true, version: 't', platform: 'android' as const, serial: null, installEnabled: false,
+    capacity: 1, devices: ['b-serial'], quarantined: [{ serial: 'a-serial', reason: 'the device is not attached' }],
+  };
+  const note = poolNote(health);
+  assert.match(note, /\b1 serving/);
+  assert.match(note, /b-serial/);
+  assert.match(note, /a-serial \(the device is not attached\)/, "the shed phone is named, with the server's reason");
+  const empty = poolNote({ ...health, capacity: 0, devices: [], quarantined: undefined });
+  assert.match(empty, /\b0 serving/);
+  assert.doesNotMatch(empty, /ruled out/, 'nothing ruled out, nothing said');
+});
+
+test('a remote backend remembers an eviction the server marked on a FAILING step or read', async () => {
+  // The failing step is the only response that knows the run is over: it is a 200 carrying the
+  // phone's own error, and the client's next request is usually a release, which clears the
+  // server's mark. So the mark on the response itself is latched (#147).
+  const deviceError = { kind: 'CliError', name: 'CliError', message: "adb: device 'a' not found", exitCode: 3 };
+  let marked = false;
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const send = (status: number, body: unknown): void => {
+        const text = JSON.stringify(body);
+        res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) });
+        res.end(text);
+      };
+      if (req.url === '/v1/exec') return send(200, { code: 3, error: deviceError, ...(marked ? { evicted: true } : {}) });
+      return send(500, { error: deviceError.message, exitCode: 3, errorKind: 'CliError', evicted: true });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const health = { ok: true, version: 'test', platform: 'android' as const, serial: null, capacity: 2, installEnabled: false };
+  try {
+    const plain = createRemoteBackend({ url }, health);
+    assert.equal((await plain.exec('tap', ['@go'], {})).code, 3);
+    assert.equal(plain.wasEvicted?.(), false, 'an ordinary failed step is not an eviction');
+
+    marked = true;
+    const onStep = createRemoteBackend({ url }, health);
+    assert.equal((await onStep.exec('tap', ['@go'], {})).code, 3, "the step keeps the phone's own verdict");
+    assert.equal(onStep.wasEvicted?.(), true);
+
+    const onRead = createRemoteBackend({ url }, health);
+    await assert.rejects(async () => onRead.getElements(), (e: unknown) => e instanceof CliError && !(e instanceof RunEvictedError));
+    assert.equal(onRead.wasEvicted?.(), true, 'the error body carries it too');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test('describeStatus: an unknown kind from a newer server degrades, it does not throw', () => {

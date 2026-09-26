@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep, join } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
-import { CliError, SelectorNotFoundError, isEnvError } from './errors';
+import { CliError, RunEvictedError, SelectorNotFoundError, isEnvError } from './errors';
 import { runText, commandExists, spawnCollect } from './exec';
 import { getDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
 import { adbTransport, severanceRisk, lockKindOf } from './drivers/adb';
@@ -92,7 +92,7 @@ import { InvalidPlanError, Plan } from './agent/ir';
 import { ResolvedTest, Segment, resolveIncludes, segmentLabel } from './agent/include';
 import { DeviceChange, ErrorDescriptor, ExecBackend, HealthResponse, InstallSkip, describeError, rebuildError } from './rpc';
 import { DevicePoolSpec, csvList, parseDevicePool, poolSerials, resolvePoolPlatform } from './device/pool';
-import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
+import { createRemoteBackend, pingServer, poolNote, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
 import { cmdSuite, AiRunResult, Lane } from './suite';
 import { classifyFailure } from './device/failover';
 import { sleep, DEFAULT_BOOT_TIMEOUT_MS, DEFAULT_STOP_TIMEOUT_MS } from './wait';
@@ -2651,8 +2651,9 @@ async function prefetchArchiveLogs(backend: ExecBackend, noLogs = false): Promis
  * Run one natural-language test through a backend and return DATA — no stdout
  * writes (stdout stays the caller's one result; progress streams to stderr).
  * `vk ai` wraps it with its --json/report output; `vk suite` calls it per test.
+ * Exported for the unit suite.
  */
-async function runAiTest(
+export async function runAiTest(
   file: string,
   opts: AiOptions,
   backend: ExecBackend,
@@ -2699,7 +2700,18 @@ async function runAiTest(
   // (exit 3 for a broken device), which is what a caller reads as an environment
   // abort — the same verdict `vk suite`'s own reset failure produces.
   if (opts.resetApp) {
-    await backend.reset(opts.resetApp);
+    try {
+      await backend.reset(opts.resetApp);
+    } catch (e) {
+      // The phone this run was dealt had left the pool while idle, and the reset is the first
+      // request to find out — the one the server marks. That is the server's eviction, not a
+      // broken box: a suite re-runs it as a fresh run (#147). Thrown, because no run exists yet
+      // to carry a result.
+      if (isEnvError(e) && !(e instanceof RunEvictedError) && backend.wasEvicted?.()) {
+        throw new RunEvictedError(`the device this run was dealt had left the pool: ${(e as Error).message.split('\n')[0]}`);
+      }
+      throw e;
+    }
     err(`[ai] app state reset (${opts.resetApp})`);
   }
 
@@ -2747,13 +2759,42 @@ async function runAiTest(
       reason: (e as Error).message,
       kind: isEnvError(e as Error) ? 'env' : 'fail',
     });
+    let sealed: ReturnType<typeof Recorder.archive> | undefined;
     try {
       await prefetchArchiveLogs(backend);
-      Recorder.archive();
+      sealed = Recorder.archive();
     } catch (sealErr) {
       // Best-effort seal in an error path; surface a failure (the run state may itself be
       // unreadable) but still throw the ORIGINAL error below.
       err(`[ai] could not archive the run after a mid-run error (${(sealErr as Error).message})`);
+    }
+    // An EVICTION is the one mid-run throw that is a RESULT, not an error. The server ended
+    // this run because its phone left the pool — the run is not broken, it is over — and the
+    // caller needs what a result carries: the archive (how far it got, which phone) and the
+    // flag. A parallel suite re-runs it as a fresh run without spending a retry (#147); thrown,
+    // it reached the suite as a bare error with no report and no device. Still exit 3.
+    // An environment throw on a run the server evicted counts too: a worker that died mid-step
+    // answers with an error rather than a result, and the server marks that response.
+    if (e instanceof RunEvictedError || (isEnvError(e) && backend.wasEvicted?.())) {
+      const reason = (e as Error).message.split('\n')[0];
+      err(`[ai] ABORTED — environment: ${reason}`);
+      if (sealed) err(`[ai] report: ${sealed.htmlPath}`);
+      return {
+        ok: false,
+        cached,
+        costUsd: Number(cost.usd().toFixed(4)),
+        costLine: cost.summaryLine(),
+        modelRepairs: 0,
+        improvements: [],
+        planSteps: plan.steps.length,
+        runDir: sealed?.dir ?? '',
+        reportHtml: sealed?.htmlPath ?? '',
+        junitXml: sealed?.xmlPath ?? '',
+        state: sealed?.state ?? null,
+        failure: { where: 'run', reason },
+        abortedForEnv: true,
+        evicted: true,
+      };
     }
     throw e;
   } finally {
@@ -2807,6 +2848,11 @@ async function runAiTest(
     ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
     ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
     ...(result.abortedForEnv ? { abortedForEnv: true } : {}),
+    // The step that was running when the phone vanished failed with the phone's own error, and
+    // the server shed the phone while answering it: the eviction is heard only by the requests
+    // after it (the failure evidence and the log fetch above). Asked now, and only of an
+    // environment abort — an assertion that failed first is a regression whatever happened next.
+    ...(result.abortedForEnv && backend.wasEvicted?.() ? { evicted: true } : {}),
   };
 }
 
@@ -2867,6 +2913,8 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
       ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
       ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
       ...(result.abortedForEnv ? { abortedForEnv: true } : {}),
+      // The server ended the run because its phone left: start it again as a fresh run.
+      ...(result.evicted ? { evicted: true } : {}),
     });
   } else if (result.reportHtml) {
     out(result.reportHtml); // primary machine result: the report path
@@ -3189,6 +3237,12 @@ export function laneResult(
   const str = (k: string): string | undefined => (typeof parsed?.[k] === 'string' ? (parsed[k] as string) : undefined);
   const num = (k: string): number | undefined => (typeof parsed?.[k] === 'number' ? (parsed[k] as number) : undefined);
   const yes = (k: string): boolean => parsed?.[k] === true;
+  // The two lease outcomes a parallel suite must NOT read as a broken box (#147), both exit 3.
+  // Gated on the code too: the exit code is the verdict, and a kind never overrides it.
+  //  - refused at /v1/lease: the child never started a run, so it is no attempt at all;
+  //  - evicted part-way: usually a result document (the run archived), or a thrown one.
+  const noDevice = code === 3 && str('errorKind') === 'NoFreeDeviceError';
+  const evicted = code === 3 && (yes('evicted') || str('errorKind') === 'RunEvictedError');
   const raw = parsed?.failure;
   // A budget / timeout / environment abort comes back as a bare FLAG with no `failure`
   // object — the engine returns it that way, and `toSuiteResult` composes its own wording
@@ -3234,9 +3288,11 @@ export function laneResult(
     // check a TypeError in a new code path reads as an environment failure: the suite
     // probes the lane, finds it healthy, retries, and two in a row retire a perfectly good
     // device via ENV_STREAK_LIMIT.
-    ...((yes('abortedForEnv') || code === 3 || code === 127) && str('errorKind') !== 'Error'
+    ...((yes('abortedForEnv') || code === 3 || code === 127) && str('errorKind') !== 'Error' && !noDevice
       ? { abortedForEnv: true }
       : {}),
+    ...(noDevice ? { noDevice: true } : {}),
+    ...(evicted ? { evicted: true } : {}),
     // Exit 2 is verikun's USAGE code — a flag the child rejected, an unreadable test, a
     // payload the server refused. The serial path reaches this verdict from the thrown
     // CliError (`isRetryableThrow`); across a process boundary the throw is only an exit
@@ -3480,6 +3536,19 @@ async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): P
       claimLanes: (used) => grantLanes(used, platform, pool.elastic, grants),
       runTest: (file, lane) => runLaneTest(file, lane, flags, platform, app),
       preflight: (lane) => lanePreflight(lane, flags, platform),
+      // Is a phone free for this server lane? Asked of /v1/health, which leases nothing: a
+      // lease request that finds nothing free lets the server take over a sibling lane's
+      // quiet lease (see SuiteDeps.serverSlots). A server that does not answer is left for
+      // the lane's own child to report, exactly as before.
+      serverSlots: async (lane) => {
+        if (!lane.server) return undefined;
+        try {
+          const health = await pingServer(remoteOptsFrom(lane.server, flags));
+          return { capacity: health.capacity ?? 1, note: poolNote(health) };
+        } catch {
+          return undefined;
+        }
+      },
       // `reset` is deliberately NOT wired: against a pooled server a reset issued from
       // here would take its own lease and could land on a different device than the test
       // that follows. `vk ai --reset-app` does it inside the test's own lease instead.
@@ -3975,6 +4044,11 @@ SUITE (run a directory of natural-language tests as one gated suite)
                                       stops the suite once total model spend crosses
                                       it (exit 1). One merged report either way, with
                                       wall-clock reported apart from device time.
+                                      Over --server a lane with no free device waits
+                                      for one; a test whose device left the pool
+                                      re-runs without spending a retry. With no device
+                                      for any lane it stops after
+                                      VERIKUN_SUITE_DEVICE_WAIT_MIN (default 10; exit 3).
 
 SERVER (expose a locally-connected device to remote verikun clients)
   server [--bind addr] [--port n] [--auth-key k] [--devices all|all-android|all-ios|a,b]

@@ -185,6 +185,27 @@ A pool's own members are excluded from its failover candidates, so on `--devices
 
 Operator view: [Failover on a pool](/verikun/guides/remote-devices-and-ci/#failover-on-a-pool).
 
+## No device is not a failure
+
+A lane over `--server` is a slot, not a device, so a pool that sheds a phone has more lanes than
+phones.
+
+- **A refused lease is not an attempt.** `NoFreeDeviceError` is built only for `/v1/lease` (a
+  fresh run token can be refused, never evicted); the suite hands the test back to the front of
+  the queue and the lane waits — no row, no retry, no streak. Read as an environment failure it
+  failed tests that never ran and retired the lane.
+- **Ask `/v1/health`, not the lease.** A lease request that finds nothing free lets the server
+  take over any lease silent for 5 minutes — a sibling lane's included, mid-compile. The suite
+  checks capacity and reserves its slot with no `await` in between.
+- **An eviction is a result, never absorbed.** The server tags it (`RunEvictedError`), and
+  marks the failing response that caused it (`evicted`): the step that dies with the phone
+  keeps the phone's own error, and the client's next request may be only a release, which
+  clears the server's record. The client latches either signal; the engine rethrows the tag
+  past every catch that absorbs a failed read. `vk ai` returns it with its archive, and the
+  suite re-runs it without spending a retry, twice at most.
+- **Only the whole suite gives up**: no lane busy, nothing has run for
+  `VERIKUN_SUITE_DEVICE_WAIT_MIN`, and one last look after that deadline has also been refused.
+
 ## Recycling adb is host-global, so it needs evidence
 
 A long-lived adb server leaks IOKit Mach ports until it drops devices mid-run, and only a

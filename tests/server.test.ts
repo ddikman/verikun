@@ -1200,8 +1200,13 @@ test('failover on a pool: a device that is GONE leaves the pool, so no lease can
   assert.equal(health.degraded?.some((d) => d.serial === 'a') ?? false, false, 'not degraded — it is not a member');
   assert.ok(health.quarantined?.some((q) => q.serial === 'a'), 'ruled out, like any device that is not serving');
 
-  // The holder is evicted rather than silently re-homed: its flow ran partly on `a`.
-  assert.equal((await call('/v1/lease', { method: 'POST', body: '{}', token })).status, 409);
+  // The holder is evicted rather than silently re-homed: its flow ran partly on `a`. It is
+  // told which device went, so a suite's warning can name it rather than a lane slot (#147).
+  const evicted = await call('/v1/lease', { method: 'POST', body: '{}', token });
+  assert.equal(evicted.status, 409);
+  const why = (await evicted.json()) as RpcErrorBody;
+  assert.equal(why.errorKind, 'RunEvictedError');
+  assert.match(why.error, /\ba left the pool/);
   // And nothing else can draw it either — which is the whole point.
   for (const t of ['run-C', 'run-D', 'run-E']) {
     const r = await call('/v1/lease', { method: 'POST', body: '{}', token: t });
@@ -1295,6 +1300,19 @@ test('failover: a --devices server sheds even its only device, because the sweep
   });
   assert.equal(r.status, 503, 'an empty pool is not contention — there is no run to wait for');
   assert.match(((await r.json()) as { error: string }).error, /last loss: a \(the device is not attached\)/);
+
+  // The run that HELD the phone is a different case: it lost its device part-way, and must be
+  // told so — tagged — however empty the pool now is, or a parallel suite counts it as an
+  // ordinary failure instead of re-running it as a fresh run (#147).
+  const holder = await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: 'run-A',
+  });
+  assert.equal(holder.status, 409);
+  const why = (await holder.json()) as RpcErrorBody;
+  assert.equal(why.errorKind, 'RunEvictedError');
+  assert.match(why.error, /\ba left the pool/);
 });
 
 test('failover: two devices failing at once never land on the SAME spare', async () => {
@@ -1556,6 +1574,54 @@ test('failover: a worker that dies unprompted still fails over', async () => {
   );
 });
 
+test('exec: the step whose failure evicted its run SAYS so; a demoted device keeps its run', async () => {
+  // MEASURED on hardware (#147): the step running when a phone vanishes fails with the phone's
+  // own error, and only while answering it does the server shed the phone and evict the run.
+  // Unmarked, nothing tells the client — its next request is usually a release, which clears
+  // the eviction. So the failing response itself carries it.
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start(
+    { serials: ['a', 'b'], poolSpec: { all: false, serials: ['a', 'b'] }, reconcileMs: 0, failover: { allowedTargets: [] }, lifecycle: lc },
+    { a: deadDevice(), b: sickDevice() },
+  );
+  const holder: Record<string, string> = {};
+  for (const token of ['run-1', 'run-2']) {
+    const r = (await (await call('/v1/lease', { method: 'POST', body: '{}', token })).json()) as { serial: string };
+    holder[r.serial] = token;
+  }
+  const tap = async (token: string) =>
+    (await (await call('/v1/exec', {
+      method: 'POST',
+      body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+      token,
+    })).json()) as ExecResponse;
+  const gone = await tap(holder.a);
+  assert.equal(gone.code, 3, "the step keeps the phone's own verdict");
+  assert.equal(gone.evicted, true, 'and says the run is over');
+  const sick = await tap(holder.b);
+  assert.equal(sick.code, 3);
+  assert.equal(sick.evicted, undefined, 'a device that is still there is demoted, and its run carries on');
+});
+
+test('exec: a step whose worker DIED marks the eviction on the error body too', async () => {
+  const { lc } = fakeLifecycle({ list: () => attached('a', 'b') });
+  await start({
+    serials: ['a', 'b'], poolSpec: { all: false, serials: ['a', 'b'] }, reconcileMs: 0,
+    failover: { allowedTargets: [] }, lifecycle: lc, dies: 'a',
+  });
+  const leased = (await (await call('/v1/lease', { method: 'POST', body: '{}', token: 'run-1' })).json()) as { serial: string };
+  assert.equal(leased.serial, 'a');
+  const res = await call('/v1/exec', {
+    method: 'POST',
+    body: JSON.stringify({ command: 'tap', positionals: ['text:Login'], flags: {} }),
+    token: 'run-1',
+  });
+  assert.equal(res.status, 500, "the step keeps the dead worker's own error");
+  const body = (await res.json()) as RpcErrorBody;
+  assert.equal(body.evicted, true);
+  assert.match(body.error, /no longer available/);
+});
+
 test('install: refused while a device-control op holds the server', async () => {
   // `othersActive` must respect the exclusive latch: a control op holds every device but
   // need hold no ordinary lease, so a check that only reads `leases` would let an install
@@ -1671,6 +1737,28 @@ test('lease: a device IS reclaimed from an idle run, but only when somebody need
   const back = await lease('run-crashed');
   assert.equal(back.status, 409);
   assert.match(((await back.json()) as RpcErrorBody).error, /cannot continue on another device/);
+});
+
+test('lease: an evicted run is TAGGED and told what it lost; a merely busy pool is not tagged', async () => {
+  // A parallel suite re-runs an evicted test without spending a retry, but hands a refused
+  // one back to its queue — and the tag is the only thing that tells them apart (#147).
+  // Contention must stay untagged, or every busy pool would read as a run that lost its phone.
+  await start({ serials: ['only'], idleMs: 30 });
+  const lease = (token: string) => call('/v1/lease', { method: 'POST', body: '{}', token });
+  assert.equal((await lease('run-crashed')).status, 200);
+  const busy = await lease('run-next');
+  assert.equal(busy.status, 409);
+  assert.equal(((await busy.json()) as RpcErrorBody).errorKind, undefined, 'contention is not an eviction');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await lease('run-next')).status, 200);
+
+  const back = await lease('run-crashed');
+  assert.equal(back.status, 409);
+  const body = (await back.json()) as RpcErrorBody;
+  assert.equal(body.errorKind, 'RunEvictedError');
+  assert.match(body.error, /only/, 'names the device the run lost');
+  assert.match(body.error, /idle/, 'and why it lost it');
+  assert.match(body.error, /cannot continue on another device/);
 });
 
 test('install: an idle lease does not block the server forever', async () => {

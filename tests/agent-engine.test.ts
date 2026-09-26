@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { runPlan, EngineDeps, ExecFn, ExecOutcome } from '../src/agent/engine';
 import { Plan, PlanNode, LeafStep, IfPresentNode, RepeatNode } from '../src/agent/ir';
-import { SelectorNotFoundError, AmbiguousSelectorError, DumpKilledError, NoWindowError, envError } from '../src/errors';
+import { SelectorNotFoundError, AmbiguousSelectorError, DumpKilledError, NoWindowError, RunEvictedError, envError } from '../src/errors';
 import { CostTracker } from '../src/agent/cost';
 import { AgentProvider } from '../src/agent/provider';
 import { makeEl, asLeaf } from './helpers';
@@ -699,6 +699,53 @@ test('runPlan: an exit-3 CliError aborts for ENV and never wakes the model', asy
   // that only know about `failure` keep working unchanged.
   assert.equal(r.failure?.where, 'steps[0]');
   assert.match(r.failure?.reason ?? '', /idb/);
+});
+
+// --- an evicted run stops at once, whichever call noticed (#147) ---------------------
+//
+// The server ended the run: its phone left the pool. Every later call is refused the same
+// way, and a parallel suite re-runs the test as a fresh run for free — but only if the class
+// reaches it. Three catch sites used to absorb it as a failed READ.
+
+const evictedError = () => new RunEvictedError('verikun server ended this run (409): this run lost its device (a): a left the pool.');
+
+test('runPlan: an eviction at a GUARD escapes the run — never "absent", never a blind-guard abort', async () => {
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  await assert.rejects(
+    () =>
+      runPlan(
+        plan({ type: 'if-present', selector: 'text:Go', body: [leaf('tap', ['@go'])] }),
+        deps({ exec: fn, getElements: () => { throw evictedError(); } }),
+      ),
+    (e: unknown) => e instanceof RunEvictedError,
+  );
+  assert.equal(calls.length, 0, 'the body never ran on a phone that is gone');
+});
+
+test('runPlan: an eviction during a READ escapes the run instead of failing the step', async () => {
+  // Read as an empty tree, it became "read found no element" — a FAIL, reported as a regression.
+  await assert.rejects(
+    () =>
+      runPlan(
+        plan({ type: 'read', selector: '@correct', field: 'text', into: 'answer' }),
+        deps({ getElements: () => { throw evictedError(); } }),
+      ),
+    (e: unknown) => e instanceof RunEvictedError,
+  );
+});
+
+test('runPlan: an eviction while gathering REPAIR context escapes — no model call, no "repair failed"', async () => {
+  const { fn } = execFrom([{ code: 1, error: new SelectorNotFoundError('miss') }, { code: 0 }]);
+  const counter = { n: 0 };
+  await assert.rejects(
+    () =>
+      runPlan(
+        plan(leaf('tap', ['@x'])),
+        deps({ exec: fn, getElements: () => { throw evictedError(); }, provider: fakeProvider(leaf('tap', ['@ok']), counter) }),
+      ),
+    (e: unknown) => e instanceof RunEvictedError,
+  );
+  assert.equal(counter.n, 0, 'nothing is spent repairing a run that cannot continue');
 });
 
 test('runPlan: an assertion failure is NOT an env abort (it is a real regression)', async () => {

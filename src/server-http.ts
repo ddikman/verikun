@@ -21,6 +21,8 @@ export class HttpError extends Error {
      *  copied across, so a `NoWindowError` reached the client as a bare `CliError`. Carry it
      *  here and the outer catch can put it on the wire. */
     readonly errorKind?: ErrorDescriptor['kind'],
+    /** This request's failure evicted the caller's run (see ExecResponse.evicted). */
+    readonly evicted?: boolean,
   ) {
     super(message);
     this.name = 'HttpError';

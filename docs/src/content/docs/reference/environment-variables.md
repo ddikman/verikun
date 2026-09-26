@@ -74,6 +74,7 @@ to return to the client.
 | `VERIKUN_SHOT_MAX_EDGE` | `700` | Default screenshot longest-edge cap in pixels. Ignored unless finite and ≥ 1. |
 | `VERIKUN_COMPANION` | on | The [Android companion](/verikun/guides/companion/) is used by default; `0` (or `false`/`off`/`no`) turns it off, at the cost of far slower hierarchy reads. Under `--server` it is read in the **server's** environment, since that is where reads execute. |
 | `VERIKUN_GUARD_SETTLE_MS` | — | `vk ai` `if-present` guard settle window. `0` makes a guard look once. |
+| `VERIKUN_SUITE_DEVICE_WAIT_MIN` | `10` | Minutes a [parallel `vk suite --server`](/verikun/guides/suites/#running-across-several-devices) waits when **no** lane can get a device — every one left the pool, or other runs hold them all — before it stops with exit `3`. `0` stops at once. A lane waiting while another lane still runs is not bounded by it. |
 | `VERIKUN_NO_COMPILE_CHECK` | unset | Set to `1` to stop `vk ai` checking that a fresh compile [covers its test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test). A plan that covers only the start of the test is then run and cached like any other. |
 
 Screenshot precedence is `--full` > `--max <px>` > `--more` > `VERIKUN_SHOT_MAX_EDGE` > the
