@@ -55,6 +55,7 @@ as a failure by every `set -e` script.
 | `assert` predicate false | `1` |
 | `wait` timed out | `1` |
 | Element has no reachable on-screen pixel | `1` |
+| `text`'s value not in the field after one retype (Android) | `1` |
 | `run archive` where the run contained failures | `1` |
 | A `vk ai` compile that does not cover its test | `1` |
 | Tool missing, no usable device, dump/screencap failed | `3` |

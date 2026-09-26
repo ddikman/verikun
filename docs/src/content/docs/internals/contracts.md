@@ -16,6 +16,7 @@ violated.
 | Selector **miss** — `SelectorNotFoundError`, exit `1` | Heals: the element moved or was relabelled |
 | Selector **ambiguity** — `AmbiguousSelectorError`, exit `2` | Heals: the model can disambiguate from the live screen |
 | **`assert` failure** | **Terminal** — healing it would mask the regression the test exists to catch |
+| **`text` value did not land** — plain `CliError`, exit `1` | **Terminal** — a repair would type into some other field and pass |
 | Model **`give_up`** | **Terminal** — a fallback tap onto an unrelated screen would pass as a false green |
 | Budget / timeout abort | **Terminal** — a bound that heals is not a bound |
 | Environment error, exit `3` | **Aborts**, not recorded as a regression |

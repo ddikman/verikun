@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-27
+
+### Fixed
+- **`vk text`** no longer re-taps a field that already has focus, which let SwiftKey drop the whole
+  value while `text` exited `0`. ([#151])
+
+### Changed
+- **`vk text` on Android** reads the field back, retypes once, and exits `1` if the value is still
+  missing; use `tap` + `type` for fields that reformat input. ([#151])
+
+[#151]: https://github.com/ddikman/verikun/issues/151
+
 ## [0.30.0] - 2026-09-26
 
 ### Fixed

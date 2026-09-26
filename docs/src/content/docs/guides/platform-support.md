@@ -50,7 +50,7 @@ What varies on Android is the **device**, and three differences bite in practice
 <tr><td><code>log</code> / <code>logs</code></td><td>✅ <code>logcat</code></td><td>✅</td><td>✅ via <code>log show</code></td><td>❌ <code>3</code></td></tr>
 <tr><th colspan="5">Act</th></tr>
 <tr><td><code>tap</code> / <code>click</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
-<tr><td><code>text</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--clear</code> unreliable</td><td>⚠️ <code>--clear</code> unreliable</td></tr>
+<tr><td><code>text</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--clear</code> unreliable, not read back</td><td>⚠️ <code>--clear</code> unreliable, not read back</td></tr>
 <tr><td><code>type</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>key</code></td><td>✅</td><td>✅</td><td>⚠️ different key set</td><td>⚠️ different key set</td></tr>
 <tr><td><code>back</code></td><td>✅</td><td>✅</td><td>❌ <code>2</code> — no hardware Back</td><td>❌ <code>2</code> — no hardware Back</td></tr>
@@ -92,7 +92,8 @@ Notes on the rows that carry a caveat:
   and `find` are unaffected; only the indentation is lost.
 - **`text --clear` is Android in practice.** It sizes the deletion from the element's `text`,
   and on iOS that is the accessibility *label*, not the field's contents, so the deletion is
-  the wrong length. There is also no way to read back what was typed.
+  the wrong length. There is also no way to read back what was typed, so `text` cannot check
+  that the value landed as it does on Android.
 - **`key` covers a different set per platform.** Android-only: `back`, `menu`, `search`,
   `center`, `app_switch` / `recents`, `volume_up`, `volume_down`, `mute`. iOS-only: `lock`,
   `side_button`, `siri`, `apple_pay`. An unknown key exits `2` listing what is available.

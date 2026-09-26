@@ -35,7 +35,7 @@ import type { Element, Viewport } from '../types';
 export const MIN_BARRIER_COVERAGE = 0.4;
 
 /** Input classes `isInteresting()` keeps even when empty — a field is never inert. */
-const INPUT_CLASS = /EditText|AutoComplete|TextField|Edit$/;
+export const INPUT_CLASS = /EditText|AutoComplete|TextField|Edit$/;
 
 /**
  * Nothing to read and nothing to act on: a layout container, with or without an id.

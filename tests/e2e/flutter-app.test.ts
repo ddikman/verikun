@@ -302,14 +302,33 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
 
       const after = byId(ui(), 'vk_user')?.text ?? '';
       assert.ok(!after.includes(original), `--clear left the old value behind: ${after}`);
-      assert.ok(after.startsWith('replaced@example.com'), `unexpected value: ${after}`);
+      // Equality is what exit 0 now means: `text` reads the field back and retypes once
+      // when it does not hold exactly the value — which is also what absorbs the doubled
+      // final character `adb shell input text` intermittently produces here (#46).
+      assert.equal(after, 'replaced@example.com');
+    });
 
-      // Deliberately a prefix check, not equality. `adb shell input text`
-      // intermittently duplicates the final character on this hardware
-      // (~1 run in 3 produced "replaced@example.comm"). That is a real vk/Android
-      // typing artifact worth chasing separately — but it is NOT what this case
-      // is about, and asserting equality here would make the suite flaky for a
-      // reason unrelated to --clear's contract.
+    // #151: a plan taps a field and then types into it. The second tap used to restart the
+    // field's input session while the keyboard was still starting, and SwiftKey then dropped
+    // every key — while `text` exited 0.
+    test('text straight after a tap on the same field lands the value', { skip: !isAndroid }, () => {
+      openScreen('state');
+      for (let i = 1; i <= 5; i++) {
+        const value = `vk151-${i}`;
+        assert.equal(vk(['tap', '@vk_focus_field']).code, 0);
+        const typed = vk(['text', '@vk_focus_field', '--clear', value]);
+        assert.equal(typed.code, 0, typed.stderr);
+        assert.equal(byId(ui(), 'vk_focus_field')?.text, value, `attempt ${i}`);
+      }
+    });
+
+    test('a value that does not land exits 1 instead of a silent 0', { skip: !isAndroid }, () => {
+      openScreen('state');
+      // `adb shell input text` cannot type non-ASCII, so nothing lands (#85).
+      const r = vk(['text', '@vk_focus_field', '--clear', '日本語']);
+      assert.equal(r.code, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /did not land/);
+      assert.match(r.stderr, /non-ASCII/);
     });
   });
 

@@ -93,7 +93,9 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
 `@next` to appear.
 
 - `vk tap <selector|index>`  ·  `vk tap --at x,y`
-- `vk text <selector> "the text" [--clear] [--enter]` — focus the field, then type
+- `vk text <selector> "the text" [--clear] [--enter]` — focus the field, then type. On
+  Android it reads the field back and exits `1` if the value did not land (after one
+  retype); a field that reformats or rejects input needs `vk tap` + `vk type` instead
 - `vk type "text" [--enter]` — type into the already-focused field
 - `vk swipe up|down|left|right [--on <selector>] [--distance f] [--duration ms]`
 - `vk swipe --from x,y --to x,y [--duration ms]`
