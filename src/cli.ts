@@ -112,6 +112,7 @@ import {
 } from './commands/auto-wait';
 import { tokenizeLine, withBatchGlobals } from './commands/batch';
 import { cmdDevices, formatDeviceTable } from './commands/devices';
+import { enterText } from './commands/text-entry';
 
 // Exported for src/server.ts (which resolves its own platform/device at startup).
 export function platformFromFlags(flags: Flags): Platform {
@@ -284,6 +285,8 @@ interface ActionTarget {
   /** Where to press: inside the element's visible part, and clear of anything drawn
    *  over it where we can find such a point. */
   point: Point;
+  /** The snapshot `element` was resolved from. */
+  elements: Element[];
 }
 
 /** The screen as a rectangle, or null on a device whose size could not be read. */
@@ -331,7 +334,7 @@ async function resolveTappable(ctx: Ctx, sel: Selector, opts: { all?: boolean } 
     !!screen && !!clip && clip !== screen && isOccluded(elements, element, tapPoint(element, screen));
   if (!screen || !clip || (isFullyVisible(element.bounds, clip) && !covered)) {
     reachWarning(elements, element, screen);
-    return { element, tier, waitedMs, swipes: 0, point: pressPoint(elements, element, screen) };
+    return { element, tier, waitedMs, swipes: 0, point: pressPoint(elements, element, screen), elements };
   }
 
   const scrolled = flagBool(ctx.flags, 'no-scroll')
@@ -756,7 +759,7 @@ async function cmdText(ctx: Ctx): Promise<number> {
   }
   const sel = buildSelector(ctx, ctx.positionals[0]);
   const value = ctx.positionals.slice(1).join(' ');
-  const { element: target, tier, waitedMs, swipes, point } = await resolveTappable(ctx, sel);
+  const { element: target, tier, waitedMs, swipes, point, elements } = await resolveTappable(ctx, sel);
   ctx.record?.note({
     selector: sel,
     tier,
@@ -764,20 +767,9 @@ async function cmdText(ctx: Ctx): Promise<number> {
     message: target.password ? 'typed «redacted»' : `typed ${JSON.stringify(value)}`,
   });
 
-  ctx.driver.tap(point.x, point.y);
-  // Wait for field to be focused after tap
-  await sleep(100);
-  if (flagBool(ctx.flags, 'clear') && target.text) {
-    ctx.driver.pressKey('move_end');
-    for (let i = 0; i < target.text.length + 2; i++) ctx.driver.pressKey('del');
-    // Wait for field to settle after clearing before typing
-    await sleep(200);
-  }
-  // Prime the input method with a space, then delete it, to avoid losing first character
-  // (workaround for adb input text behavior where first char is sometimes lost)
-  ctx.driver.inputText(' ');
-  ctx.driver.pressKey('backspace');
-  ctx.driver.inputText(value);
+  // Focus, type and read the field back; throws exit 1 when the value did not land.
+  await enterText(ctx, { selector: sel.raw, target, elements, point, value, clear: flagBool(ctx.flags, 'clear') });
+  // After the check, never before: submitting clears many fields and navigates away.
   if (flagBool(ctx.flags, 'enter')) ctx.driver.pressKey('enter');
   out(
     `typed ${JSON.stringify(value)} into ${formatInline(target)}${healNote(tier)}${waitNote(waitedMs)}${scrollNote(swipes)}`,

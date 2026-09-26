@@ -183,15 +183,16 @@ vk type -- "-50% off"
 
 ### Emoji or non-Latin characters do not type
 
-On Android, `vk text` and `vk type` with non-ASCII input (CJK, accented Latin, emoji) exit
-`0` but the field stays empty — `adb input text` cannot deliver it, and nothing checks what
-landed ([#85](https://github.com/ddikman/verikun/issues/85)). ASCII is reliable.
+On Android, `adb input text` cannot deliver non-ASCII input (CJK, accented Latin, emoji), so
+the field stays empty: `vk text` exits `1`, and `vk type` exits `0`
+([#85](https://github.com/ddikman/verikun/issues/85)). ASCII is reliable.
 
 ### The last character is doubled
 
-`vk text` occasionally leaves a duplicated final character in the field, while reporting
-success ([#46](https://github.com/ddikman/verikun/issues/46)). Assert on the field's value
-with `--text` when it matters.
+`vk text` occasionally leaves a duplicated final character when it appends to a field that
+already holds text, while reporting success
+([#46](https://github.com/ddikman/verikun/issues/46)). Assert on the field's value with
+`--text` when it matters.
 
 ### The keyboard is covering the element I want to inspect
 

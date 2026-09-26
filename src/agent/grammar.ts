@@ -19,7 +19,10 @@ Each step is one of three node types:
                                   --no-restart skips the force-stop, just bringing it forward)
      stop <package>               — force-stop the app
      tap <selector>               — tap the element a selector resolves to (scrolls it into view first)
-     text <selector> <value...>   — focus a field and type value (--clear to clear first, --enter to submit)
+     text <selector> <value...>   — focus a field and type value (--clear to clear first, --enter to submit);
+                                  FAILS if the field does not then hold the value. For a field that
+                                  reformats or rejects input (masks, currency, invalid-input tests),
+                                  use tap <selector> then type <value...> instead
      type <value...>              — type into the already-focused field
      key <name> | back | home | enter
      swipe <up|down|left|right> [--on <selector>]  — scroll/swipe (up = scroll down the page)
