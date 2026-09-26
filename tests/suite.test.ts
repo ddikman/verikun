@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import {
   cmdSuite, sortTestFiles, listTestFiles, toSuiteResult, mergeSuiteAttempts, orderTests,
-  readDurationHints, laneCount, AiRunResult, SuiteDeps, Lane,
+  readDurationHints, laneCount, deviceWaitMs, AiRunResult, SuiteDeps, Lane,
 } from '../src/suite';
+import { laneResult } from '../src/cli';
 import { RunState, RunStep } from '../src/run';
 import { SuiteRun } from '../src/report';
 import { CliError, envError, usageError } from '../src/errors';
@@ -182,6 +183,16 @@ test('mergeSuiteAttempts: fail-then-pass is flaky, sums cost/duration, keeps pri
   assert.equal(merged.attempts![0].id, 'fail-1');
   assert.equal(merged.attempts![0].ok, false);
   assert.match(merged.attempts![0].failure ?? '', /assert failed/);
+});
+
+test('mergeSuiteAttempts: a pass after an EVICTION is not flaky — the phone left, the test did not flake', () => {
+  const evicted = toSuiteResult('t.md', aiResult({ ok: false, abortedForEnv: true, evicted: true, failure: { where: 'run', reason: 'a left the pool' } }), 400);
+  assert.equal(evicted.evicted, true, 'the attempt row says what happened to it');
+  const merged = mergeSuiteAttempts([evicted, toSuiteResult('t.md', aiResult({ ok: true }), 900)]);
+  assert.equal(merged.ok, true);
+  assert.equal(merged.flaky, undefined);
+  assert.equal(merged.attempts?.[0].evicted, true, 'kept as evidence, marked as an eviction');
+  assert.equal(merged.durationMs, 1300, 'its time still counts');
 });
 
 test('mergeSuiteAttempts: still-failing after retries keeps prior attempts but is not flaky', () => {
@@ -954,5 +965,476 @@ test('cmdSuite: a usage error from a lane is not retried', async () => {
     const code = await cmdSuite(dir, { retries: '3' }, deps);
     assert.equal(code, 1);
     assert.equal(attempts, 1, 'a rerun provably cannot change a usage error');
+  });
+});
+
+// --- a pool behind ONE vk server: lanes are slots, the server deals the phones (#147) ---
+//
+// Over `--server` a lane is a concurrency slot, not a device: every dispatch is a `vk ai`
+// child that leases whichever phone is free. When a phone leaves the pool the suite has more
+// slots than phones, and the slot that lost its phone must WAIT — never fail tests that never
+// got a device, never burn their retries, never retire. These stand in for the server and
+// its children; outcomes are built by the REAL `laneResult` from the documents a child
+// prints, so the suite sees exactly what production feeds it.
+
+const SERVER = 'http://srv:8391';
+const SLOTS: Lane[] = [
+  { id: 's1', label: 'srv:8391#1', server: SERVER },
+  { id: 's2', label: 'srv:8391#2', server: SERVER },
+];
+
+type Outcome = 'pass' | 'fail' | 'evict';
+interface PoolCtl {
+  shed(phone: string, why?: string): void;
+  readmit(phone: string): void;
+  /** A run OUTSIDE this suite takes (and later gives back) a phone. */
+  hold(phone: string): void;
+  release(phone: string): void;
+}
+
+function serverPool(o: {
+  /** Phones each server serves at the start. Default: one server with `a` and `b`. */
+  servers?: Record<string, string[]>;
+  /** Phones already ruled out at the start (they left before the suite began). */
+  ruledOut?: Record<string, string>;
+  lanes?: Lane[];
+  /** What a dispatch that GOT a phone does. Default: pass. */
+  script?: (x: { file: string; lane: Lane; phone: string; pool: PoolCtl }) => Outcome;
+  /** Wire `serverSlots` from the fake's own truth — the production shape. */
+  gated?: boolean;
+  deviceWaitMs?: number;
+  delayMs?: number;
+  /** Per-dispatch run time, when one phone must be slower than another. */
+  delay?: (phone: string) => number;
+}) {
+  const servers = o.servers ?? { [SERVER]: ['a', 'b'] };
+  const serving = new Map(Object.entries(servers).map(([url, phones]) => [url, new Set(phones)]));
+  const ruledOut = new Map(Object.entries(o.ruledOut ?? {}));
+  const held = new Set<string>();
+  const ran: Array<{ file: string; lane: string; phone: string; outcome: Outcome }> = [];
+  let refused = 0;
+  let maxLeased = 0;
+  let slotCalls = 0;
+  const pool: PoolCtl = {
+    shed(phone, why = 'the device is not attached') {
+      for (const set of serving.values()) set.delete(phone);
+      ruledOut.set(phone, why);
+    },
+    readmit(phone) {
+      ruledOut.delete(phone);
+      const [first] = serving.values();
+      first.add(phone);
+    },
+    hold: (phone) => void held.add(phone),
+    release: (phone) => void held.delete(phone),
+  };
+  const note = (url: string): string => {
+    const phones = [...(serving.get(url) ?? [])];
+    const out = [...ruledOut].map(([p, why]) => `${p} (${why})`).join(', ');
+    return `pool: ${phones.length} serving (${phones.join(', ')})${out ? `; ruled out: ${out}` : ''}`;
+  };
+  const deps: SuiteDeps = {
+    platform: 'android',
+    lanes: o.lanes ?? SLOTS,
+    probeRetryMs: 0,
+    deviceWaitMs: o.deviceWaitMs ?? 5_000,
+    // The server answers, which is exactly why the old probe called every refusal a blip.
+    preflight: () => {},
+    runTest: async (file, lane) => {
+      const url = lane.server!;
+      const phone = [...(serving.get(url) ?? [])].find((p) => !held.has(p));
+      if (!phone) {
+        refused += 1;
+        return laneResult(
+          3,
+          {
+            error: `verikun server device is busy (409): all devices are leased by other active runs. [${note(url)}]`,
+            exitCode: 3,
+            errorKind: 'NoFreeDeviceError',
+          },
+          '',
+          lane,
+        );
+      }
+      held.add(phone);
+      maxLeased = Math.max(maxLeased, held.size);
+      try {
+        await new Promise((r) => setTimeout(r, o.delay?.(phone) ?? o.delayMs ?? 5));
+        const outcome = o.script?.({ file: basename(file), lane, phone, pool }) ?? 'pass';
+        ran.push({ file: basename(file), lane: lane.id, phone, outcome });
+        if (outcome === 'evict') {
+          pool.shed(phone);
+          return laneResult(
+            3,
+            {
+              ok: false,
+              abortedForEnv: true,
+              evicted: true,
+              device: phone,
+              failure: { where: 'run', reason: `verikun server ended this run (409): this run lost its device (${phone}): ${phone} left the pool` },
+            },
+            '',
+            lane,
+          );
+        }
+        if (outcome === 'fail') {
+          return laneResult(1, { ok: false, device: phone, failure: { where: 'steps[0]', reason: 'assert failed' } }, '', lane);
+        }
+        return laneResult(0, { ok: true, device: phone }, '', lane);
+      } finally {
+        held.delete(phone);
+      }
+    },
+    ...(o.gated
+      ? {
+          serverSlots: async (lane: Lane) => {
+            slotCalls += 1;
+            return { capacity: serving.get(lane.server!)?.size ?? 0, note: note(lane.server!) };
+          },
+        }
+      : {}),
+  };
+  return { deps, pool, ran, stats: () => ({ refused, maxLeased, slotCalls }) };
+}
+
+function lastManifest(root: string): SuiteRun {
+  const suites = join(root, '.verikun', 'suites');
+  return readManifest(join(suites, readdirSync(suites).sort().pop()!));
+}
+
+/** The issue's timeline: the first test dealt phone `a` loses it mid-run; the sweep
+ *  readmits `a` after the surviving phone has passed two more tests. */
+function issue147Script() {
+  let shed = false;
+  let passesSince = 0;
+  return ({ phone, pool }: { phone: string; pool: PoolCtl }): Outcome => {
+    if (!shed && phone === 'a') {
+      shed = true;
+      return 'evict';
+    }
+    if (shed && ++passesSince === 2) pool.readmit('a');
+    return 'pass';
+  };
+}
+
+for (const gated of [false, true]) {
+  test(`cmdSuite: a phone leaving a pooled server costs no test and no lane (#147, ${gated ? 'gated' : 'ungated'})`, async () => {
+    await inTempCwd(async (root) => {
+      const dir = suiteDir(root, 6);
+      // 30ms tests, so the surviving phone is still busy when the waiting lane next looks
+      // after the readmission — otherwise the queue drains first and nothing proves it rejoined.
+      const { deps, ran, stats } = serverPool({ script: issue147Script(), gated, delayMs: 30 });
+      // --retries 0 on purpose: a phone leaving must not cost a test even with no retries.
+      const code = await cmdSuite(dir, {}, deps);
+      const suite = lastManifest(root);
+      const failed = suite.tests.filter((t) => !t.ok).map((t) => `${t.file}: ${t.failure}`);
+      assert.deepEqual(failed, [], 'no test fails for a phone that left');
+      assert.equal(code, 0, 'a device blip is not a red gate');
+      assert.equal(suite.tests.length, 6, 'every test has exactly one row');
+      assert.equal(suite.aborted, undefined);
+
+      const reRun = suite.tests.filter((t) => t.attempts?.length);
+      assert.equal(reRun.length, 1, 'only the interrupted test was re-run');
+      assert.equal(reRun[0].attempts?.[0].evicted, true, 'the evicted attempt is kept as evidence');
+      assert.equal(reRun[0].flaky, undefined, 'a phone leaving is not the test being flaky');
+
+      const warnings = suite.warnings ?? [];
+      assert.equal(warnings.some((w) => /retired/.test(w)), false, `no lane is retired: ${warnings.join(' | ')}`);
+      assert.ok(warnings.some((w) => /\ba left the pool/.test(w)), `the phone that left is named: ${warnings.join(' | ')}`);
+      assert.ok(
+        ran.some((r) => r.phone === 'a' && r.outcome === 'pass'),
+        'once readmitted, the phone is dealt work again',
+      );
+      if (gated) {
+        // Knowing the capacity, the suite never even asks for a lease it cannot get — a lease
+        // request that finds nothing free is what lets the server take over a quiet sibling.
+        assert.equal(stats().refused, 0, 'no refused lease was ever requested');
+      }
+      assert.ok(stats().maxLeased <= 2);
+    });
+  });
+}
+
+test('cmdSuite: a refused lease spends no retry, records no row, and ticks no streak', async () => {
+  await inTempCwd(async (root) => {
+    // One phone, two slots: the second slot is refused over and over while the first works.
+    const dir = suiteDir(root, 4);
+    const { deps, stats } = serverPool({ servers: { [SERVER]: ['a'] } });
+    const code = await cmdSuite(dir, {}, deps);
+    const suite = lastManifest(root);
+    assert.equal(code, 0);
+    assert.ok(stats().refused > 0, 'the refusals really happened');
+    assert.equal(suite.tests.length, 4);
+    assert.ok(suite.tests.every((t) => t.ok && !t.attempts), 'each test ran once, green');
+    assert.equal((suite.warnings ?? []).some((w) => /retired/.test(w)), false);
+  });
+});
+
+test('cmdSuite: a retry that is refused goes back to the queue with its first attempt', async () => {
+  await inTempCwd(async (root) => {
+    // 01 fails once on a real assertion; its retry is refused (the phone is shed at that
+    // moment), so the file must travel back WITH that attempt and its remaining retries.
+    const dir = suiteDir(root, 2);
+    let firstFail = true;
+    const { deps, pool } = serverPool({
+      servers: { [SERVER]: ['a', 'b'] },
+      script: ({ file, phone, pool: p }) => {
+        if (file === '01-t.md' && firstFail) {
+          firstFail = false;
+          p.shed(phone === 'a' ? 'b' : 'a'); // the other phone leaves: no free device for the retry
+          setTimeout(() => p.readmit(phone === 'a' ? 'b' : 'a'), 60);
+          return 'fail';
+        }
+        return 'pass';
+      },
+    });
+    void pool;
+    const code = await cmdSuite(dir, { retries: '1' }, deps);
+    const suite = lastManifest(root);
+    const first = suite.tests.find((t) => t.file === '01-t.md')!;
+    assert.equal(code, 0);
+    assert.equal(first.ok, true);
+    assert.equal(first.attempts?.length, 1, 'the real failure is kept');
+    assert.equal(first.flaky, true, 'and a real failure that later passed IS a flake');
+  });
+});
+
+test('cmdSuite: evictions are re-run for free only twice — the third counts', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 1);
+    let runs = 0;
+    const { deps } = serverPool({
+      script: ({ phone, pool }) => {
+        runs += 1;
+        setTimeout(() => pool.readmit(phone), 1); // the phone keeps coming back, and leaving
+        return 'evict';
+      },
+    });
+    const code = await cmdSuite(dir, {}, deps);
+    const [row] = lastManifest(root).tests;
+    assert.equal(runs, 3, 'two free re-runs, then the eviction is an ordinary attempt');
+    assert.equal(code, 1);
+    assert.equal(row.ok, false);
+    assert.equal(row.attempts?.length, 2);
+    assert.ok(row.attempts?.every((a) => a.evicted));
+  });
+});
+
+test('cmdSuite: when NO lane can get a device the suite stops after the wait — exit 3, nothing failed', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 3);
+    const { deps, ran } = serverPool({
+      servers: { [SERVER]: [] },
+      ruledOut: { a: 'the device is not attached' },
+      gated: true,
+      deviceWaitMs: 200,
+    });
+    const t0 = Date.now();
+    const code = await cmdSuite(dir, {}, deps);
+    const suite = lastManifest(root);
+    assert.equal(code, 3, 'the environment, not the app');
+    assert.equal(suite.aborted?.kind, 'environment');
+    assert.match(suite.aborted?.reason ?? '', /ruled out: a \(the device is not attached\)/);
+    assert.deepEqual(suite.aborted?.notRun, ['01-t.md', '02-t.md', '03-t.md'], 'never run, never failed');
+    assert.equal(suite.tests.length, 0);
+    assert.equal(ran.length, 0, 'no child was spent asking');
+    assert.ok(Date.now() - t0 < 3_000, 'bounded by the wait, not by the probe backoff');
+  });
+});
+
+test('cmdSuite: a zero wait stops at once when blocked, yet still waits while a lane is working', async () => {
+  await inTempCwd(async (root) => {
+    const blocked = suiteDir(root, 2);
+    const stuck = serverPool({ servers: { [SERVER]: [] }, gated: true, deviceWaitMs: 0 });
+    const t0 = Date.now();
+    assert.equal(await cmdSuite(blocked, {}, stuck.deps), 3);
+    assert.ok(Date.now() - t0 < 1_000, 'no waiting at all');
+  });
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 6);
+    const { deps } = serverPool({ script: issue147Script(), gated: true, deviceWaitMs: 0 });
+    assert.equal(await cmdSuite(dir, {}, deps), 0, 'the other lane is working, so this is not "blocked"');
+  });
+});
+
+test('cmdSuite: a test that ran once and was then refused is a row when the suite stops, not "not run"', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 3);
+    let once = true;
+    const { deps } = serverPool({
+      servers: { [SERVER]: ['a'] },
+      gated: true,
+      deviceWaitMs: 150,
+      script: ({ phone, pool }) => {
+        if (once) {
+          once = false;
+          pool.shed(phone); // its retry, and everything after, finds no phone at all
+          return 'fail';
+        }
+        return 'pass';
+      },
+    });
+    const code = await cmdSuite(dir, { retries: '1' }, deps);
+    const suite = lastManifest(root);
+    assert.equal(code, 3);
+    assert.equal(suite.tests.length, 1, 'the test that ran has its row');
+    assert.equal(suite.tests[0].ok, false);
+    assert.match(suite.tests[0].failure ?? '', /assert failed/);
+    assert.equal(suite.aborted?.notRun.includes(suite.tests[0].file), false, 'a file is in exactly one list');
+    assert.equal(suite.aborted?.notRun.length, 2);
+    assert.equal(suite.totals.passed + suite.totals.failed, suite.totals.tests);
+  });
+});
+
+test('cmdSuite: a lane waiting for a device does not hold the suite open once the work is done', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 3);
+    const { deps } = serverPool({ servers: { [SERVER]: ['a'] }, gated: true, deviceWaitMs: 60_000 });
+    const t0 = Date.now();
+    assert.equal(await cmdSuite(dir, {}, deps), 0);
+    assert.ok(Date.now() - t0 < 2_000, `finished in ${Date.now() - t0}ms, not after the 60s wait`);
+  });
+});
+
+test('cmdSuite: the device gate is per server — an empty one does not starve the other', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 3);
+    const A = 'http://a:8391';
+    const B = 'http://b:8391';
+    const { deps, ran } = serverPool({
+      servers: { [A]: [], [B]: ['b1'] },
+      lanes: [
+        { id: 's1', label: 'a:8391', server: A },
+        { id: 's2', label: 'b:8391', server: B },
+      ],
+      gated: true,
+      deviceWaitMs: 60_000,
+    });
+    assert.equal(await cmdSuite(dir, {}, deps), 0);
+    assert.deepEqual(ran.map((r) => r.phone), ['b1', 'b1', 'b1'], 'everything ran on the server that had a phone');
+  });
+});
+
+test('cmdSuite: local lanes are never gated', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 3);
+    let asked = 0;
+    const { deps } = poolHarness();
+    const code = await cmdSuite(dir, {}, {
+      ...deps,
+      serverSlots: async () => {
+        asked += 1;
+        return { capacity: 0, note: 'must never be consulted for a local device' };
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(asked, 0);
+  });
+});
+
+test('deviceWaitMs: VERIKUN_SUITE_DEVICE_WAIT_MIN in minutes, 0 allowed, junk falls back to 10', () => {
+  assert.equal(deviceWaitMs({}), 600_000);
+  assert.equal(deviceWaitMs({ VERIKUN_SUITE_DEVICE_WAIT_MIN: '0' }), 0);
+  assert.equal(deviceWaitMs({ VERIKUN_SUITE_DEVICE_WAIT_MIN: '2.5' }), 150_000);
+  for (const junk of ['abc', '-1', '', ' ']) {
+    assert.equal(deviceWaitMs({ VERIKUN_SUITE_DEVICE_WAIT_MIN: junk }), 600_000, `'${junk}'`);
+  }
+});
+
+/** Everything cmdSuite printed to stderr while `fn` ran. */
+async function stderrOf(fn: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(...String(chunk).split('\n').filter(Boolean));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = write;
+  }
+  return lines;
+}
+
+test('cmdSuite: a lane LOOKING for a device prints nothing for a refused look', async () => {
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 2);
+    // A job outside this suite holds the only phone, so the gate sees a serving phone, asks,
+    // and is refused — over and over — until that job lets go. Each refused look used to print
+    // `── (1/2) 01-t.md ──` for a test that never started, measured on hardware.
+    const { deps, pool, stats } = serverPool({ servers: { [SERVER]: ['a'] }, lanes: [SLOTS[0]], gated: true, deviceWaitMs: 5_000 });
+    pool.hold('a');
+    setTimeout(() => pool.release('a'), 250);
+    const lines = await stderrOf(() => cmdSuite(dir, {}, deps));
+    assert.ok(stats().refused >= 2, `the lane really was refused while it looked (${stats().refused})`);
+    const headers = lines.filter((l) => l.includes(' ── ')).map((l) => l.replace(/^.*── /, ''));
+    // The first dispatch announces at once — the lane has no reason yet to think it is blocked,
+    // and the "no free device … goes back to the queue" line follows it. After that the lane is
+    // LOOKING, and a look that is refused says nothing: one more header, when 01 really runs.
+    assert.deepEqual(headers, ['(1/2) 01-t.md ──', '(1/2) 01-t.md ──', '(2/2) 02-t.md ──']);
+    assert.ok(lines.some((l) => /no free device .* goes back to the queue/.test(l)));
+  });
+});
+
+test('cmdSuite: a server lane still says "retry k/N" before a retry', async () => {
+  // Every pooled `--server` suite is gated, and the gated header was idempotent — so after the
+  // first attempt announced itself, a retry's output streamed straight on from the failure's.
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 1);
+    let first = true;
+    const { deps } = serverPool({
+      gated: true,
+      script: () => {
+        if (!first) return 'pass';
+        first = false;
+        return 'fail';
+      },
+    });
+    const lines = await stderrOf(() => cmdSuite(dir, { retries: '1' }, deps));
+    assert.ok(lines.some((l) => /retry 1\/1 for 01-t\.md/.test(l)), lines.join('\n'));
+  });
+});
+
+test('cmdSuite: before giving up, a waiting lane takes one last look', async () => {
+  // Backing off toward 30 looks' worth of waiting, a lane's last look before the deadline could
+  // be half the wait old — so a phone that came back in between was never seen, and the suite
+  // exited 3 saying none had become free.
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 1);
+    const t0 = Date.now();
+    const { deps } = serverPool({ servers: { [SERVER]: ['a'] }, lanes: [SLOTS[0]], deviceWaitMs: 300 });
+    const code = await cmdSuite(dir, {}, {
+      ...deps,
+      // No phone until the wait has run out; from then on, one is free.
+      serverSlots: async () => ({ capacity: Date.now() - t0 >= 300 ? 1 : 0, note: 'pool: 0 serving' }),
+    });
+    assert.equal(code, 0, 'the last look found the phone');
+  });
+});
+
+test('cmdSuite: a look that ran a test ends the waiting spell, even if its phone then leaves too', async () => {
+  // The lane was WORKING while that test ran. Folding it into one long spell counted the test's
+  // own run time as waiting, and said nothing when the lane started waiting again.
+  await inTempCwd(async (root) => {
+    const dir = suiteDir(root, 4);
+    let evictions = 0;
+    const { deps } = serverPool({
+      gated: true,
+      // `b` is slow, so the other lane is still busy on it whenever `a` is lost.
+      delay: (phone) => (phone === 'b' ? 60 : 5),
+      script: ({ phone, pool }) => {
+        if (phone !== 'a' || evictions >= 2) return 'pass';
+        evictions += 1;
+        setTimeout(() => pool.readmit('a'), 30); // the sweep brings it back
+        return 'evict';
+      },
+    });
+    const code = await cmdSuite(dir, {}, deps);
+    const suite = lastManifest(root);
+    assert.equal(code, 0, suite.tests.map((t) => `${t.file}:${t.ok}:${t.failure ?? ''}`).join(' '));
+    assert.equal(evictions, 2, 'the phone really left twice');
+    const spells = (suite.warnings ?? []).filter((w) => /^srv:8391#1 waited .* for a free device/.test(w));
+    assert.equal(spells.length, 2, (suite.warnings ?? []).join(' | '));
   });
 });

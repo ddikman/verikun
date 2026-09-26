@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-26
+
+### Fixed
+- **`vk suite --server`** waits for a free device instead of failing tests that never got one, and
+  a waiting lane resumes when the pool recovers. ([#147])
+
+### Added
+- **`vk suite --server`** re-runs a test whose device left the pool mid-run without spending a
+  retry, up to twice; needs the matching `vk server`. ([#147])
+- **`VERIKUN_SUITE_DEVICE_WAIT_MIN`** (default `10`) caps how long a pooled suite waits when no lane
+  gets a device, busy pools included, then exits `3`; `0` fails fast. ([#147])
+
+### Changed
+- **`--json` errors** name a refused `vk server` lease `NoFreeDeviceError` and an evicted run
+  `RunEvictedError` in `errorKind`; exit codes are unchanged. ([#147])
+- **`vk ai --json`** reports a run whose device left the pool as an environment abort with
+  `evicted: true` and its report, instead of a bare error. ([#147])
+
+[#147]: https://github.com/ddikman/verikun/issues/147
+
 ## [0.29.1] - 2026-09-26
 
 ### Fixed

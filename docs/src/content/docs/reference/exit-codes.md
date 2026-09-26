@@ -96,7 +96,8 @@ line that exits non-zero and **propagates that line's exit code**. It therefore 
 | Environment aborted (`abortedForEnv`) | `3` |
 
 An environment abort is `3` so it is never read as a regression. A rejected compile is `1`,
-not `2`, so `vk suite --retries` retries it.
+not `2`, so `vk suite --retries` retries it. When a `vk server` ended the run because its device
+left the pool, `--json` also carries `evicted: true` — the run did not fail, so run it again.
 
 ## `vk suite`
 
@@ -108,7 +109,9 @@ not `2`, so `vk suite --retries` retries it.
 | `3` | Environment — the provider or device toolchain is unavailable, or the box broke mid-run |
 
 Retry interaction: a thrown **exit `2`** (usage) is the only non-retryable throw. Every other
-code, including `3`, is retried while attempts remain. A
+code, including `3`, is retried while attempts remain. Over `--server`, a test the server had no
+device for is not an attempt at all, and one whose device left the pool mid-run is re-run
+without spending one (at most twice). A
 [**budget abort**](/verikun/reference/cost/#the-budget) is never retried, since each attempt
 would get its own fresh ceiling; it exits `1` like any other failure, and `abortedForBudget`
 in `--json` is what tells them apart.
@@ -118,7 +121,9 @@ not finish. `index.json`'s `aborted.kind` says which of the two happened.
 
 Across a [pool](/verikun/guides/suites/#running-across-several-devices), a broken device
 retires its lane and its tests move to the others; `3` arrives only once **every** device is
-gone.
+gone, or no lane could get one for
+[`VERIKUN_SUITE_DEVICE_WAIT_MIN`](/verikun/reference/environment-variables/#tuning-behaviour)
+minutes.
 
 ## `vk server` — HTTP mapping
 
@@ -131,7 +136,7 @@ trigger rather than becoming a terminal failure.
 | `404` | `2` |
 | `413` | `2` |
 | `401` | `3` (auth failure, client-side) |
-| `409` | every device is leased by another run |
+| `409` | every device is leased by another run — or, with `errorKind: RunEvictedError`, this run's device left the pool |
 | `500` | `3` |
 
 Response bodies carry `{ error, exitCode, errorKind? }`. `errorKind` is the thrown error's

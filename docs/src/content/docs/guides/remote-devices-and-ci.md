@@ -211,9 +211,11 @@ concurrency:
   cancel-in-progress: false
 ```
 
-The `concurrency` group matters: a second job would get `409` rather than queueing, because
-a parallel suite leases every device the server has. `cancel-in-progress: false` means a
-queued run waits instead of killing the one holding the devices. To let two jobs share a
+The `concurrency` group matters: a parallel suite leases every device the server has, so a
+second job finds none free. Its `vk install --server` is refused with `409` at once; its suite
+waits for a device and exits `3` without running anything if none frees within
+`VERIKUN_SUITE_DEVICE_WAIT_MIN` (10 minutes). `cancel-in-progress: false` means a queued run
+waits instead of killing the one holding the devices. To let two jobs share a
 host, give each its own server (`--devices` naming disjoint serials, on different ports).
 
 Start with `workflow_dispatch` while you prove the setup, then add `pull_request` once the

@@ -136,6 +136,11 @@ point more devices buy nothing.
   retire a healthy device ([#107](https://github.com/ddikman/verikun/issues/107)).
 - **A device that breaks retires its lane.** Its remaining tests move to the others; the suite
   aborts (exit `3`) only when every device is gone.
+- **Over `--server`, a lane with no free device waits for one.** A test that never got a device
+  is not a failure, and a test whose device left the pool mid-run is re-run without spending a
+  retry (at most twice; needs the matching `vk server`). If no lane can get a device for
+  [`VERIKUN_SUITE_DEVICE_WAIT_MIN`](/verikun/reference/environment-variables/#tuning-behaviour)
+  minutes (default 10), the suite stops with exit `3` and lists what it did not run.
 - **`--ensure-device` is refused with `--devices`.** Its bare form boots "the one startable
   device", which may well be another lane's emulator — start the pool yourself with
   [`vk devices start`](/verikun/reference/commands/).

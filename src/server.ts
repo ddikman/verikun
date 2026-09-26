@@ -965,12 +965,15 @@ export function buildServer(config: ServerConfig): Server {
    * phone that is now gone, so continuing it elsewhere would produce a run whose steps
    * came from two devices while the report named one. A new run token (a rerun) is served
    * normally — this only closes the door on the run that was interrupted.
+   *
+   * Each keeps what it lost and why, because the run is TOLD: its 409 names the device, and a
+   * parallel suite's warning then names the phone that left rather than a lane slot (#147).
    */
-  const evicted = new Set<string>();
+  const evicted = new Map<string, { serial?: string; why: string }>();
 
   /**
    * Bounded, because on a long-lived CI server every interrupted run leaves an entry and
-   * only its own `/v1/release` ever removes one. A Set iterates in insertion order, so
+   * only its own `/v1/release` ever removes one. A Map iterates in insertion order, so
    * the front is the stalest — a client that died long ago and will never ask again.
    */
   const EVICTED_CAP = 512;
@@ -982,15 +985,15 @@ export function buildServer(config: ServerConfig): Server {
   function evict(token: string, why: string): void {
     const had = leases.get(token);
     leases.delete(token);
-    evicted.add(token);
+    evicted.set(token, { serial: had?.serial, why });
     // Every eviction is announced. This is the direct cause of the 409 a client then reads
-    // as an environment failure — and of the lane a suite retires over it — and it used to
-    // be the one lease transition that happened in complete silence, so a degrading run
-    // showed a burst of unexplained 409s with nothing anywhere connecting them to the
-    // device that left.
+    // (a parallel suite re-runs the test as a fresh run; an older client read it as an
+    // environment failure and retired a lane over it), and it used to be the one lease
+    // transition that happened in complete silence, so a degrading run showed a burst of
+    // unexplained 409s with nothing anywhere connecting them to the device that left.
     if (had) err(`[server] lease: run ${token.slice(0, 8)}… evicted from ${had.serial} — ${why}`);
     // `if`, not `while`: this adds exactly one entry, so at most one can be over.
-    if (evicted.size > EVICTED_CAP) evicted.delete(evicted.values().next().value as string);
+    if (evicted.size > EVICTED_CAP) evicted.delete(evicted.keys().next().value as string);
   }
 
   function evictHoldersOf(serial: string, why: string): void {
@@ -1096,14 +1099,19 @@ export function buildServer(config: ServerConfig): Server {
   let exclusive: string | null = null;
 
   function busyError(token?: string): HttpError {
-    if (token !== undefined && evicted.has(token)) {
+    const lost = token === undefined ? undefined : evicted.get(token);
+    if (lost) {
       // Named plainly, because "device is busy" would send the operator looking for a
-      // racing job that does not exist.
+      // racing job that does not exist. TAGGED, because the client cannot tell an eviction
+      // from contention any other way: a parallel suite re-runs an evicted test as a fresh
+      // run without spending a retry, but must never do that for a busy pool (#147).
       return new HttpError(
         409,
-        'the device this run was using left the pool and nothing healthy replaced it — ' +
+        `this run lost its device${lost.serial ? ` (${lost.serial})` : ''}: ${lost.why} — ` +
           'start a fresh run; this one cannot continue on another device',
         3,
+        undefined,
+        'RunEvictedError',
       );
     }
     // An empty pool never reaches here: the deviceless guard in the router answers 503 for
@@ -1193,7 +1201,7 @@ export function buildServer(config: ServerConfig): Server {
     }
   }
 
-  async function handleExec(handle: DeviceHandle, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function handleExec(handle: DeviceHandle, req: IncomingMessage, res: ServerResponse, token: string): Promise<void> {
     const body = await readBody(req, EXEC_BODY_CAP);
     let parsed: ExecRequest;
     try {
@@ -1233,7 +1241,12 @@ export function buildServer(config: ServerConfig): Server {
       });
     } catch (e) {
       const changed = await considerFailover(e, 'exec', handle);
-      throw changed ? new HttpError(500, (e as Error).message, e instanceof CliError ? e.exitCode : 3, changed) : e;
+      // Evicted by the failover this very failure triggered: say so on the error itself (#147).
+      const lost = evicted.has(token);
+      if (lost && !changed) {
+        throw new HttpError(500, (e as Error).message, e instanceof CliError ? e.exitCode : 3, undefined, describeError(e as Error).kind, true);
+      }
+      throw changed ? new HttpError(500, (e as Error).message, e instanceof CliError ? e.exitCode : 3, changed, undefined, lost || undefined) : e;
     }
     const { code, error, step, artifacts, logStart } = outcome;
     err(`[server] ${handle.serial} exec ${node.command} ${node.positionals.join(' ')} → exit ${code} (${Date.now() - t0}ms)`);
@@ -1250,6 +1263,10 @@ export function buildServer(config: ServerConfig): Server {
       code,
       ...(error ? { error } : {}),
       ...(deviceChanged ? { deviceChanged } : {}),
+      // The failover this failure triggered shed the device and evicted this run. MEASURED on
+      // hardware: this response is the only one that knows — the client's next request is
+      // usually its release, which clears the mark (#147).
+      ...(evicted.has(token) ? { evicted: true as const } : {}),
       ...(step ? { step } : {}),
       ...(artifacts && Object.keys(artifacts).length ? { artifacts: encodeArtifacts(artifacts) } : {}),
       ...(logStart ? { logStart } : {}),
@@ -1257,7 +1274,7 @@ export function buildServer(config: ServerConfig): Server {
     sendJson(res, 200, payload);
   }
 
-  async function handleElements(handle: DeviceHandle, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function handleElements(handle: DeviceHandle, req: IncomingMessage, res: ServerResponse, token: string): Promise<void> {
     await readBody(req, EXEC_BODY_CAP); // drain (the body is unused; keeps keep-alive sane)
     try {
       const elements = await handle.elements(); // CliError(3) on dump failure → 500 below
@@ -1271,7 +1288,8 @@ export function buildServer(config: ServerConfig): Server {
       // hierarchy from somewhere else is worse than an error. The client's connect probe
       // re-asks after a reported move — see remote.ts's preflight.
       const deviceChanged = await considerFailover(e, 'read', handle);
-      if (!deviceChanged) throw e;
+      const lost = evicted.has(token);
+      if (!deviceChanged && !lost) throw e;
       // describeError, not just .message/.exitCode: this wrap is on the path a mid-launch
       // NoWindowError takes, and the engine's guard tells "still drawing" from "box broken"
       // by class alone (issue #80).
@@ -1281,6 +1299,7 @@ export function buildServer(config: ServerConfig): Server {
         e instanceof CliError ? e.exitCode : 3,
         deviceChanged,
         describeError(e as Error).kind,
+        lost || undefined,
       );
     }
   }
@@ -1862,6 +1881,13 @@ export function buildServer(config: ServerConfig): Server {
       return;
     }
 
+    // A run that was EVICTED is told so first, however empty the pool has since become: it
+    // lost its phone part-way, which is not the same as a new run finding none, and a
+    // parallel suite re-runs only the former as a fresh run (#147). Shedding a pool's last
+    // device is exactly when both are true at once.
+    if (served.size === 0 && evicted.has(token) && (path === '/v1/exec' || path === '/v1/elements' || path === '/v1/logs')) {
+      throw busyError(token);
+    }
     // A deviceless server must not silently fail every command. In-memory check, so
     // the normal path is untouched. NOTE this fires only when the server NEVER
     // resolved a device — one that DIED mid-run still has a non-null binding and keeps
@@ -1907,8 +1933,8 @@ export function buildServer(config: ServerConfig): Server {
       const h = leasedHandle(token);
       return holdingLease(token, () => fn(h));
     };
-    if (req.method === 'POST' && path === '/v1/exec') return onLeasedDevice((h) => handleExec(h, req, res));
-    if (req.method === 'POST' && path === '/v1/elements') return onLeasedDevice((h) => handleElements(h, req, res));
+    if (req.method === 'POST' && path === '/v1/exec') return onLeasedDevice((h) => handleExec(h, req, res, token));
+    if (req.method === 'POST' && path === '/v1/elements') return onLeasedDevice((h) => handleElements(h, req, res, token));
     if (req.method === 'POST' && path === '/v1/logs') return onLeasedDevice((h) => handleLogs(h, req, res));
     if (req.method === 'POST' && path === '/v1/install') {
       if (!config.allowInstall) {
@@ -1985,6 +2011,7 @@ export function buildServer(config: ServerConfig): Server {
             exitCode: mapped.exitCode,
             ...(errorKind ? { errorKind } : {}),
             ...(mapped.deviceChanged ? { deviceChanged: mapped.deviceChanged } : {}),
+            ...(mapped.evicted ? { evicted: true as const } : {}),
           };
           sendJson(res, mapped.status, body);
         } else {

@@ -145,6 +145,45 @@ export const DUMP_KILLED_MESSAGE =
   'while an app starts, or another tool holding the one UiAutomation connection. This ' +
   'normally clears within seconds.';
 
+// --- Remote leases: a run that never got a device, and one that lost its device --------
+//
+// Both are exit 3 like any other environment failure — the exit-code contract does not move
+// and `isEnvError` still holds. They are classes only so a PARALLEL suite can tell them apart
+// from a broken box across a process boundary (`errorKind` in a lane child's --json). Read as
+// ordinary environment failures they were issue #147: a pool that lost one phone recorded
+// failures for tests that never ran, and retired a lane the server would have fed again
+// minutes later.
+
+/**
+ * A `vk server` refused this run a device: every device is leased (409) or none is serving
+ * (503). Built ONLY for `/v1/lease`, the call a run makes before it does anything, so it
+ * always means the test never started. `vk suite` hands such a test back to its queue and
+ * waits for a device instead of recording a failure.
+ */
+export class NoFreeDeviceError extends CliError {
+  constructor(message: string) {
+    super(message, 3);
+    this.name = 'NoFreeDeviceError';
+  }
+}
+
+/**
+ * The server ended this run part-way: its device left the pool, was taken over while the run
+ * sat idle, or was power-cycled — and a run is never re-homed onto another phone, because its
+ * earlier steps ran on this one. Only the server knows, so it TAGS the 409 (`errorKind`); an
+ * older server's eviction stays an ordinary environment failure.
+ *
+ * Nothing in the `vk ai` engine may absorb it: every later call is refused the same way, so a
+ * catch that treats it as a transient read turns a lost phone into an "absent" guard or a
+ * failed repair. `vk suite` re-runs the test as a fresh run without spending a retry.
+ */
+export class RunEvictedError extends CliError {
+  constructor(message: string) {
+    super(message, 3);
+    this.name = 'RunEvictedError';
+  }
+}
+
 /** Selector matched >1 element. Exit 2. Carries the candidates so the agent runner
  *  can ask the model to disambiguate (a heal trigger) instead of aborting. */
 export class AmbiguousSelectorError extends CliError {

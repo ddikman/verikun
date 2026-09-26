@@ -271,6 +271,9 @@ export interface SuiteAttempt {
   costUsd: number;
   /** Failure summary when not ok. */
   failure?: string;
+  /** The server ended this attempt because its phone left the pool. Re-run without spending
+   *  a retry, and never counted as a flake: the test did not fail, the device went away. */
+  evicted?: boolean;
 }
 
 export interface SuiteTestResult {
@@ -316,6 +319,8 @@ export interface SuiteTestResult {
   attempts?: SuiteAttempt[];
   /** True when this test passed only after one or more failed attempts. */
   flaky?: boolean;
+  /** This attempt ended because the server's phone left the pool (see SuiteAttempt.evicted). */
+  evicted?: boolean;
 }
 
 export interface SuiteRun {
@@ -431,7 +436,8 @@ const SUITE_STYLE = `
 function suiteAttemptLinks(attempts: SuiteAttempt[], linkBase: string): string {
   const links = attempts
     .map((a, i) => {
-      const label = `attempt ${i + 1}`;
+      // Said outright, so nobody goes looking for a flake in a test whose phone was unplugged.
+      const label = `attempt ${i + 1}${a.evicted ? ' (device left the pool)' : ''}`;
       if (!a.id) return htmlEsc(label);
       return `<a href="${htmlEsc(`${linkBase}runs/${encodeURIComponent(a.id)}/report.html`)}">${htmlEsc(label)}</a>`;
     })

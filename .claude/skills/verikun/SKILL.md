@@ -437,6 +437,8 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
 - **`3` also means the device toolchain is broken**, checked *before* anything is compiled
   (missing `adb`/`idb`, no device, an ambiguous target) and again if it breaks mid-run. Treat
   it as "fix the machine", never as a failing test — the message carries the install hint.
+  Exception: over `--server`, a `--json` result with `evicted: true` means the server's device
+  left the pool mid-run — nothing is broken; run the test again.
 
 ## Run a suite of tests (vk suite)
 
@@ -488,6 +490,9 @@ vk suite tests/ --app com.example.app --servers http://a:8391,http://b:8391
 - `--concurrency N` caps how many run at once — more devices on one host can thrash it.
   `--max-suite-cost-usd N` stops the suite once total model spend crosses it (exit `1`).
 - A device that breaks retires; its tests move to the others. Exit `3` only when all are gone.
+- Over `--server`, a lane with no free device waits instead of failing tests, and a test whose
+  device left the pool re-runs without spending a retry. With no device for any lane the suite
+  stops after `VERIKUN_SUITE_DEVICE_WAIT_MIN` (default 10) with exit `3` and a `notRun` list.
 - `--ensure-device` is refused with `--devices` — start the pool with `vk devices start`.
 
 ## Drive a remote device (--server)

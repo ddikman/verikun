@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { describeError, rebuildError } from '../src/rpc';
 import type { ExecResponse, RpcErrorBody } from '../src/rpc';
-import { CliError, SelectorNotFoundError, AmbiguousSelectorError, DumpKilledError, NoWindowError, dumpKilledMessage, isEnvError, envError } from '../src/errors';
+import {
+  CliError, SelectorNotFoundError, AmbiguousSelectorError, DumpKilledError, NoWindowError, NoFreeDeviceError, RunEvictedError,
+  dumpKilledMessage, isEnvError, envError,
+} from '../src/errors';
 import { makeEl } from './helpers';
 
 // The error codec is what lets the `vk ai` engine keep its heal-vs-terminal
@@ -102,6 +105,23 @@ test('rpc codec: DumpKilledError survives, and does not flatten into NoWindowErr
   assert.equal(rebuilt instanceof NoWindowError, false, 'a sibling, not the same signal');
   assert.equal((rebuilt as CliError).exitCode, 3);
   assert.match(rebuilt.message, /\(Killed\)$/, 'the device evidence rides along, unwrapped');
+});
+
+test('rpc codec: a refused lease and an eviction keep their classes, and stay exit 3', () => {
+  // A parallel suite reads these across a process boundary (`errorKind` in a lane child's
+  // --json) to decide "never ran — hand it back" vs "evicted — re-run it without spending a
+  // retry". Flattened into a bare CliError, both read as an ordinary environment failure,
+  // which is exactly the cascade of issue #147.
+  const refused = rebuildError(wire(describeError(new NoFreeDeviceError('verikun server device is busy (409): all 2 devices are leased'))));
+  assert.ok(refused instanceof NoFreeDeviceError, 'instanceof NoFreeDeviceError');
+  assert.equal(refused instanceof RunEvictedError, false);
+  const evicted = rebuildError(wire(describeError(new RunEvictedError('verikun server ended this run (409): a left the pool'))));
+  assert.ok(evicted instanceof RunEvictedError, 'instanceof RunEvictedError');
+  assert.equal(evicted instanceof NoFreeDeviceError, false);
+  for (const e of [refused, evicted]) {
+    assert.equal((e as CliError).exitCode, 3, 'the exit-code contract does not move');
+    assert.equal(isEnvError(e), true);
+  }
 });
 
 test('rpc wire: errorKind is optional on an error body — old servers simply omit it', () => {

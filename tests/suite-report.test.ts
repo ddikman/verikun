@@ -164,6 +164,19 @@ test('toSuiteHtml: a flaky test shows FLAKY, links prior attempts, and renders t
   assert.ok(html.includes('01-login.md passed on retry after 1 failed attempt'));
 });
 
+test('toSuiteHtml: an attempt whose phone left the pool is linked, and says so — it is not a flake', () => {
+  // A test re-run because its device left the pool passed on its own merits: the row is a
+  // PASS, and the earlier attempt is labelled for what it was rather than as a failure.
+  const reRun = result({
+    id: 'pass-2',
+    attempts: [{ id: 'evicted-1', ok: false, durationMs: 500, costUsd: 0.01, failure: 'aborted: environment — a left the pool', evicted: true }],
+  });
+  const html = toSuiteHtml(suite([reRun]), { linkBase: '../../' });
+  assert.ok(html.includes('href="../../runs/evicted-1/report.html"'), 'the partial run is linked');
+  assert.match(html, /device left the pool/);
+  assert.equal(html.includes('FLAKY'), false);
+});
+
 test('toSuiteHtml: the warnings banner escapes its text', () => {
   const s = { ...suite([result()]), warnings: ['saw <tag> & more'] };
   const html = toSuiteHtml(s);

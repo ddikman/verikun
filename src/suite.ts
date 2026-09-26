@@ -57,6 +57,12 @@ export interface AiRunResult {
   abortedForTimeout?: boolean;
   /** The test stopped because the ENVIRONMENT broke (exit 3), not because the app did. */
   abortedForEnv?: boolean;
+  /** The test never STARTED: the `vk server` refused it a device (every one leased, or none
+   *  serving). Not an attempt — the suite hands the file back to its queue and waits. */
+  noDevice?: boolean;
+  /** The server ended this run part-way because its device left (or was taken over). Also
+   *  `abortedForEnv`; the suite re-runs it as a fresh run without spending a retry. */
+  evicted?: boolean;
   /** The device that actually ran the test. Against a pooled `vk server` the caller
    *  asked for a URL, so only the lease ever knew this. */
   device?: string;
@@ -129,6 +135,37 @@ export interface SuiteDeps {
   /** Gap between the two health probes; defaults to PROBE_RETRY_MS. Exists so the unit
    *  suite can set 0 instead of sleeping a real second per abort case. */
   probeRetryMs?: number;
+  /**
+   * How many devices a SERVER lane's `vk server` is serving right now, plus one line naming
+   * what it has ruled out — or undefined for a local lane, or when the server did not answer
+   * (the lane's own child then reports that, exactly as it always did).
+   *
+   * Consulted before EVERY dispatch on a server lane, because asking for a lease is not a
+   * free way to find out. A lease request that finds nothing free makes the server take over
+   * any lease that has been quiet for five minutes (`leaseFor`) — and one of THIS suite's
+   * own lanes sits that quiet through a cold compile, since its lease is taken first.
+   */
+  serverSlots?: (lane: Lane) => Promise<{ capacity: number; note: string } | undefined>;
+  /** How long the suite waits when NO lane can get a device before it stops (exit 3).
+   *  Defaults to `deviceWaitMs()`; a seam so the unit suite need not wait ten minutes. */
+  deviceWaitMs?: number;
+}
+
+/** Default for `VERIKUN_SUITE_DEVICE_WAIT_MIN`. Long enough for the server to take over a
+ *  crashed client's idle lease (5 min) and for its sweep's first few readmission attempts. */
+const DEFAULT_DEVICE_WAIT_MIN = 10;
+
+/**
+ * How long a suite waits when NO lane can get a device — every phone left the pool, or other
+ * runs hold them all — before it stops with exit 3 and the unrun tests in `notRun`. `0` stops
+ * at once. A lane that waits while another lane is still working is never bounded by this:
+ * the queue drains through the working lane. Mirrors `claimTtlMs`, except that an empty
+ * value means "unset" rather than zero. Exported for the unit suite.
+ */
+export function deviceWaitMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.VERIKUN_SUITE_DEVICE_WAIT_MIN?.trim();
+  const n = raw ? Number(raw) : NaN;
+  return (Number.isFinite(n) && n >= 0 ? n : DEFAULT_DEVICE_WAIT_MIN) * 60_000;
 }
 
 /** Gap between the two health probes below. Long enough to outlast a USB
@@ -138,6 +175,22 @@ const PROBE_RETRY_MS = 1000;
 /** How often an idle lane re-checks the queue while another lane is still working.
  *  Only reached on the tail of a suite, and only when a requeue is still possible. */
 const IDLE_POLL_MS = 25;
+
+/** A lane waiting for a device re-checks at the probe cadence, doubling up to this many
+ *  cadences between checks — 30s in production, which is how quickly a readmitted phone is
+ *  noticed. Derived from `probeRetryMs` so the unit suite's cadence shrinks with it. */
+const PARK_BACKOFF_STEPS = 30;
+
+/** How long a lane that is LOOKING for a device holds a test's header. Whether the look got
+ *  a phone is only known when the child answers, and a refusal answers in well under a second
+ *  (one health read, one lease): printed at once, every refused look announced a test that
+ *  never started. */
+const PROBE_HEADER_DELAY_MS = 2_000;
+
+/** How many times ONE test may be re-run, without spending a retry, because the server
+ *  evicted it. Enough for two independent blips; a phone that keeps vanishing under the same
+ *  test is a problem worth a red row, so the next eviction counts as an ordinary attempt. */
+const MAX_FREE_RERUNS = 2;
 
 
 /**
@@ -274,6 +327,7 @@ export function toSuiteResult(file: string, r: AiRunResult, durationMs: number):
     ...(r.planSteps === undefined ? {} : { planSteps: r.planSteps }),
     modelRepairs: r.modelRepairs,
     ...(r.ok ? {} : { failure: failure ?? 'failed' }),
+    ...(r.evicted ? { evicted: true } : {}),
   };
 }
 
@@ -285,6 +339,7 @@ export function toSuiteAttempt(r: SuiteTestResult): SuiteAttempt {
     durationMs: r.durationMs,
     costUsd: r.costUsd,
     ...(r.failure ? { failure: r.failure } : {}),
+    ...(r.evicted ? { evicted: true } : {}),
   };
 }
 
@@ -299,7 +354,9 @@ export function mergeSuiteAttempts(attempts: SuiteTestResult[]): SuiteTestResult
   if (attempts.length === 1) return last;
   const round = (n: number) => Number(n.toFixed(4));
   const prior = attempts.slice(0, -1).map(toSuiteAttempt);
-  const flaky = last.ok && prior.some((a) => !a.ok);
+  // An eviction is not a flake: the phone left, the test did not fail. Counting it would send
+  // someone to stabilise a test whose only fault was being mid-run when a cable came loose.
+  const flaky = last.ok && prior.some((a) => !a.ok && !a.evicted);
   return {
     ...last,
     durationMs: attempts.reduce((a, t) => a + t.durationMs, 0),
@@ -398,6 +455,11 @@ export function laneCount(available: number, tests: number, flags: Flags): numbe
   return Math.max(1, Math.min(available, tests, n ?? available));
 }
 
+/** A wait, for a human: `10m`, `4.2m`, `12s`. */
+function duration(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 6_000) / 10}m` : `${Math.round(ms / 100) / 10}s`;
+}
+
 /** Consecutive environment failures that retire a lane even when the probe says the
  *  box is fine. The backstop for a POOL: `deps.preflight` on a remote lane can only ask
  *  whether the SERVER answers, so one dead device behind a healthy server would
@@ -415,6 +477,12 @@ interface TestOutcome {
   /** The final attempt smelled like the environment, whether or not the probe agreed.
    *  Feeds ENV_STREAK_LIMIT. */
   envFlavoured?: boolean;
+  /** The test did not get a device, so nothing was recorded or spent: the lane hands the
+   *  file back to the queue and waits for one. The value is the server's reason. */
+  handBack?: string;
+  /** With `handBack`: an attempt DID run on this dispatch before the hand-back (a test whose
+   *  phone left mid-run, re-run and then refused). The lane was working, not waiting. */
+  ran?: boolean;
 }
 
 export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): Promise<number> {
@@ -460,6 +528,18 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
   let spentUsd = 0;
   let retiredLanes = 0;
   let started = 0;
+  /**
+   * Attempts that travel WITH a file when a lane hands it back for want of a device, so the
+   * lane that picks it up carries on where it stopped: the same attempt count, the same
+   * evidence, the same free re-runs used. Deleted the moment a lane takes the file again.
+   */
+  const carried = new Map<string, { rows: SuiteTestResult[]; attempt: number; freeReruns: number }>();
+  /** Lease slots this suite has in flight, per server — our own half of the device gate. */
+  const reserved = new Map<string, number>();
+  /** When an attempt last got a device and finished. With no lane busy, a suite whose last
+   *  progress is `waitMs` old is waiting on a device that is not coming. */
+  let lastProgressAt = Date.now();
+  const waitMs = deps.deviceWaitMs ?? deviceWaitMs();
 
   const tag = (lane: Lane): string => (parallel && lane.label ? `[suite ${lane.label}]` : '[suite]');
 
@@ -493,22 +573,56 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
     await sleep((deps.probeRetryMs ?? PROBE_RETRY_MS) * (attempt + 1));
   }
 
-  /** Every attempt at one file, on one lane. */
-  async function runOneTest(file: string, lane: Lane): Promise<TestOutcome> {
-    // Bounded: a lane that retires re-queues its file, so a plain dispatch counter can
-    // print "(9/8)". Clamp rather than drop the position — it is the only progress signal
-    // a parallel run gives, and an occasional repeat reads better than a lie.
-    err(`${tag(lane)} ── (${Math.min(++started, files.length)}/${files.length}) ${file} ──`);
-    const attemptRows: SuiteTestResult[] = [];
+  /** Every attempt at one file, on one lane. `probing`: the lane is waiting for a device, and
+   *  this dispatch is a look — see PROBE_HEADER_DELAY_MS. */
+  async function runOneTest(file: string, lane: Lane, probing = false): Promise<TestOutcome> {
+    // A SERVER lane is a slot, not a device: whether a phone is free for it is the server's
+    // answer, asked before every dispatch (see SuiteDeps.serverSlots). Keyed on the wiring,
+    // never on `parallel` — `--concurrency 1` against a pooled server still leases per test.
+    const gated = !!(deps.serverSlots && lane.server);
+    const prior = carried.get(file);
+    carried.delete(file);
+    let announced = false;
+    const announce = (): void => {
+      if (announced) return;
+      announced = true;
+      // Bounded: a lane that retires re-queues its file, so a plain dispatch counter can
+      // print "(9/8)". Clamp rather than drop the position — it is the only progress signal
+      // a parallel run gives, and an occasional repeat reads better than a lie. A file picked
+      // back up after a hand-back was counted when it first ran.
+      if (prior) err(`${tag(lane)} ── ${file} (continued) ──`);
+      else err(`${tag(lane)} ── (${Math.min(++started, files.length)}/${files.length}) ${file} ──`);
+    };
+    // A gated lane says nothing until it has a device, or a lane waiting for one would print
+    // a header every time it looked.
+    if (!gated) announce();
+    const attemptRows: SuiteTestResult[] = prior?.rows ?? [];
+    let freeReruns = prior?.freeReruns ?? 0;
+    /** The attempt whose "retry k/N" line a gated lane has printed — the header is said once
+     *  per test, the retry line once per attempt. */
+    let saidFor = -1;
     let envFlavoured = false;
     const merge = (): SuiteTestResult | undefined =>
       attemptRows.length ? mergeSuiteAttempts(attemptRows) : undefined;
+    /** Did any attempt on THIS dispatch get a device and run? */
+    let ranHere = false;
+    /** No device for this attempt: nothing is recorded and nothing is spent — not a retry, not
+     *  a streak tick — and whatever came before rides back to the queue with the file (#147). */
+    const handBack = (attempt: number, reason: string): TestOutcome => {
+      if (attemptRows.length || attempt > 0 || freeReruns > 0) carried.set(file, { rows: attemptRows, attempt, freeReruns });
+      // A dispatch that never ran never held a place in the run order.
+      if (announced && !prior && !attemptRows.length) started -= 1;
+      return { handBack: reason, ...(ranHere ? { ran: true } : {}) };
+    };
 
-    for (let attempt = 0; attempt <= retries; attempt++) {
+    for (let attempt = prior?.attempt ?? 0; attempt <= retries; attempt++) {
       // The last attempt is where a retryable failure becomes the verdict: a confirmed
       // env break retires the lane, anything else stands as this test's failed row.
       const lastAttempt = attempt === retries;
-      if (attempt > 0) err(`${tag(lane)} retry ${attempt}/${retries} for ${file}`);
+      const retryLine = (): void => {
+        if (attempt > 0) err(`${tag(lane)} retry ${attempt}/${retries} for ${file}`);
+      };
+      if (!gated) retryLine();
 
       // Re-isolate before EVERY attempt — between tests and between retries alike.
       const resetBreak = await resetApp(lane, attempt > 0 ? ' (retry)' : '');
@@ -521,11 +635,65 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
         return { row: merge(), envBreak: `reset failed: ${resetBreak}` };
       }
 
+      let slot: string | undefined;
+      if (gated) {
+        const server = lane.server!;
+        const slots = await deps.serverSlots!(lane);
+        const inUse = reserved.get(server) ?? 0;
+        // Check and reserve with NO `await` in between: two lanes waking together must not
+        // both see the one free phone and both ask for it, because the loser's lease request
+        // is exactly what lets the server take over a quiet sibling's phone.
+        if (slots && slots.capacity <= inUse) return handBack(attempt, slots.note);
+        reserved.set(server, inUse + 1);
+        slot = server;
+      }
+      const say = (): void => {
+        announce();
+        if (saidFor === attempt) return;
+        saidFor = attempt;
+        retryLine();
+      };
+      // A look says nothing until its child has plainly got a phone; any other gated dispatch
+      // announces now, before the child's own output starts streaming.
+      const held = gated && probing ? setTimeout(say, PROBE_HEADER_DELAY_MS) : undefined;
+      if (gated && !probing) say();
+
       const t0 = Date.now();
       try {
-        const r = await deps.runTest(join(dir, file), lane);
+        let r: AiRunResult;
+        try {
+          r = await deps.runTest(join(dir, file), lane);
+        } finally {
+          clearTimeout(held);
+          // Only the child holds a lease; the re-probes below do not, so neither does the slot.
+          if (slot) {
+            const n = (reserved.get(slot) ?? 1) - 1;
+            if (n > 0) reserved.set(slot, n);
+            else reserved.delete(slot);
+          }
+        }
+        // Refused at the lease (the gate raced another run, or a job outside this suite holds
+        // the phones). The test never started, so this was never an attempt.
+        if (r.noDevice) return handBack(attempt, r.failure?.reason ?? 'the server had no free device');
+        if (gated) say(); // a look that got its phone, and finished inside the header's hold
+        ranHere = true;
+        lastProgressAt = Date.now();
         attemptRows.push(toSuiteResult(file, r, Date.now() - t0));
         envFlavoured = !!r.abortedForEnv;
+        // The server ended this run because its phone left the pool. Neither the test's fault
+        // nor this lane's: start it again as a fresh run without spending a retry. Only on a
+        // server lane, where each attempt is a new run token — the serial path's single token
+        // is as dead as its phone, and aborts on the re-probe below exactly as it did.
+        if (r.evicted && lane.server && freeReruns < MAX_FREE_RERUNS) {
+          freeReruns += 1;
+          const warn =
+            `${file}: its device ${r.device ?? '(unknown)'} left the pool mid-run — re-run as a fresh run ` +
+            `(${freeReruns}/${MAX_FREE_RERUNS}, not counted toward --retries)`;
+          warnings.push(warn);
+          err(`${tag(lane)} WARN ${warn}`);
+          attempt -= 1;
+          continue;
+        }
         if (r.abortedForEnv) {
           const broken = await stillBroken(deps, lane);
           if (broken) {
@@ -541,6 +709,9 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
         }
         if (r.ok || !isRetryable(r) || lastAttempt) break;
       } catch (e) {
+        if (gated) say(); // a look whose child threw inside the header's hold still ran a test
+        ranHere = true;
+        lastProgressAt = Date.now();
         // A test that THREW (device gone, server unreachable, bad file) still becomes a
         // failed row — one broken test must not vaporize the suite report for the tests
         // that already ran. Out of attempts, a confirmed env break retires the lane.
@@ -584,6 +755,55 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
     stop ??= { reason, kind: 'environment' };
   }
 
+  /** A lane with no device to run on: since when, the server's latest reason, its next look,
+   *  and its last one. */
+  interface Park {
+    since: number;
+    reason: string;
+    delayMs: number;
+    nextAt: number;
+    lastLookAt: number;
+  }
+
+  /**
+   * Wait for this lane's next look at the queue, re-checking every IDLE_POLL_MS whether to
+   * stop waiting altogether — so a waiting lane neither holds a finished suite open nor
+   * sleeps through its end. 'look' means try the queue again.
+   */
+  async function waitForDevice(park: Park): Promise<'look' | 'done'> {
+    for (;;) {
+      if (stop) return 'done';
+      // Nothing left to run and nobody running: the suite finished without this lane.
+      if (!queue.length && busyLanes === 0) return 'done';
+      // Nobody is running, and nothing has for the whole wait: every lane is waiting on a
+      // device that is not coming. That stops the SUITE, with one reason — not one retirement
+      // per lane, each claiming its tests "move to the others" who are waiting too.
+      if (busyLanes === 0 && Date.now() - lastProgressAt >= waitMs) {
+        // One last look first, unless one has happened since the deadline: backed off, the
+        // previous look may be half the wait old, and a phone that came back in between would
+        // otherwise never be seen — the suite exiting 3 to say none became free.
+        if (queue.length && park.lastLookAt < lastProgressAt + waitMs) return 'look';
+        stop ??= {
+          reason: `no device became free${waitMs > 0 ? ` for ${duration(waitMs)}` : ''} — ${park.reason}`,
+          kind: 'environment',
+        };
+        return 'done';
+      }
+      if (queue.length && Date.now() >= park.nextAt) return 'look';
+      await sleep(IDLE_POLL_MS);
+    }
+  }
+
+  /** One warning per waiting spell, not one per look: how long, and the server's reason.
+   *  `ran` is the test the lane finally got a device for — reported once it is over, which is
+   *  the first moment the spell is known to have ended. */
+  function endPark(lane: Lane, park: Park, ran?: string): void {
+    const waited = duration(Date.now() - park.since);
+    const warn = `${lane.label || 'the suite'} waited ${waited} for a free device — ${park.reason}`;
+    warnings.push(warn);
+    err(`${tag(lane)} ${ran ? `${ran} ran after this lane waited ${waited} for a free device` : `stopped waiting for a device after ${waited}`}`);
+  }
+
   /**
    * One lane, pulling from the shared queue until it is empty, the lane is retired, or
    * the suite stops. This — not a fixed partition — is what absorbs the duration spread:
@@ -592,8 +812,22 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
   let busyLanes = 0;
   async function laneWorker(lane: Lane): Promise<void> {
     let envStreak = 0;
+    // Set while this lane has no device to run on. A PARKED lane is not busy and holds no
+    // file: whatever it could not start went back to the front of the queue for any lane.
+    let park: Park | undefined;
+    const cadence = Math.max(IDLE_POLL_MS, deps.probeRetryMs ?? PROBE_RETRY_MS);
     for (;;) {
-      if (stop) return;
+      if (stop) {
+        if (park) endPark(lane, park);
+        return;
+      }
+      if (park) {
+        if ((await waitForDevice(park)) === 'done') {
+          endPark(lane, park);
+          return;
+        }
+        park.lastLookAt = Date.now();
+      }
       const file = queue.shift();
       if (file === undefined) {
         // An empty queue is NOT the end while another lane is still working: a lane that
@@ -602,7 +836,11 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
         // is the one outcome a gate must never produce. Poll rather than signal: the
         // wait only ever happens on the tail of a suite, and a condition variable here
         // would be more machinery than the case is worth.
-        if (busyLanes === 0) return;
+        if (busyLanes === 0) {
+          // A waiting lane whose look lost the last file to a sibling still reports its wait.
+          if (park) endPark(lane, park);
+          return;
+        }
         await sleep(IDLE_POLL_MS);
         continue;
       }
@@ -611,7 +849,7 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
       let outcome: TestOutcome;
       const startedTest = Date.now();
       try {
-        outcome = await runOneTest(file, lane);
+        outcome = await runOneTest(file, lane, park !== undefined);
       } catch (e) {
         // The file is already off the queue, so an escaping throw would erase this test
         // from the results AND from `notRun` — a suite that silently ran one fewer test
@@ -621,6 +859,34 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
         outcome = { row: erroredRow(file, lane, msg, Date.now() - startedTest) };
       } finally {
         busyLanes -= 1;
+      }
+      if (outcome.handBack !== undefined) {
+        // No device: back to the FRONT, so whichever lane frees first runs it next and the
+        // longest-first order holds. This lane waits, backing off; it neither fails the test
+        // nor pulls the next one only to be refused again (#147).
+        queue.unshift(file);
+        const now = Date.now();
+        // A look that RAN a test was working, not waiting: that spell is over, and a new one
+        // starts — its run time is not waiting time.
+        if (park && outcome.ran) {
+          endPark(lane, park, file);
+          park = undefined;
+        }
+        if (!park) {
+          park = { since: now, reason: outcome.handBack, delayMs: cadence, nextAt: now + cadence, lastLookAt: now };
+          err(`${tag(lane)} no free device — ${outcome.handBack}; ${file} goes back to the queue and this lane waits for one`);
+        } else {
+          // The LATEST reason: the pool may have changed since the spell began, and the give-up
+          // and the warning should name what the server says now.
+          park.reason = outcome.handBack;
+          park.delayMs = Math.min(park.delayMs * 2, cadence * PARK_BACKOFF_STEPS);
+          park.nextAt = now + park.delayMs;
+        }
+        continue;
+      }
+      if (park) {
+        endPark(lane, park, file);
+        park = undefined;
       }
       if (outcome.row) {
         results.push(outcome.row);
@@ -640,6 +906,8 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
       // Only a ceiling that actually STOPS something is an abort. Without the queue
       // check, a suite whose last test tips the total over its budget reports ABORTED
       // with an empty `notRun` and exits 1 — a red gate on a run where every test passed.
+      // (A file handed back mid-retry carries its spend with it, so that spend is counted
+      // when its row lands — at most one attempt late.)
       if (maxSuiteCost !== undefined && spentUsd >= maxSuiteCost && queue.length > 0) {
         stop ??= {
           reason: `suite cost ceiling $${maxSuiteCost} reached (spent $${spentUsd.toFixed(4)})`,
@@ -660,6 +928,16 @@ export async function cmdSuite(dirArg: string, flags: Flags, deps: SuiteDeps): P
     warnings.push(warn);
     err(`[suite] WARN ${warn}`);
   }
+  // A file handed back with attempts already on it RAN, so it is a row — it is only still
+  // queued because the suite stopped before any lane could take it again, and a file must be
+  // in exactly one of `tests` and `notRun`.
+  for (const [file, c] of carried) {
+    const at = queue.indexOf(file);
+    if (at < 0 || !c.rows.length) continue;
+    queue.splice(at, 1);
+    results.push(mergeSuiteAttempts(c.rows));
+  }
+
   // Belt and braces: work left in the queue with nothing explaining why would be a
   // silently short suite. Every real path (retirement, budget) has already set `stop`.
   if (!stop && queue.length) {

@@ -8,7 +8,9 @@
 // Pure types + pure functions only: no http, no fetch, no fs — so both sides (and the
 // unit tests) can import it without dragging in transport code.
 
-import { CliError, DumpKilledError, NoWindowError, SelectorNotFoundError, AmbiguousSelectorError } from './errors';
+import {
+  CliError, DumpKilledError, NoWindowError, NoFreeDeviceError, RunEvictedError, SelectorNotFoundError, AmbiguousSelectorError,
+} from './errors';
 import type { DeviceInfo, Element, HierarchySource, Platform } from './types';
 import type { RunStep } from './run';
 
@@ -22,7 +24,15 @@ export interface ExecRequest {
 
 export interface ErrorDescriptor {
   /** Which class to rebuild. 'Error' covers a non-CliError throw (exit 3 semantics). */
-  kind: 'CliError' | 'SelectorNotFoundError' | 'AmbiguousSelectorError' | 'NoWindowError' | 'DumpKilledError' | 'Error';
+  kind:
+    | 'CliError'
+    | 'SelectorNotFoundError'
+    | 'AmbiguousSelectorError'
+    | 'NoWindowError'
+    | 'DumpKilledError'
+    | 'NoFreeDeviceError'
+    | 'RunEvictedError'
+    | 'Error';
   name: string;
   message: string;
   exitCode: number;
@@ -62,6 +72,13 @@ export interface ExecResponse {
   error?: ErrorDescriptor;
   /** Set when this request moved the server's device. `retried` is always false here. */
   deviceChanged?: DeviceChange;
+  /**
+   * This step's failure made the server shed the device and EVICT the run (#147): the step
+   * keeps the device's own error, but the run cannot continue anywhere. The only response that
+   * knows — the client's next request is usually a release, which clears the server's mark.
+   * Absent from older servers and when nothing was evicted; feature-detect on the field.
+   */
+  evicted?: true;
   /** The step the server's ephemeral recorder produced (selector, tier, resolved
    *  element, failure evidence refs) — spliced into the caller's run verbatim. */
   step?: RunStep;
@@ -238,6 +255,8 @@ export interface RpcErrorBody {
    * both fail, and the client still needs to know the ground shifted under it.
    */
   deviceChanged?: DeviceChange;
+  /** This request's failure evicted the run — see ExecResponse.evicted. */
+  evicted?: true;
 }
 
 // --- error codec ------------------------------------------------------------
@@ -263,6 +282,15 @@ export function describeError(e: Error): ErrorDescriptor {
   if (e instanceof NoWindowError) {
     return { kind: 'NoWindowError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
+  // Also before the CliError arm, for a different reader: `mapError` puts this kind in a
+  // lane child's --json, and it is how a parallel suite tells "never got a device" and "lost
+  // its device" from a broken box (#147). The server only ever SENDS the eviction.
+  if (e instanceof NoFreeDeviceError) {
+    return { kind: 'NoFreeDeviceError', name: e.name, message: e.message, exitCode: e.exitCode };
+  }
+  if (e instanceof RunEvictedError) {
+    return { kind: 'RunEvictedError', name: e.name, message: e.message, exitCode: e.exitCode };
+  }
   if (e instanceof CliError) {
     return { kind: 'CliError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
@@ -281,6 +309,10 @@ export function rebuildError(d: ErrorDescriptor): Error {
       return new NoWindowError(d.message);
     case 'DumpKilledError':
       return new DumpKilledError(d.message);
+    case 'NoFreeDeviceError':
+      return new NoFreeDeviceError(d.message);
+    case 'RunEvictedError':
+      return new RunEvictedError(d.message);
     case 'CliError':
       return new CliError(d.message, d.exitCode);
     default: {
@@ -328,4 +360,9 @@ export interface ExecBackend {
    *  get is simply omitted, since the device being gone is often WHY we failed. The
    *  remote backend has no screenshot route, so it returns the hierarchy only. */
   captureFailure?(): Promise<{ png?: Buffer; hierarchy?: Element[] }>;
+  /** True once the server has told this run it was EVICTED — its device left the pool (#147).
+   *  The step running when a phone vanishes fails with the phone's own error; only a LATER
+   *  request (the failure evidence, the log fetch) hears the eviction, so the caller asks once
+   *  the run is over. Remote only: absent means "never". */
+  wasEvicted?(): boolean;
 }

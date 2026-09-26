@@ -710,6 +710,48 @@ test('laneResult: an internal child crash is NOT an environment failure', () => 
   assert.equal(env.abortedForEnv, true);
 });
 
+test('laneResult: a refused lease is "never ran", not an environment failure (#147)', () => {
+  // The child failed at /v1/lease, before any run began. Read as `abortedForEnv` (which it
+  // was), the suite probed a healthy server, retried at once into the same refusal, recorded a
+  // FAIL for a test that never ran, and retired the lane on the streak.
+  const lane = { id: 'd1', server: 'http://h:8391', label: 'h:8391#1' };
+  const refused = laneResult(
+    3,
+    { error: 'verikun server device is busy (409): all 2 devices are leased by other active runs.', exitCode: 3, errorKind: 'NoFreeDeviceError' },
+    '',
+    lane,
+  );
+  assert.equal(refused.noDevice, true);
+  assert.equal(refused.abortedForEnv, undefined, 'the box is not broken — it is busy');
+  assert.equal(refused.usageError, undefined);
+  assert.equal(refused.ok, false);
+  assert.match(refused.failure?.reason ?? '', /all 2 devices are leased/, 'the reason travels for the waiting warning');
+  // The EXIT CODE is still the verdict: the kind alone never makes a finished run "never ran".
+  assert.equal(laneResult(0, { ok: true, errorKind: 'NoFreeDeviceError' }, '', lane).noDevice, undefined);
+  assert.equal(laneResult(1, { ok: false, errorKind: 'NoFreeDeviceError' }, '', lane).noDevice, undefined);
+});
+
+test('laneResult: an evicted run is marked, from its result document or from a thrown one', () => {
+  const lane = { id: 'd1', server: 'http://h:8391', label: 'h:8391#1' };
+  // The usual shape: `vk ai` returns an eviction as an environment abort WITH its archive,
+  // so the attempt keeps its report link and names the phone that left.
+  const r = laneResult(
+    3,
+    { ok: false, abortedForEnv: true, evicted: true, runDir: '/r/7', device: 'R58N', failure: { where: 'run', reason: 'a left the pool' } },
+    '',
+    lane,
+  );
+  assert.equal(r.evicted, true);
+  assert.equal(r.abortedForEnv, true, 'still an environment abort for everything that does not know about evictions');
+  assert.equal(r.device, 'R58N');
+  assert.equal(r.runDir, '/r/7');
+  // Belt and braces: an eviction that escaped as a throw is still recognised by its class.
+  const thrown = laneResult(3, { error: 'verikun server ended this run (409): a left the pool', exitCode: 3, errorKind: 'RunEvictedError' }, '', lane);
+  assert.equal(thrown.evicted, true);
+  // And nothing else is: an ordinary environment abort stays exactly that.
+  assert.equal(laneResult(3, { ok: false, abortedForEnv: true }, '', lane).evicted, undefined);
+});
+
 test('laneResult: an empty device from the child falls back to the lane', () => {
   const r = laneResult(0, { ok: true, device: '' }, '', { id: 'd1', device: 'emulator-5554' });
   assert.equal(r.device, 'emulator-5554', 'a blank Device column is the one thing it must not produce');
