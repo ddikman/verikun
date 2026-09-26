@@ -80,7 +80,7 @@ import { Recorder, isRecordable, loadRunState, RunStep, archiveLogWindow, wantsA
 import { capturePng } from './capture';
 import { Companion, companionEnabled } from './companion/manager';
 import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agent/engine';
-import { LintFinding, coverageChecksEnabled, instructionUnits, lintPlan, looksTruncated } from './agent/lint';
+import { LintFinding, coverageChecksEnabled, instructionUnits, lintPlan, looksTruncated, ungroundedIds } from './agent/lint';
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
 import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-provider';
@@ -2037,7 +2037,14 @@ export async function compileFromSegments(
       // FREE, and refusing it over a ceiling we were never about to spend against would fail
       // a test for somebody else's tokens.
       assertBudgetForCompile(cost, opts.maxCostUsd, `compiling ${where} — the test is only partly compiled`);
-      const seed = seedPlan(segKey, where);
+      // A section's entry is only ever raw compile output — a green run re-persists the WHOLE
+      // test's key, never a section's — so an id in it that its own prose never gives can only be
+      // a guess (issue #148), and handing it back as "reuse this" would keep it alive.
+      let seed = seedPlan(segKey, where);
+      if (seed && ungroundedIds(seg.text, seed.plan).length > 0) {
+        err(`[ai] ${where}: ignoring a prior plan that guesses ids its prose never gives — compiling fresh`);
+        seed = null;
+      }
       err(`[ai] ${where}: compiling with ${opts.model}…${lock.degraded ? ` (${lock.degraded})` : ''}`);
       let compiled;
       try {
@@ -2068,6 +2075,14 @@ export async function compileFromSegments(
       // positive here costs one whole-file compile, never a rejected test.
       if (looksTruncated(seg.text, compiled.plan)) {
         err(`[ai] ${where}: the compiled section does not cover its prose (${compiled.plan.steps.length} step(s)) — not caching it; compiling the test as one instead`);
+        return null; // the finally below releases the lock
+      }
+      // A guessed id in a FRAGMENT is issue #148 spliced into every test that includes it. Same
+      // answer as a short section: keep it out of the cache and compile the test whole, where the
+      // lint hands the guess back for one guided recompile.
+      const guessed = ungroundedIds(seg.text, compiled.plan);
+      if (guessed.length > 0) {
+        err(`[ai] ${where}: the compiled section selects by ids its prose never gives (${guessed.join(', ')}) — not caching it; compiling the test as one instead`);
         return null; // the finally below releases the lock
       }
       // INSIDE the lock and before the release: a waiter re-reads the cache the instant the
@@ -2153,7 +2168,10 @@ export async function obtainPlan(
   // sometimes only the test's opening compiles at all. One guided retry is much cheaper
   // than discovering it as a device-run failure several steps later, or (worse, for a
   // truncation) as a pass. Budget is re-checked HERE: the first attempt is already billed.
-  let remaining = lintPlan(key.nl, compiled.plan);
+  //
+  // The seed goes in too: a green run re-persists the HEALED plan, whose repaired ids came off a
+  // live screen, so flagging them would push every new build off a selector the device confirmed.
+  let remaining = lintPlan(key.nl, compiled.plan, seed?.plan);
   if (remaining.length > 0) {
     const feedback = remaining.map((f) => `- ${f.message}`).join('\n');
     err(`[ai] compiled plan does not match the test — recompiling once:\n${feedback}`);
@@ -2168,7 +2186,7 @@ export async function obtainPlan(
         retryFeedback: feedback,
       });
       cost.add(retry.usage, 'compile');
-      const still = lintPlan(key.nl, retry.plan);
+      const still = lintPlan(key.nl, retry.plan, seed?.plan);
       // Keep the retry either way: it was compiled with strictly more information. If it
       // still trips the lint, say so rather than pretending the plan is clean — and for a
       // coverage finding, do not claim it will run, because the gate below rejects it.

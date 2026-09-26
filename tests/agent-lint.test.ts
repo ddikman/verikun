@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { actionNodes, instructionLines, lintPlan, looksTruncated, tailAnchors } from '../src/agent/lint';
+import { actionNodes, instructionLines, lintPlan, looksTruncated, tailAnchors, ungroundedIds } from '../src/agent/lint';
 import { resolveIncludes } from '../src/agent/include';
 import { Plan, PlanNode } from '../src/agent/ir';
 
@@ -52,7 +52,7 @@ test('lintPlan: satisfied by a control node anywhere, including nested in a body
     type: 'repeat',
     selector: 'text:Review',
     cap: 10,
-    body: [{ type: 'when', branches: [{ selector: '@multi', body: [{ type: 'if-present', selector: '@cont', body: [leaf('tap', ['@cont'])] }] }] }],
+    body: [{ type: 'when', branches: [{ selector: 'text:Pick one', body: [{ type: 'if-present', selector: '@cont', body: [leaf('tap', ['@cont'])] }] }] }],
   });
   assert.deepEqual(lintPlan(nl, nested), []);
 });
@@ -66,6 +66,84 @@ test('lintPlan: reports both findings at once', () => {
   const nl = 'Launch com.x with its data cleared. If a promo appears, dismiss it.';
   const findings = lintPlan(nl, plan(leaf('launch', ['com.x'])));
   assert.equal(findings.length, 2);
+});
+
+// --- ids the test never gives (issue #148) ----------------------------------------------
+// The compiler cannot see the app, so an id the prose does not state is a guess built from the
+// app's naming pattern. Measured: 3 of 4 such guesses named nothing in the app, a wait/assert on
+// one is never repaired, and every recompile guessed differently — so the test flaked. The rule
+// is not fatal: a right guess still runs, and a wrong one fails loudly, so a recompile is enough.
+
+test('lintPlan: flags an id the test never gives, and only asks for a recompile', () => {
+  const nl = 'Wait for the tab bar (Home, Search, Profile) to appear.';
+  const guessed = plan(leaf('wait', ['id:home_tab_id']), leaf('assert', ['@search_tab_id']));
+  const findings = lintPlan(nl, guessed);
+  assert.equal(findings.length, 1);
+  assert.match(findings[0].message, /home_tab_id/);
+  assert.match(findings[0].message, /search_tab_id/);
+  assert.equal(findings[0].fatal, undefined, 'a guess may be right; it must not reject the plan');
+  assert.equal(looksTruncated(nl, guessed), false);
+});
+
+test('lintPlan: the label selector a guess should have been is clean', () => {
+  const nl = 'Wait for the tab bar (Home, Search, Profile) to appear.';
+  assert.deepEqual(lintPlan(nl, plan(leaf('wait', ['text:Home']), leaf('assert', ['Search']))), []);
+});
+
+test('ungroundedIds: an id built from the words of a label is still a guess', () => {
+  // Both words of `settings_tab` are in the prose, just never as one token — which is exactly
+  // how the model builds a guess. Matching against the prose squashed into one string misses it.
+  assert.deepEqual(ungroundedIds('Tap the Settings tab.', plan(leaf('tap', ['id:settings_tab']))), ['settings_tab']);
+});
+
+test('ungroundedIds: an id the prose gives is grounded however the plan spells it', () => {
+  const nl = 'Confirm the spinner (`vk_spinner`) is gone, tap each option (option_0, option_1, ...), then `Log In Button`.';
+  for (const sel of [
+    '@vk_spinner',
+    'id:VK_SPINNER',
+    'id:spinner',
+    'id:com.x:id/vk_spinner',
+    'id:option_{{ctx.i}}',
+    'id:{{ctx.answer}}',
+    'id:Log In Button',
+  ]) {
+    assert.deepEqual(ungroundedIds(nl, plan(leaf('tap', [sel]))), [], sel);
+  }
+});
+
+test('ungroundedIds: reads selectors only — typed text, packages and --text values are not', () => {
+  const nl = 'Launch com.x, type your handle into the name field (`vk_name`) and check the greeting.';
+  const p = plan(
+    leaf('launch', ['com.x']),
+    leaf('text', ['@vk_name', '@my_handle_guess']),
+    leaf('type', ['@another_handle']),
+    leaf('assert', ['text:Hello'], [{ name: 'text', value: '@greeting_value' }]),
+  );
+  assert.deepEqual(ungroundedIds(nl, p), []);
+});
+
+test('ungroundedIds: judges control-node selectors, modifiers stripped, and swipe --on', () => {
+  const nl = 'If video mode (`mode_video`) is not selected, select it.';
+  const p = plan(
+    { type: 'if-present', selector: 'id:mode_video --not-selected', body: [leaf('tap', ['id:mode_video'])] },
+    { type: 'when', branches: [{ selector: '@quiz_card', body: [leaf('tap', ['text:Next'])] }] },
+    { type: 'repeat', selector: '@results_screen', cap: 5, body: [leaf('swipe', ['up'], [{ name: 'on', value: '@feed_list' }])] },
+    { type: 'read', selector: '@answer_label', field: 'text', into: 'answer' },
+    { type: 'while-present', selector: '@bubble_{{ctx.i}}', bind: 'i', cap: 5, body: [leaf('tap', ['@bubble_{{ctx.i}}'])] },
+  );
+  assert.deepEqual(ungroundedIds(nl, p), ['quiz_card', 'results_screen', 'feed_list', 'answer_label', 'bubble_{{ctx.i}}']);
+});
+
+test('ungroundedIds: an id the prior plan already uses is grounded — it may be a repair', () => {
+  // A green run re-persists the HEALED plan, and a repair takes its id off a live screen. With
+  // --app-build that plan seeds the next build; flagging its ids would push the model off a
+  // selector the device already confirmed, every build.
+  const nl = 'Tap Sign in.';
+  const recompiled = plan(leaf('tap', ['@btn_login']));
+  const healed = plan(leaf('tap', ['id:com.x:id/btn_login']));
+  assert.deepEqual(ungroundedIds(nl, recompiled), ['btn_login']);
+  assert.deepEqual(ungroundedIds(nl, recompiled, healed), []);
+  assert.deepEqual(lintPlan(nl, recompiled, healed), []);
 });
 
 // --- coverage: only a PREFIX of the test compiled (issue #127) -------------------------
@@ -113,7 +191,7 @@ test('lintPlan: screenshots do not count toward coverage', () => {
 test('lintPlan: a control node counts its body, not just itself', () => {
   // `plan.steps.length` is TOP-LEVEL only, so this plan reads as 1 step. Judging coverage on
   // that number would reject every plan built around one loop.
-  const loop = plan({ type: 'repeat', selector: '@done', cap: 10, body: taps(20) });
+  const loop = plan({ type: 'repeat', selector: 'text:Done', cap: 10, body: taps(20) });
   assert.deepEqual(lintPlan(numbered(20), loop), []);
 });
 
@@ -222,10 +300,14 @@ test('lintPlan: the repo\'s own example tests read as real instructions', () => 
 
     // One step per stated instruction, addressing what that instruction names: the shape a
     // healthy compile of this prose has. It must be clean.
-    const full = plan(...lines.map((l, i) => leaf('tap', [/`([^`]+)`/.exec(l)?.[1] ?? `@step_${i}`])));
+    const full = plan(...lines.map((l, i) => leaf('tap', [/`([^`]+)`/.exec(l)?.[1] ?? `text:step ${i}`])));
     assert.deepEqual(lintPlan(nl, full), [], file);
 
     // ...and the same prose truncated to its first three steps must be caught.
     assert.equal(looksTruncated(nl, plan(...full.steps.slice(0, 3))), true, file);
+
+    // ...and addressing every identifier the prose names BY ID is not a guess.
+    const byId = plan(...[...nl.matchAll(/`([^`]+)`/g)].map((m) => leaf('tap', [`@${m[1]}`])));
+    assert.deepEqual(ungroundedIds(nl, byId), [], file);
   }
 });

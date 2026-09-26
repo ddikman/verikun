@@ -1,7 +1,7 @@
 // Compile-fidelity lint: does the plan the model produced still say what the prose said?
 //
 // The model is a compiler, and this is the compiler's own sanity check. It exists because
-// compilation is NONDETERMINISTIC in a way that is invisible until a run fails, and three
+// compilation is NONDETERMINISTIC in a way that is invisible until a run fails, and four
 // failure modes showed up repeatedly against a real suite:
 //
 //   1. An explicit directive silently vanishes. The same prose ("Launch the app WITH ITS
@@ -17,8 +17,12 @@
 //      against later builds. A test exercising none of its subject reporting success is the
 //      worst failure mode a testing tool has, which is why the two rules that detect it are
 //      the only FATAL findings here.
+//   4. A selector names an id the test never gave (issue #148). The compiler cannot see the
+//      app, so it composed one from the app's naming pattern, and 3 of 4 such guesses named
+//      nothing in the app. A wait/assert is never repaired, so the test went red — and each
+//      recompile guessed differently, so it flaked.
 //
-// 1 and 2 are cheap to detect and cheap to fix: hand the finding back to the model and let
+// 1, 2 and 4 are cheap to detect and cheap to fix: hand the finding back to the model and let
 // it compile once more. That is far better than the alternative, which is a plan that is
 // quietly wrong and burns a device run to say so. 3 gets the same guided recompile, but a
 // plan that STILL does not cover its test must never run — see `fatal` below.
@@ -28,6 +32,7 @@
 // It never edits the plan; the model gets the feedback and stays the author.
 
 import { Plan, PlanNode, isControlNode, bodiesOf } from './ir';
+import { parseSelector } from '../ui/selector';
 
 export interface LintFinding {
   /** Shown to the model verbatim as the reason for the recompile. */
@@ -264,15 +269,96 @@ function planMentions(tokens: string[], anchor: string): boolean {
   });
 }
 
+// --- ids: does every id the plan selects by come from the prose? (issue #148) ------------
+
+/** Commands whose FIRST positional is a selector. The rest of `text`'s positionals, and every
+ *  positional of `type`/`launch`/…, is data — `type @handle` types a handle, it selects nothing. */
+const SELECTOR_FIRST: ReadonlySet<string> = new Set(['tap', 'click', 'text', 'wait', 'assert']);
+
+/** Every string the engine resolves as a selector — unlike `planTokens`, which also returns data. */
+function selectorsOf(plan: Plan): string[] {
+  const out: string[] = [];
+  for (const n of walk(plan.steps)) {
+    if (n.type === 'command') {
+      if (SELECTOR_FIRST.has(n.command) && n.positionals[0]) out.push(n.positionals[0]);
+      if (n.command === 'swipe' || n.command === 'scroll') {
+        for (const f of n.flags) if (f.name === 'on') out.push(f.value);
+      }
+    } else if (n.type === 'when') {
+      out.push(...n.branches.map((b) => b.selector));
+    } else {
+      out.push(n.selector);
+    }
+  }
+  return out;
+}
+
+/** The id values (`@x` / `id:x`) the plan selects by, parsed by the engine's own parser so the
+ *  two can never disagree about what an id selector is — trailing state modifiers included. */
+function planIds(plan: Plan): string[] {
+  const out: string[] = [];
+  for (const raw of selectorsOf(plan)) {
+    let sel;
+    try {
+      sel = parseSelector(raw);
+    } catch {
+      continue; // an empty value or contradictory modifiers: a runtime error, not a guess
+    }
+    if (sel.kind === 'id' && !out.includes(sel.value)) out.push(sel.value);
+  }
+  return out;
+}
+
+/** `com.app:id/login` and `login` name the same element. */
+const RESOURCE_PKG_RE = /^[\w.]+:id\//;
+/** `{{ctx.i}}` / `{{env.X}}` are filled at run time, so they are never part of a guess. */
+const PLACEHOLDER_RE = /\{\{[^}]*\}\}/;
+
+/** The literal parts of an id worth judging. Under three characters a substring matches
+ *  anything, so a part that short has no opinion. */
+const idParts = (id: string): string[] =>
+  id
+    .replace(RESOURCE_PKG_RE, '')
+    .split(PLACEHOLDER_RE)
+    .map(normToken)
+    .filter((p) => p.length >= 3);
+
+/** Every word of the prose, and every quoted span whole — an iOS identifier may hold spaces. */
+function proseTokens(nl: string): string[] {
+  const out: string[] = [];
+  for (const m of nl.matchAll(ANCHOR_RE)) out.push(m[1] ?? m[2] ?? m[3] ?? '');
+  out.push(...nl.split(/[\s`"“”'‘’()[\]{}<>,;!?]+/));
+  return out.map(normToken).filter((t) => t.length > 0);
+}
+
+/**
+ * The ids the plan selects by that neither the prose nor `seed` gives — each one a guess.
+ *
+ * LENIENT on purpose, since a false positive costs a recompile: an id is grounded when every
+ * literal part of it (package qualifier and placeholders dropped, case and punctuation ignored)
+ * sits inside ONE token of the prose, so `@spinner` is grounded by `vk_spinner` and
+ * `id:option_{{ctx.i}}` by `option_0`. One token, never two: `settings_tab` built from the words
+ * "Settings tab" is precisely how a guess is made.
+ *
+ * `seed` is a prior plan the compiler was told to reuse. A green run re-persists the HEALED plan
+ * and a repair takes its id off a live screen, so an id a seed already uses is grounded too —
+ * pass one only where it can hold a repair (see `compileFromSegments` in ../cli.ts).
+ */
+export function ungroundedIds(nl: string, plan: Plan, seed?: Plan): string[] {
+  const ground = [...proseTokens(nl), ...(seed ? planIds(seed).flatMap(idParts) : [])];
+  return planIds(plan).filter((id) => idParts(id).some((part) => !ground.some((t) => t.includes(part))));
+}
+
 /**
  * Check a compiled plan against the prose it came from.
  *
  * @param nl   the natural-language test, verbatim
  * @param plan the plan the model just produced
+ * @param seed the prior plan the model was handed to adapt, if any — its ids are not guesses
  * @returns findings; empty means the plan is consistent with the prose. A finding with
  *          `fatal` set means the plan does not cover the test and must not be run.
  */
-export function lintPlan(nl: string, plan: Plan): LintFinding[] {
+export function lintPlan(nl: string, plan: Plan, seed?: Plan): LintFinding[] {
   const findings: LintFinding[] = [];
 
   if (FRESH_START_RE.test(nl) && !hasLeafWithFlag(plan, 'launch', 'clear')) {
@@ -290,6 +376,23 @@ export function lintPlan(nl: string, plan: Plan): LintFinding[] {
         'but the plan has no if-present/when node — every step is unconditional. An unconditional step for ' +
         'optional UI fails on every run where that UI does not show. Put the optional part behind if-present ' +
         '(skip when absent), or behind when (when the screen is one of several known kinds).',
+    });
+  }
+
+  // Not fatal: a guess that happens to be right still runs, and a wrong one fails its step
+  // loudly, so the guided recompile is the remedy. The exception is an ABSENCE check (`--gone`,
+  // a guard that skips): it passes on any selector that never matches, a wrong label as much as
+  // a guessed id, so making this rule fatal would not close it.
+  const guessed = ungroundedIds(nl, plan, seed);
+  if (guessed.length > 0) {
+    const named = guessed.slice(0, 5).map((id) => JSON.stringify(id)).join(', ');
+    findings.push({
+      message:
+        `The plan selects by id ${named}${guessed.length > 5 ? ` and ${guessed.length - 5} more` : ''}, but the test ` +
+        `never gives ${guessed.length === 1 ? 'that id' : 'those ids'}. You cannot see the app, so an id the test does not state is a guess — it matches ` +
+        'nothing, and a wait/assert on it fails the test with no repair. Use an id only when the test writes it; ' +
+        'select an element the test names by its label with text:<label>, and do not check something the test ' +
+        'names nothing selectable for.',
     });
   }
 

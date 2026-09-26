@@ -409,7 +409,9 @@ test('compileFromSegments: a section compiled far short of its own prose is not 
 test('compileFromSegments: a section that DOES cover its prose is cached as before', async () => {
   const segKey: CacheKeyInput = { ...KEY, nl: LONG };
   const provider = new FakeProvider({ [LONG]: fullPlan(), 'tap it': planOf('tap') });
-  const plan = await compileFromSegments([seg(LONG), seg('tap it')], KEY, opts(), new CostTracker(PRICE), provider);
+  // The whole test's `nl` is its sections' prose — the assembled plan's ids are judged against it.
+  const key: CacheKeyInput = { ...KEY, nl: `${LONG}\n\ntap it` };
+  const plan = await compileFromSegments([seg(LONG), seg('tap it')], key, opts(), new CostTracker(PRICE), provider);
   assert.equal(plan?.steps.length, 21);
   assert.equal(cached(segKey), true);
 });
@@ -438,4 +440,58 @@ test('obtainPlan: VERIKUN_NO_COMPILE_CHECK=1 accepts and caches the short plan, 
     if (prev === undefined) delete process.env.VERIKUN_NO_COMPILE_CHECK;
     else process.env.VERIKUN_NO_COMPILE_CHECK = prev;
   }
+});
+
+// --- ids the prose never gives (issue #148) ---------------------------------
+//
+// A guessed id costs a guided recompile on the whole-test path. The two places a guess could
+// instead be KEPT are the section cache (one fragment, spliced into every test that includes
+// it) and the seed a new build is handed as "reuse this".
+
+const TABS = 'Wait for the tab bar (Home, Search, Profile) to appear.';
+const waitOn = (selector: string): Plan => ({
+  version: 1,
+  steps: [{ type: 'command', command: 'wait', positionals: [selector], flags: [] }],
+});
+
+test('obtainPlan: an id the test never gives buys one guided recompile, naming it', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: TABS };
+  const provider = new FakeProvider({ [TABS]: waitOn('id:home_tab_id') }, { [TABS]: waitOn('text:Home') });
+  const { plan } = await obtainPlan(key, 't.md', opts(100), new CostTracker(PRICE, 100), provider, []);
+  assert.deepEqual(provider.seen, [TABS, TABS]);
+  assert.match(provider.feedback[1] ?? '', /home_tab_id/);
+  assert.deepEqual(plan.steps, waitOn('text:Home').steps);
+});
+
+test('obtainPlan: an id the prior plan already uses buys no recompile', async () => {
+  // A green run re-persists the HEALED plan, whose repaired ids came off a live screen.
+  const nl = 'Tap Sign in.';
+  const healed: Plan = { version: 1, steps: [{ type: 'command', command: 'tap', positionals: ['id:com.x:id/btn_login'], flags: [] }] };
+  writePlan({ ...KEY, nl, build: 'old' }, healed);
+  const provider = new FakeProvider({ [nl]: healed });
+  await obtainPlan({ ...KEY, nl, build: 'new' }, 't.md', opts(100), new CostTracker(PRICE, 100), provider, []);
+  assert.deepEqual(provider.seen, [nl], 'the seed grounds the ids it hands over');
+});
+
+test('compileFromSegments: a section that guesses an id is not cached, and the test compiles whole', async () => {
+  const provider = new FakeProvider({ 'launch it': planOf('launch'), [TABS]: waitOn('id:home_tab_id') });
+  assert.equal(await compileFromSegments([seg('launch it'), seg(TABS)], KEY, opts(), new CostTracker(PRICE), provider), null);
+  assert.equal(cached({ ...KEY, nl: TABS }), false, 'a cached guess is spliced into every test that includes it');
+  assert.equal(cached({ ...KEY, nl: 'launch it' }), true, 'a clean section still caches');
+});
+
+test('compileFromSegments: a prior section that guessed an id is not offered as a seed', async () => {
+  // A section's entry is only ever raw compile output — a green run re-persists the WHOLE
+  // test's key — so an id in it that its own prose never gives can only be a guess.
+  writePlan({ ...KEY, nl: TABS, build: 'old' }, waitOn('id:home_tab_id'));
+  const provider = new FakeProvider({ [TABS]: waitOn('text:Home') });
+  await compileFromSegments([seg(TABS)], { ...KEY, build: 'new' }, opts(), new CostTracker(PRICE), provider);
+  assert.equal(provider.seeds[0], undefined);
+});
+
+test('compileFromSegments: a prior section that names only what its prose gives still seeds', async () => {
+  writePlan({ ...KEY, nl: TABS, build: 'old' }, waitOn('text:Home'));
+  const provider = new FakeProvider({ [TABS]: waitOn('text:Home') });
+  await compileFromSegments([seg(TABS)], { ...KEY, build: 'new' }, opts(), new CostTracker(PRICE), provider);
+  assert.deepEqual(provider.seeds[0]?.steps, waitOn('text:Home').steps);
 });
