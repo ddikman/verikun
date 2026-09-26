@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-09-26
+
+### Fixed
+- **`vk ai`** no longer guesses `id:` selectors; an element the test names only by label compiles
+  to `text:` — write the id into the test to pin it. ([#148])
+
+[#148]: https://github.com/ddikman/verikun/issues/148
+
 ## [0.29.0] - 2026-09-16
 
 ### Changed

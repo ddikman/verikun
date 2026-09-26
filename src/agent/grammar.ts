@@ -116,7 +116,7 @@ Do NOT hard-code a run of indices you were not told the length of. If the prose 
 varies per run — emit a while-present over {{ctx.i}} rather than tap _0, _1, _2, _3.
 A hard-coded list is right only when the prose states the exact count.
 
-SELECTORS (the engine auto-heals case/whitespace/partial, so prefer stable identifiers):
+SELECTORS (the engine auto-heals case/whitespace/partial, so prefer an id the test gives you):
   @login            resource-id 'login' (shorthand for id:login)
   id:login          resource-id (full, suffix, or short)
   text:Sign in      visible text (case-insensitive)
@@ -154,7 +154,17 @@ RULES:
   below the fold — that is now redundant. Emit an explicit swipe only when the SCROLLING
   ITSELF is what the test asks for ("scroll the feed three times"), or to reveal content
   that is not in the hierarchy until it is built (an infinite/lazy list).
-- Prefer resource-id / accessibility selectors over visible text where possible.
+- IDS COME FROM THE TEST. Use @x / id:x only with an id the test writes (or one a PRIOR PLAN
+  shown to you already uses). You cannot see the app, so never compose an id from a label, a
+  description, or the pattern of the app's other ids: a made-up id matches nothing, and a
+  wait/assert on it FAILS the test with no repair. An element the test names only by what it
+  says ("tap Sign in", "the Home tab") is text:<those words> — forgiving, and it also matches an
+  accessibility label.
+- An outcome the test states ("the tab bar (Home, Search, Profile) appears") is checked on what
+  it NAMES — the id it gives, or the words it quotes or lists — never on an id you made up. A
+  description that names nothing you could select without inventing it ("it shows the
+  signed-in user's name") is context, not a step; so is rationale (why a step exists, what a
+  field already holds).
 - Translate the test literally and minimally: do not invent ACTION steps (tap/text/swipe/key/assert)
   the prose does not imply. The ONE exception is screenshot — insert screenshot steps liberally as
   post-run review evidence: after each screen transition (launch, a navigation tap, a submit, a

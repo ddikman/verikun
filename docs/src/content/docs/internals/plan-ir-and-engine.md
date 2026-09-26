@@ -135,14 +135,15 @@ differ only in how they send it.
 
 ## Compile-fidelity lint
 
-`lint.ts` catches four specific compile failures and hands the finding back to the model:
+`lint.ts` catches five specific compile failures and hands the finding back to the model:
 
 - a directive in the prose silently **dropped** from the plan
 - conditional prose compiled to an **unconditional** step
+- an `id:` selector the prose never gives — a **guessed** id, which matches nothing
 - the plan is far **shorter** than the number of instructions the prose states *(fatal)*
 - the plan never references what the prose's **closing** instructions name *(fatal)*
 
-All four produce a plan that runs and looks fine while testing something other than what was
+All five produce a plan that looks fine while testing something other than what was
 written. Each buys one guided recompile, with the finding handed back as `retryFeedback`.
 
 The two coverage rules are **fatal**: a plan that still trips one after that recompile is
@@ -162,7 +163,10 @@ Two supporting rules live in `cli.ts`: an `@include` section that does not cover
 prose is **not cached** and drops the split, so the test is recompiled whole rather than
 assembled with its body missing (a fragment is keyed on its own text, so caching a short one
 would shorten every test that includes it); and `findSeed`, which ignores the compiler
-fingerprint by design, discards a seed that trips a coverage rule against its own prose.
+fingerprint by design, discards a seed that trips a coverage rule against its own prose. A
+section that selects by an id its prose never gives is treated like a short one, and a section
+seed that does is discarded. A whole test's seed is not: an id it already uses counts as given
+(a green run re-persists the repaired plan, and a repair reads its id off the live screen).
 
 ## Where to go next
 

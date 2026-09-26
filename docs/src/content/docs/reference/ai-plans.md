@@ -151,7 +151,8 @@ Each of these closes a way for a test to pass without doing what it says:
 - `assert` is verification-only and **terminal**. It is never healed.
 - `tap` and `text` [auto-scroll](/verikun/reference/auto-wait/#auto-scroll-into-view), so
   never compile a repeat-until-visible loop.
-- Prefer resource-id and accessibility selectors over text.
+- Use an id only when the test gives one. An element the test names only by its label
+  compiles to `text:`, so write the id into the test to pin it.
 - Translate literally and minimally. The one exception is `screenshot`, inserted liberally —
   free on replay, and it never affects the result.
 
