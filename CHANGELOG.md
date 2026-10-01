@@ -6,10 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Docs site** links unfurl with a social card image built from the illustration.
+
 ### Changed
 - **Docs site and README** show the new verikun logo and an animated illustration, with light and
   dark variants.
 - **Docs site** primary color is now black, off-white in dark mode.
+
+### Fixed
+- **Docs site** favicon no longer 404s; it shows the logo.
 
 ## [0.31.0] - 2026-09-27
 

@@ -28,6 +28,20 @@ export default defineConfig({
       editLink: {
         baseUrl: 'https://github.com/ddikman/verikun/edit/main/docs/',
       },
+      // Starlight emits every other social-card tag but no image. Unfurlers need an absolute URL
+      // to a raster image; public/og.png is rendered from src/assets/og.svg by `npm run og`.
+      head: [
+        { tag: 'meta', attrs: { property: 'og:image', content: 'https://ddikman.github.io/verikun/og.png' } },
+        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+        {
+          tag: 'meta',
+          attrs: {
+            property: 'og:image:alt',
+            content: 'The verikun robot beside its tagline: agent-driven, natural-language mobile tests for Android and iOS.',
+          },
+        },
+      ],
       // A dead internal link fails the build. Load-bearing: this migration rewrote 24
       // README anchors into cross-page links, and a silent 404 is the likely regression.
       plugins: [starlightLinksValidator({ errorOnRelativeLinks: false })],
