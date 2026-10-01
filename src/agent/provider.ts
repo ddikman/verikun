@@ -4,11 +4,11 @@ import { Plan, LeafStep } from './ir';
 import { Usage } from './cost';
 import { SECTION_NOTE } from './grammar';
 
-// The seam between the engine and whatever LLM compiles/repairs a plan. Four backends
+// The seam between the engine and whatever LLM compiles/repairs a plan. Five backends
 // implement it today: two over HTTP with an API key — ClaudeProvider (./claude.ts) and
-// OpenAiProvider (./openai.ts) — and two that shell out to an already-logged-in agent CLI,
-// both served by the one spec-parameterized CliProvider (./cli-provider.ts): codex and
-// cursor-agent. `providerFor(model)` (./cost.ts) picks between them. Every call returns its
+// OpenAiProvider (./openai.ts) — and three that shell out to an already-logged-in agent CLI,
+// all served by the one spec-parameterized CliProvider (./cli-provider.ts): codex,
+// cursor-agent and claude. `providerFor(model)` (./cost.ts) picks between them. Every call returns its
 // token `usage` so the engine can bill it against the run's cost budget (a CLI backend is
 // billed to the user's subscription instead, so it reports empty usage — i.e. $0).
 
@@ -30,7 +30,7 @@ export interface CompileInput {
 }
 
 /**
- * The user message for a compile. Shared by all four providers, which differ only in how
+ * The user message for a compile. Shared by all five providers, which differ only in how
  * they SEND it — the same text three times was one edit away from drifting apart, and this
  * one gained a fourth part (SECTION_NOTE).
  *

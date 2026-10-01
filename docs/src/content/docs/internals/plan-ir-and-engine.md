@@ -87,7 +87,7 @@ early exit would never fire.
 
 ## The provider seam
 
-`provider.ts` defines `AgentProvider`, with **four** backends behind it. `providerFor(model)`
+`provider.ts` defines `AgentProvider`, with **five** backends behind it. `providerFor(model)`
 in `cost.ts` chooses one from the `--model` name alone — there is no `--provider` flag.
 
 | Backend | File | Mechanism |
@@ -96,10 +96,11 @@ in `cost.ts` chooses one from the `--model` name alone — there is no `--provid
 | OpenAI | `openai.ts` | Chat Completions; `toStrictSchema` adapts the shared schema to OpenAI's strict dialect |
 | `codex-cli` | `cli-provider.ts` (`CODEX_SPEC`) | Shells to the logged-in `codex` binary |
 | `cursor-cli` | `cli-provider.ts` (`CURSOR_SPEC`) | Shells to `cursor-agent` |
+| `claude-cli` | `cli-provider.ts` (`CLAUDE_SPEC`) | Shells to `claude` (Claude Code); prompt on stdin, schema inline |
 
 Both HTTP providers use structured output, a cached grammar prefix, and 429/5xx backoff.
 
-The two CLI backends are served by the **single spec-parameterized** `cli-provider.ts`.
+The three CLI backends are served by the **single spec-parameterized** `cli-provider.ts`.
 Adding another CLI agent is a new `CliAgentSpec` plus a `MODELS` row plus a `CLI_SPECS` entry
 — **not a new class**. A CLI backend is billed to the user's subscription, so it reports empty
 `usage` (cost `$0`, with `--max-cost-usd` and `--cost-override` inert). It runs read-only in
@@ -130,7 +131,7 @@ asks for *positive evidence* of a step (a list item of any kind, or a known verb
 a line) rather than reusing `lint.ts`'s instruction count, whose deliberate undercount is safe
 as a coverage floor but would move a real step here.
 
-`compileUserPrompt` in `provider.ts` assembles that user message for all four providers, which
+`compileUserPrompt` in `provider.ts` assembles that user message for every provider, which
 differ only in how they send it.
 
 ## Compile-fidelity lint

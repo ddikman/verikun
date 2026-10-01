@@ -37,17 +37,20 @@ function describeError(cmd: string, args: string[], err: NodeJS.ErrnoException):
 }
 
 /** Run a command and capture stdout/stderr as UTF-8 text. `cwd` runs it rooted elsewhere
- *  (the CLI-agent providers run in a neutral temp dir so they never touch the working tree). */
+ *  (the CLI-agent providers run in a neutral temp dir so they never touch the working tree);
+ *  `env` REPLACES the child's environment, and unset it inherits this process's (the claude
+ *  CLI provider uses it to withhold an API key that would outrank the CLI's own login). */
 export function runText(
   cmd: string,
   args: string[],
-  opts: { input?: string; timeout?: number; cwd?: string } = {},
+  opts: { input?: string; timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): TextResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     timeout: opts.timeout ?? 30000,
     input: opts.input,
     cwd: opts.cwd,
+    env: opts.env,
     maxBuffer: MAX_BUFFER,
   });
   if (r.error) throw describeError(cmd, args, r.error as NodeJS.ErrnoException);

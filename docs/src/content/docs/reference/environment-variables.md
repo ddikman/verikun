@@ -32,9 +32,13 @@ when every attached device is already claimed.
 | `ANTHROPIC_API_KEY` | Auth for Claude models (the default provider) |
 | `OPENAI_API_KEY` | Auth for `gpt-*` models |
 
-Neither is needed with `--model codex-cli` or `--model cursor-cli`, which drive an
+Neither is needed with `--model codex-cli`, `cursor-cli` or `claude-cli`, which drive an
 already-logged-in CLI off your existing subscription. See
 [Models](/verikun/reference/ai-plans/#models).
+
+`claude-cli` never passes `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` on to `claude`, which
+would otherwise use it in place of its login and bill per token. To spend the key, pick an API
+model such as `claude-sonnet-4-6`.
 
 There is **no environment fallback for the spend ceiling** — `--max-cost-usd` and
 `--cost-override` are flag-only, and a run with neither set uses the \$3 default. See
@@ -91,7 +95,7 @@ default. See [Screenshots](/verikun/reference/screenshots/).
 
 | Variable | Controls |
 |---|---|
-| `PATH` | Scanned to detect the CLI providers `codex` and `cursor-agent` |
+| `PATH` | Scanned to detect the CLI providers `codex`, `cursor-agent` and `claude` |
 | `PATHEXT` | Windows executable extensions for that scan. Default `.EXE;.CMD;.BAT;.COM`. |
 
 ## Inside a plan: `{{env.NAME}}`

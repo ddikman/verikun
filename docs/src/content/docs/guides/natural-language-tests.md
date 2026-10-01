@@ -117,7 +117,7 @@ Repeat until the home tab (`@home`) is showing, tapping past any onboarding card
 |---|---|---|
 | Anthropic | `ANTHROPIC_API_KEY` | metered |
 | OpenAI | `OPENAI_API_KEY` | metered |
-| A logged-in agent CLI | `codex login` or `cursor-agent login`, then `--model codex-cli` / `--model cursor-cli` | **no key needed** — billed to your existing subscription |
+| A logged-in agent CLI | `codex login`, `cursor-agent login` or `claude auth login`, then `--model codex-cli` / `cursor-cli` / `claude-cli` | **no key needed** — billed to your existing subscription |
 
 The CLI backends run read-only in a scratch directory, so they never touch your working
 tree. Their reported cost is `$0`, which also means `--max-cost-usd` and `--cost-override`
