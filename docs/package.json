@@ -11,7 +11,8 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "og": "node scripts/og-image.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.41.7",
