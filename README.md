@@ -1,8 +1,22 @@
 # verikun
 
-> **Agent-driven, natural-language mobile tests — during agent development or in CI.** Self-healing and self-improving, with cost caps and test reports.
+<table>
+<tr>
+<td width="260" align="center" valign="middle">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/readme/illustration-dark.svg">
+<img src="docs/readme/illustration-light.svg" alt="verikun" width="230">
+</picture>
+</td>
+<td valign="middle">
+
+**Agent-driven, natural-language mobile tests — during agent development or in CI.** Self-healing and self-improving, with cost caps and test reports.
 
 **📚 [Documentation](https://ddikman.github.io/verikun/)** — installation, guides, full command reference, and internals.
+
+</td>
+</tr>
+</table>
 
 - **Agent CLI** — `vk <command>`: one-shot commands to inspect the screen as a semantic tree (or screenshot) and act on it.
 - **Puppeteer for native mobile** — a thin wrapper over native Android and iOS automation runners with zero runtime dependencies.

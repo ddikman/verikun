@@ -1,0 +1,48 @@
+<!-- README twin of ../src/assets/illustration-dark.svg: square viewBox with the artwork centered and padded, because some Markdown viewers crop images to a box. Keep the art and animation CSS in sync. -->
+<svg width="190" height="190" viewBox="-98.18 -62.7 380 380" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+  /* 12s expression loop: neutral → blink → look up-right → concentrate → think → surprised → neutral */
+  .face-feature { transform-box: fill-box; }
+  #eye-left  { transform-origin: center; animation: eyeLeft 12s ease-in-out infinite; }
+  #eye-right { transform-origin: center; animation: eyeRight 12s ease-in-out infinite; }
+  #mouth     { transform-origin: center; animation: mouthMood 12s ease-in-out infinite; }
+
+  @keyframes eyeLeft {
+    0%, 8%   { transform: translate(0,0) scale(1,1); }
+    9.2%     { transform: translate(0,18px) scale(1,.08); }
+    10.4%    { transform: translate(0,0) scale(1,1); }
+    18%, 28% { transform: translate(5px,-7px) scale(.88,.82); }
+    36%, 46% { transform: translate(2px,4px) scale(1.05,.58); }
+    54%, 65% { transform: translate(5px,1px) scale(.92,.48) rotate(-5deg); }
+    73%, 84% { transform: translate(-2px,-7px) scale(1.18,1.18); }
+    94%,100% { transform: translate(0,0) scale(1,1); }
+  }
+  @keyframes eyeRight {
+    0%, 8%   { transform: translate(0,0) scale(1,1); }
+    9.2%     { transform: translate(0,18px) scale(1,.08); }
+    10.4%    { transform: translate(0,0) scale(1,1); }
+    18%, 28% { transform: translate(5px,-7px) scale(.88,.82); }
+    36%, 46% { transform: translate(-2px,4px) scale(1.05,.58); }
+    54%, 65% { transform: translate(-5px,1px) scale(.92,.48) rotate(5deg); }
+    73%, 84% { transform: translate(2px,-7px) scale(1.18,1.18); }
+    94%,100% { transform: translate(0,0) scale(1,1); }
+  }
+  @keyframes mouthMood {
+    0%, 28%  { transform: translate(0,0) scale(1,1); }
+    36%, 46% { transform: translate(-1px,3px) scale(.78,.72) rotate(-4deg); }
+    54%, 65% { transform: translate(-4px,1px) scale(.62,.55) rotate(8deg); }
+    73%, 84% { transform: translate(-8px,-3px) scale(.42,.42) rotate(-18deg); }
+    94%,100% { transform: translate(0,0) scale(1,1); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #eye-left, #eye-right, #mouth { animation: none; }
+  }
+</style>
+<path fill-rule="evenodd" clip-rule="evenodd" d="M73.1191 49.7928L39 15.7223C46.6405 8.09258 59.0283 8.09258 66.6688 15.7223C77.5377 26.5756 90.8496 39.8681 90.8496 39.8681C90.8496 39.8681 104.161 26.5756 115.03 15.7223C122.671 8.09258 135.059 8.09258 142.699 15.7223L108.58 49.7928H123.134C133.94 49.7928 142.699 58.5399 142.699 69.3303H39C39 58.5399 47.7592 49.7928 58.5646 49.7928H73.1191Z" fill="#FFFFFA"/>
+<path fill-rule="evenodd" clip-rule="evenodd" d="M90.238 244.591C65.053 244.417 34.3199 242.783 24.8946 229.418C18.5712 220.451 17.4482 209.869 17.2698 185.253C17.1133 163.592 15.5851 108.369 21.9872 85.0035C28.3893 61.6381 38.3402 60.7308 47.3956 58.4451C64.9367 55.7526 83.953 55.1363 90.5887 54.9992C90.5918 54.9738 90.5938 54.9607 90.5938 54.9607C90.5938 54.9607 91.0216 54.9635 91.815 54.9762C92.6084 54.9635 93.0364 54.9607 93.0364 54.9607C93.0364 54.9607 93.038 54.9738 93.0411 54.9992C99.6772 55.1363 118.693 55.7526 136.234 58.4451C145.29 60.7308 155.241 61.6381 161.643 85.0035C168.045 108.369 166.517 163.592 166.36 185.253C166.182 209.869 165.059 220.451 158.735 229.418C149.31 242.783 118.577 244.417 93.3918 244.591C93.2747 244.601 93.1561 244.605 93.0364 244.605C92.6309 244.603 92.224 244.602 91.815 244.6C91.4064 244.602 90.9989 244.603 90.5938 244.605C90.4741 244.605 90.3554 244.601 90.238 244.591Z" fill="#FFFFFA"/>
+<path fill-rule="evenodd" clip-rule="evenodd" d="M92.7755 224.964C90.3229 225.066 80.3114 225.346 70.2897 223.694C52.5136 220.762 43.1551 216.451 40.6859 205.952C38.2171 195.454 39.0814 118.134 39.4552 104.518C39.8294 90.9016 42.3898 78.4442 55.4499 75.7261C68.51 73.0081 72.8704 73.8823 73.3645 75.7261C74.3785 85.2719 77.1165 85.5764 92.1968 85.5038C92.199 85.5002 92.2026 85.498 92.2073 85.498C92.3983 85.4991 92.5881 85.4998 92.7755 85.5009C92.963 85.4998 93.1522 85.4991 93.3433 85.498C93.3483 85.498 93.3517 85.5002 93.3538 85.5038C108.434 85.5764 111.172 85.2719 112.186 75.7261C112.68 73.8823 117.041 73.0081 130.101 75.7261C143.161 78.4442 145.721 90.9016 146.095 104.518C146.47 118.134 147.334 195.454 144.865 205.952C142.396 216.451 133.037 220.762 115.261 223.694C105.239 225.346 95.2281 225.066 92.7755 224.964Z" fill="#17181C"/>
+<path id="mouth" class="face-feature" d="M92.5234 187.78C102.5 189 117 181.5 120.06 170.049" stroke="#FFFFFA" stroke-width="14" stroke-miterlimit="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="eye-left" class="face-feature" fill-rule="evenodd" clip-rule="evenodd" d="M78.9375 120.102C79.2192 120.102 79.4887 120.216 79.6849 120.417C79.8816 120.618 79.9884 120.89 79.9819 121.171C79.8378 126.956 79.1519 154.475 79.0113 160.128C78.9972 160.693 78.534 161.144 77.9677 161.144C75.3678 161.144 68.5049 161.144 65.8494 161.144C65.5682 161.144 65.2987 161.031 65.102 160.83C64.9053 160.629 64.7987 160.357 64.8058 160.076C64.9499 154.291 65.635 126.772 65.776 121.119C65.7902 120.553 66.2528 120.102 66.8196 120.102C69.4191 120.102 76.2824 120.102 78.9375 120.102Z" fill="#FFFFFA"/>
+<path id="eye-right" class="face-feature" fill-rule="evenodd" clip-rule="evenodd" d="M119.016 120.102C119.293 120.102 119.558 120.212 119.754 120.408C119.95 120.603 120.06 120.869 120.06 121.145C120.06 126.864 120.06 154.382 120.06 160.102C120.06 160.678 119.593 161.144 119.016 161.144H106.897C106.62 161.144 106.355 161.035 106.159 160.839C105.963 160.644 105.853 160.379 105.853 160.102V121.145C105.853 120.569 106.32 120.102 106.897 120.102C109.524 120.102 116.388 120.102 119.016 120.102Z" fill="#FFFFFA"/>
+</svg>

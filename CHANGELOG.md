@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Docs site and README** show the new verikun logo and an animated illustration, with light and
+  dark variants.
+- **Docs site** primary color is now black, off-white in dark mode.
+
 ## [0.31.0] - 2026-09-27
 
 ### Fixed
