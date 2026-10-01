@@ -16,7 +16,11 @@ export default defineConfig({
       title: 'verikun',
       description:
         'Drive Android devices and iOS simulators the way Puppeteer drives a browser — for AI agents and CI.',
-      logo: { src: './src/assets/logo.svg', replacesTitle: false },
+      logo: {
+        light: './src/assets/logo-light.svg',
+        dark: './src/assets/logo-dark.svg',
+        replacesTitle: false,
+      },
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/ddikman/verikun' },
         { icon: 'npm', label: 'npm', href: 'https://www.npmjs.com/package/verikun' },
