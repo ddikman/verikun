@@ -19,16 +19,16 @@ import { toStrictSchema } from './openai';
 import { runText, TextResult } from '../exec';
 
 // The CLI-agent provider: instead of an HTTP API + API key, drive an already-authenticated
-// coding-agent CLI (codex / cursor-agent) as a one-shot text->JSON transformer. This lets a
-// user compile/repair `vk ai` tests off their existing ChatGPT/Cursor SUBSCRIPTION — the CLI
-// carries its own login, so verikun needs no key (just the binary on PATH). A sibling to
-// claude.ts/openai.ts behind the same AgentProvider seam; like openai.ts is one class
+// coding-agent CLI (codex / cursor-agent / claude) as a one-shot text->JSON transformer. This
+// lets a user compile/repair `vk ai` tests off their existing ChatGPT/Cursor/Claude SUBSCRIPTION
+// — the CLI carries its own login, so verikun needs no key (just the binary on PATH). A sibling
+// to claude.ts/openai.ts behind the same AgentProvider seam; like openai.ts is one class
 // parameterized by baseUrl, this is one class parameterized by a CliAgentSpec per binary.
 //
 // Structured output: these CLIs are not HTTP endpoints, so there is no output_config /
-// response_format. codex enforces a schema natively (--output-schema); a CLI without one
-// gets the schema injected into the prompt. Either way parsePlan/validateNode (engine.ts)
-// stays the execution trust boundary — ir.ts documents this exact "parse path when
+// response_format. codex and claude enforce a schema natively (--output-schema / --json-schema);
+// a CLI without one gets the schema injected into the prompt. Either way parsePlan/validateNode
+// (engine.ts) stays the execution trust boundary — ir.ts documents this exact "parse path when
 // structured output is unavailable", so a malformed/hallucinated result is still rejected.
 //
 // These CLIs are AGENTS (tools, a working dir, a coding-oriented system prompt), so a
@@ -48,17 +48,22 @@ const PREAMBLE =
 
 /** Injectable spawn (defaults to exec.ts runText) so the provider is unit-testable without
  *  a real binary — the analogue of openai.ts's injectable fetchImpl. */
-export type RunImpl = (cmd: string, args: string[], opts: { input?: string; timeout?: number; cwd?: string }) => TextResult;
+export type RunImpl = (
+  cmd: string,
+  args: string[],
+  opts: { input?: string; timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv },
+) => TextResult;
 
-/** The per-binary configuration that turns this one class into a codex or a cursor provider. */
+/** The per-binary configuration that turns this one class into a codex, cursor or claude provider. */
 export interface CliAgentSpec {
   /** Internal backend id (matches a cost.ts ProviderId). */
   id: ProviderId;
   /** Executable name resolved on PATH. */
   bin: string;
-  /** How the JSON schema reaches the model: a temp file the CLI reads (codex --output-schema)
-   *  or injected into the prompt text (a CLI with no native schema flag). */
-  schema: 'file' | 'prompt';
+  /** How the JSON schema reaches the model: a temp file the CLI reads (codex --output-schema),
+   *  the schema TEXT handed to buildArgs as an argv value (claude --json-schema), or injected
+   *  into the prompt text (a CLI with no native schema flag). */
+  schema: 'file' | 'inline' | 'prompt';
   /** Adapt the shared ir.ts schema to the CLI's schema dialect before it is written/injected.
    *  codex's backend is OpenAI's strict Structured Outputs, which rejects a schema whose
    *  `required` omits any property (it 400s with invalid_json_schema on our optional
@@ -68,10 +73,20 @@ export interface CliAgentSpec {
    *  of any stdout decoration) instead of parsing stdout. codex sets this; a CLI whose only
    *  output is stdout leaves it false and relies on rawText. */
   usesOutputFile: boolean;
+  /** Send the prompt on stdin instead of in argv (buildArgs then leaves it out). For a CLI with a
+   *  variadic flag, where a trailing positional prompt would be swallowed as one more value. */
+  promptViaStdin?: boolean;
+  /** Environment variables the child must NOT inherit. For a CLI that prefers an API credential
+   *  in its environment over its own login: inherited, the call is billed per token to that
+   *  credential while this provider reports $0. */
+  dropEnv?: string[];
   /** Build the argv for one non-interactive call. `cwd` is the neutral temp dir the CLI is run
-   *  in; `schemaFile` is set only when schema==='file'; `outFile` only when usesOutputFile;
-   *  `model` is an optional sub-model. */
-  buildArgs(prompt: string, ctx: { schemaFile?: string; outFile?: string; cwd: string; model?: string }): string[];
+   *  in; `schemaFile` is set only when schema==='file', `schemaText` only when schema==='inline';
+   *  `outFile` only when usesOutputFile; `model` is an optional sub-model. */
+  buildArgs(
+    prompt: string,
+    ctx: { schemaFile?: string; schemaText?: string; outFile?: string; cwd: string; model?: string },
+  ): string[];
   /** Peel the model's final message out of stdout — used when usesOutputFile is false, or as a
    *  fallback when the message file came back empty. */
   rawText(stdout: string): string;
@@ -140,16 +155,78 @@ export const CURSOR_SPEC: CliAgentSpec = {
   loginHint: 'run `cursor-agent login` to sign in with your Cursor subscription (no API key needed)',
 };
 
+/** claude (Claude Code CLI): non-interactive `-p` with NATIVE JSON-schema output and a JSON
+ *  envelope on stdout. Four things differ from the other two, all measured on 2.1.284:
+ *  - `--json-schema` takes the schema TEXT, not a path — hence schema:'inline'.
+ *  - `--tools` is variadic, so a trailing positional prompt would be read as a tool name — hence
+ *    promptViaStdin.
+ *  - `--safe-mode`, not `--bare`, is what keeps the user's CLAUDE.md, hooks, skills, plugins and
+ *    MCP servers out of a pure transform: `--bare` also stops reading OAuth/keychain, so it would
+ *    demand ANTHROPIC_API_KEY — the one thing this backend exists to do without.
+ *  - an exported ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN OUTRANKS the login (`claude auth status`
+ *    flips from `claude.ai` to `api_key` / `oauth_token`; a dummy key gets a 401 beside a working
+ *    subscription) — and the first is what vk's own default model has every user export.
+ *    Inherited, each compile and repair is billed per token to that key while vk reports $0 and
+ *    --max-cost-usd stays inert, and a stale one retries for ~181s, past the per-call cap —
+ *    hence dropEnv.
+ *  `--tools ""` stands in for codex's `--sandbox read-only`; structured output still works without
+ *  tools. A nested call (CLAUDECODE=1, i.e. `vk` driven from inside Claude Code) runs normally. */
+export const CLAUDE_SPEC: CliAgentSpec = {
+  id: 'claude',
+  bin: 'claude',
+  schema: 'inline', // --json-schema '<text>'; the plain ir.ts dialect, as claude.ts sends over HTTP
+  usesOutputFile: false, // stdout's envelope is the only channel out
+  promptViaStdin: true, // a positional prompt after `--tools ""` would be swallowed as a tool name
+  dropEnv: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'], // either one would be used instead of the login
+  buildArgs(_prompt, { schemaText, model }) {
+    const args = [
+      '-p', // non-interactive one-shot; the prompt arrives on stdin
+      '--output-format', 'json', // a stable envelope instead of plain text
+      '--safe-mode', // no CLAUDE.md/hooks/skills/plugins/MCP, while the user's login still works
+      '--tools', '', // hard backstop: no tool can run
+      '--no-session-persistence', // stateless transform, like codex's --ephemeral
+    ];
+    if (schemaText) args.push('--json-schema', schemaText); // constrain the final message to the schema
+    if (model) args.push('--model', model);
+    return args;
+  },
+  rawText: claudeResultText,
+  loginHint: 'run `claude auth login` to sign in with your Claude subscription (no API key needed)',
+};
+
 /** Peel the model's final message out of cursor-agent's `--output-format json` envelope:
- *  `{type:"result", subtype:"success", is_error:false, result:"<final text>", …}`.
- *  Two things a plain `JSON.parse(s).result` would get wrong:
- *  - cursor can exit 0 while reporting failure via `is_error:true` (e.g. it hit a turn limit), which
- *    CliProvider's exit-code check cannot see. Left alone, the error prose would flow into
- *    extractJson and surface as a misleading "did not return parseable JSON", so map it to the same
- *    exit 3 a non-zero exit gets.
+ *  `{type:"result", subtype:"success", is_error:false, result:"<final text>", …}`. */
+export function cursorResultText(stdout: string): string {
+  const envelope = resultEnvelope(stdout, 'cursor-agent');
+  // Only peel when this really IS the envelope. Parsing alone isn't enough: if cursor ever returns
+  // the plan object bare (or renames the field), treating any JSON object as an envelope would
+  // blank it to '' and report "returned an empty response" — so anything without a string
+  // `result` falls through to the raw stdout, where extractJson can still find the object.
+  return typeof envelope?.result === 'string' ? envelope.result : stdout;
+}
+
+/** Peel the plan out of claude's `--output-format json` envelope. With --json-schema it carries
+ *  the object twice — parsed in `structured_output` and serialized in `result` — so prefer the one
+ *  claude validated, and fall back to `result` (then raw stdout) exactly as cursor does. */
+export function claudeResultText(stdout: string): string {
+  const envelope = resultEnvelope(stdout, 'claude');
+  const structured = envelope?.structured_output;
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) return JSON.stringify(structured);
+  return typeof envelope?.result === 'string' ? envelope.result : stdout;
+}
+
+/** Parse a `{type:"result", is_error, result, …}` envelope (cursor-agent and claude share the
+ *  shape), or undefined when stdout is not a JSON object. Two things a plain `JSON.parse(s).result`
+ *  would get wrong:
+ *  - the CLI can report failure via `is_error:true` (a turn limit, an unknown model, a usage limit)
+ *    with the reason in `result`. Left alone, that prose would flow into extractJson and surface as
+ *    a misleading "did not return parseable JSON", so map it to the same exit 3 a non-zero exit gets.
+ *    claude's error SUBTYPES (structured-output retries exhausted, an error during execution) carry
+ *    no `result` at all: their reason is in `errors` (read from the 2.1.284 binary's own result
+ *    schema — not yet seen live).
  *  - an envelope shape drift (or a future default of --output-format text) falls back to the raw
  *    stdout, so extractJson's tolerant scan still gets a chance instead of failing outright. */
-export function cursorResultText(stdout: string): string {
+function resultEnvelope(stdout: string, bin: string): Record<string, unknown> | undefined {
   let envelope: Record<string, unknown> | undefined;
   try {
     const parsed: unknown = JSON.parse(stdout.trim());
@@ -157,16 +234,12 @@ export function cursorResultText(stdout: string): string {
   } catch {
     /* not JSON at all (e.g. --output-format text) — fall through to the raw stdout */
   }
-  if (!envelope) return stdout;
-  if (envelope.is_error === true) {
-    const detail = typeof envelope.result === 'string' ? tail(envelope.result) : '';
-    throw new CliError(`\`cursor-agent\` reported an error: ${detail || '(no detail)'}`, 3);
+  if (envelope?.is_error === true) {
+    const errors = Array.isArray(envelope.errors) ? envelope.errors.filter((e) => typeof e === 'string') : [];
+    const detail = tail(typeof envelope.result === 'string' ? envelope.result : errors.join('; '));
+    throw new CliError(`\`${bin}\` reported an error: ${detail || '(no detail)'}`, 3);
   }
-  // Only peel when this really IS the envelope. Parsing alone isn't enough: if cursor ever returns
-  // the plan object bare (or renames the field), treating any JSON object as an envelope would
-  // blank it to '' and report "returned an empty response" — so anything without a string
-  // `result` falls through to the raw stdout, where extractJson can still find the object.
-  return typeof envelope.result === 'string' ? envelope.result : stdout;
+  return envelope;
 }
 
 export interface CliProviderOpts {
@@ -180,6 +253,8 @@ export interface CliProviderOpts {
   runImpl?: RunImpl;
   /** Injectable base temp dir for the neutral cwd + schema temp file; defaults to os.tmpdir(). */
   tmpDir?: string;
+  /** Injectable environment a spec's dropEnv is applied to, for unit tests; defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 // Collision-free temp-file names within a process without needing Math.random() (which the
@@ -219,19 +294,30 @@ export class CliProvider implements AgentProvider {
     const prompt = promptParts.join('\n\n');
 
     let schemaFile: string | undefined;
+    let schemaText: string | undefined;
     let outFile: string | undefined;
     try {
-      if (spec.schema === 'file') {
-        const encoded = spec.encodeSchema ? spec.encodeSchema(schema) : schema;
-        schemaFile = this.writeTemp('schema', '.json', JSON.stringify(encoded));
+      if (spec.schema !== 'prompt') {
+        const encoded = JSON.stringify(spec.encodeSchema ? spec.encodeSchema(schema) : schema);
+        if (spec.schema === 'file') schemaFile = this.writeTemp('schema', '.json', encoded);
+        else schemaText = encoded;
       }
       if (spec.usesOutputFile) outFile = this.tempPath('out', '.txt'); // path only; the CLI writes it
-      const args = spec.buildArgs(prompt, { schemaFile, outFile, cwd: this.baseTmp, model: this.opts.model });
+      const args = spec.buildArgs(prompt, { schemaFile, schemaText, outFile, cwd: this.baseTmp, model: this.opts.model });
+      const runOpts = {
+        timeout: this.timeoutMs,
+        cwd: this.baseTmp,
+        ...(spec.promptViaStdin ? { input: prompt } : {}),
+        ...(spec.dropEnv ? { env: withoutEnv(this.opts.env ?? process.env, spec.dropEnv) } : {}),
+      };
       // runText throws CliError(exit 3) for ENOENT / timeout / spawn failure — let it propagate.
-      const res = this.run(spec.bin, args, { timeout: this.timeoutMs, cwd: this.baseTmp });
+      const res = this.run(spec.bin, args, runOpts);
       if (res.code !== 0) {
-        // Lead with the CLI's own stderr — it carries the real reason (usage limit, auth, a bad
-        // flag). Only fall back to the login hint when stderr said nothing, so we don't
+        // An envelope CLI exits non-zero WITH the reason in its stdout envelope (claude: an unknown
+        // model, a usage limit) while stderr holds at most a terse tag — rawText throws that reason.
+        spec.rawText(res.stdout);
+        // Otherwise lead with the CLI's own stderr — it carries the real reason (usage limit, auth,
+        // a bad flag). Only fall back to the login hint when stderr said nothing, so we don't
         // mis-suggest a re-login for e.g. a quota error.
         const detail = tail(res.stderr);
         const suffix = detail ? `: ${detail}` : ` — ${spec.loginHint}`;
@@ -263,6 +349,14 @@ export class CliProvider implements AgentProvider {
     writeFileSync(file, content, 'utf8');
     return file;
   }
+}
+
+/** `env` minus `names` — the environment a spec's dropEnv hands its child. A copy: process.env
+ *  itself is never mutated. */
+function withoutEnv(env: NodeJS.ProcessEnv, names: string[]): NodeJS.ProcessEnv {
+  const kept = { ...env };
+  for (const name of names) delete kept[name];
+  return kept;
 }
 
 /** Read a file, returning '' if it does not exist / can't be read — lets the message-file path

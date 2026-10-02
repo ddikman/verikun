@@ -210,6 +210,7 @@ derived from the model name.
 | `gpt-4.1` | OpenAI | `OPENAI_API_KEY` |
 | `codex-cli` | the logged-in `codex` CLI | **none** |
 | `cursor-cli` | the logged-in `cursor-agent` CLI | **none** |
+| `claude-cli` | the logged-in `claude` CLI (Claude Code) | **none** |
 
 An unknown `--model` exits `2` with the allowlist, rather than a raw 404 from a provider.
 
@@ -218,8 +219,9 @@ cache reads bill at a different multiplier (see [Cost & budget](/verikun/referen
 
 ### The CLI backends
 
-`codex-cli` and `cursor-cli` shell out to an already-logged-in coding-agent CLI, so **you
-need no API key at all** — spend goes to your existing ChatGPT or Cursor subscription.
+`codex-cli`, `cursor-cli` and `claude-cli` shell out to an already-logged-in coding-agent CLI,
+so **you need no API key at all** — spend goes to your existing ChatGPT, Cursor or Claude
+subscription.
 
 - Their reported cost is `$0`, so `--max-cost-usd` and `--cost-override` are **inert
   no-ops**. The run is bounded by the repair cap and `--timeout` instead.

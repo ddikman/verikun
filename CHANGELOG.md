@@ -6,7 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-02
+
 ### Added
+- **`vk ai --model claude-cli`** compiles and repairs through your logged-in Claude Code CLI
+  (`claude auth login`), ignoring any exported `ANTHROPIC_API_KEY`; reported cost `$0`.
 - **Docs site** links unfurl with a social card image built from the illustration.
 
 ### Changed

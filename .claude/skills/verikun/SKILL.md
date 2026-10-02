@@ -374,13 +374,13 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
 ```
 
 - Needs `ANTHROPIC_API_KEY` (Claude models) or `OPENAI_API_KEY` (OpenAI models) — **or no key
-  at all** with `--model codex-cli` / `--model cursor-cli`, which drive an already-logged-in
-  `codex` or `cursor-agent` CLI off your ChatGPT / Cursor subscription (run `codex login` or
-  `cursor-agent login` once; verikun just needs the binary on PATH). Default model
+  at all** with `--model codex-cli` / `cursor-cli` / `claude-cli`, which drive an already-logged-in
+  `codex`, `cursor-agent` or `claude` CLI off your ChatGPT / Cursor / Claude subscription (run
+  `codex login`, `cursor-agent login` or `claude auth login` once; verikun just needs the binary on PATH). Default model
   `claude-sonnet-4-6`; `--model` switches model **and** provider — Anthropic
   (`claude-haiku-4-5` · `claude-sonnet-4-6` · `claude-opus-4-8` · `claude-fable-5`),
   OpenAI (`gpt-5.4-mini` · `gpt-5.4` · `gpt-5.5` · `gpt-4.1` — cheaper than the default sonnet,
-  and non-reasoning, so `--effort` does not apply to it), or a CLI backend (`codex-cli` · `cursor-cli`).
+  and non-reasoning, so `--effort` does not apply to it), or a CLI backend (`codex-cli` · `cursor-cli` · `claude-cli`).
 - For the CLI backends, spend is on your subscription, not per token, so the cost line reads `$0`
   and `--max-cost-usd` / `--cost-override` are no-ops (the run is still bounded by repairs +
   `--timeout`). Each CLI chooses its own underlying model, and is run read-only in a scratch
@@ -435,7 +435,7 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
 - Exit `0` pass · `1` a step failed (or the budget/timeout was hit, or the compile did not
   cover the test) · `2` usage · `3` environment
   (e.g. the model's API key — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — unset, or the `codex` /
-  `cursor-agent` CLI missing / not logged in for `--model codex-cli` / `cursor-cli`).
+  `cursor-agent` / `claude` CLI missing / not logged in for `--model codex-cli` / `cursor-cli` / `claude-cli`).
 - **`3` also means the device toolchain is broken**, checked *before* anything is compiled
   (missing `adb`/`idb`, no device, an ambiguous target) and again if it breaks mid-run. Treat
   it as "fix the machine", never as a failing test — the message carries the install hint.

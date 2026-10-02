@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { commandExists, spawnCollect } from '../src/exec';
+import { commandExists, runText, spawnCollect } from '../src/exec';
 
 // commandExists is a pure PATH scan (no spawn) used to decide a CLI provider is available.
 // `node` is guaranteed present when the test runner is running, so it is a safe positive.
@@ -15,6 +15,22 @@ test('commandExists: returns false for a binary that is not on PATH', () => {
 
 test('commandExists: an absolute path to a non-file is false', () => {
   assert.equal(commandExists('/definitely/not/here/nope'), false);
+});
+
+// --- runText ----------------------------------------------------------------
+
+test('runText: `env` replaces the child environment; without it the child inherits ours', () => {
+  // The claude CLI provider withholds an API key this way, so the key has to be really gone.
+  const print = ['-e', 'process.stdout.write(process.env.VK_EXEC_TEST_KEY ?? "(unset)")'];
+  process.env.VK_EXEC_TEST_KEY = 'inherited';
+  try {
+    assert.equal(runText(process.execPath, print).stdout, 'inherited');
+    const env = { ...process.env };
+    delete env.VK_EXEC_TEST_KEY;
+    assert.equal(runText(process.execPath, print, { env }).stdout, '(unset)');
+  } finally {
+    delete process.env.VK_EXEC_TEST_KEY;
+  }
 });
 
 // --- spawnCollect -----------------------------------------------------------

@@ -170,8 +170,8 @@ Where the line surfaces:
 ## What is free
 
 - **A cache hit.** The plan replays with no model call, so the line reads `est $0.0000`.
-- **The CLI backends.** `--model codex-cli` / `--model cursor-cli` shell out to an already-logged-in
-  `codex` or `cursor-agent`, billing your ChatGPT or Cursor subscription rather than per token.
+- **The CLI backends.** `--model codex-cli` / `cursor-cli` / `claude-cli` shell out to an already-logged-in
+  `codex`, `cursor-agent` or `claude`, billing your ChatGPT, Cursor or Claude subscription rather than per token.
   They report `$0`, which also makes `--max-cost-usd` and `--cost-override` **inert no-ops** — the
   run is bounded by the repair cap and `--timeout` instead.
 

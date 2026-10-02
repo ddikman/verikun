@@ -62,7 +62,7 @@ model calls, rather than healing a different way on every device.
   `brew install idb-companion` then `pip install fb-idb`; verify with `vk doctor --ios`.
 - **A model for `vk ai`.** Either an API key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`,
   read from the environment — *not* from a `.env` file), or an already-logged-in coding
-  agent CLI, which needs **no key at all**: `--model codex-cli` or `--model cursor-cli`
+  agent CLI, which needs **no key at all**: `--model codex-cli`, `cursor-cli` or `claude-cli`
   bill to your existing subscription and report `$0`.
 
 ## Run it

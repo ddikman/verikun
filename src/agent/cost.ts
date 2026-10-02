@@ -29,8 +29,10 @@ export interface Price {
 
 /** Which backend serves a --model. HTTP providers read an API key from env — ClaudeProvider
  *  (claude.ts) and OpenAiProvider (openai.ts); CLI providers shell out to an already-logged-in
- *  agent CLI — CliProvider (cli-provider.ts), i.e. 'codex' and 'cursor'. cmdAi routes on this. */
-export type ProviderId = 'anthropic' | 'openai' | 'codex' | 'cursor';
+ *  agent CLI — CliProvider (cli-provider.ts), i.e. 'codex', 'cursor' and 'claude'. 'claude' is
+ *  the Claude Code CLI on the user's own login, NOT 'anthropic' (the API-key HTTP backend, and the
+ *  fallback for an unknown model). cmdAi routes on this. */
+export type ProviderId = 'anthropic' | 'openai' | 'codex' | 'cursor' | 'claude';
 
 interface ModelSpec extends Price {
   provider: ProviderId;
@@ -56,13 +58,15 @@ const MODELS: Record<string, ModelSpec> = {
   // no reasoning_effort (openai.ts's REASONING_MODELS gate skips the param for it), and it
   // bills cache reads at 0.25x rather than the 0.1x every other model here uses.
   'gpt-4.1': { input: 2, output: 8, provider: 'openai', cacheReadMult: 0.25 },
-  // CLI-agent backends: billed to the user's ChatGPT/Cursor subscription via an already-logged-in
-  // CLI, not per token — so price is $0 and --max-cost-usd/--cost-override are inert no-ops (the
-  // run is bounded by maxRepairs + --timeout instead). The `-cli` suffix reads clearly as "the
-  // CLI" and keeps these from colliding with the CLIs' own model aliases — cursor in particular
-  // offers `gpt-5.3-codex`, `gpt-5.4-high`, `claude-opus-4-8-thinking-high` and friends.
+  // CLI-agent backends: billed to the user's ChatGPT/Cursor/Claude subscription via an
+  // already-logged-in CLI, not per token — so price is $0 and --max-cost-usd/--cost-override are
+  // inert no-ops (the run is bounded by maxRepairs + --timeout instead), even though claude's own
+  // envelope reports a notional total_cost_usd. The `-cli` suffix reads clearly as "the CLI" and
+  // keeps these from colliding with the CLIs' own model aliases — cursor in particular offers
+  // `gpt-5.3-codex`, `gpt-5.4-high`, `claude-opus-4-8-thinking-high` and friends.
   'codex-cli': { input: 0, output: 0, provider: 'codex' },
   'cursor-cli': { input: 0, output: 0, provider: 'cursor' },
+  'claude-cli': { input: 0, output: 0, provider: 'claude' },
 };
 
 // Strip `provider` off each spec; what remains IS the Price (including any cacheReadMult,

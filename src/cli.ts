@@ -83,7 +83,7 @@ import { runPlan, DEFAULT_RUN_TIMEOUT_MS, DEFAULT_GUARD_SETTLE_MS } from './agen
 import { LintFinding, coverageChecksEnabled, instructionUnits, lintPlan, looksTruncated, ungroundedIds } from './agent/lint';
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
-import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-provider';
+import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC, CLAUDE_SPEC } from './agent/cli-provider';
 import { AgentProvider } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheEntry, CacheKeyInput } from './agent/cache';
 import { takePlanLock, planLockWaitMs } from './agent/plan-lock';
@@ -1808,7 +1808,11 @@ function readAiTest(file: string): ResolvedTest {
 
 /** The CLI-agent backends, by ProviderId. Adding a CLI provider is one entry here rather than a
  *  new arm in each of the three functions below — they all ask the same question of it. */
-const CLI_SPECS: Partial<Record<ProviderId, CliAgentSpec>> = { codex: CODEX_SPEC, cursor: CURSOR_SPEC };
+const CLI_SPECS: Partial<Record<ProviderId, CliAgentSpec>> = {
+  codex: CODEX_SPEC,
+  cursor: CURSOR_SPEC,
+  claude: CLAUDE_SPEC,
+};
 
 /** Is the backend for `model` usable right now? HTTP providers need their API key in env;
  *  a CLI provider needs its binary on PATH (auth lives in the CLI's own login, not an env key). */
@@ -3996,7 +4000,8 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       or a logged-in agent CLI — no API key: --model
                                       codex-cli uses your 'codex login' ChatGPT
                                       subscription, cursor-cli your 'cursor-agent login'
-                                      Cursor one (cost is $0 for both, so
+                                      Cursor one, claude-cli your 'claude auth login'
+                                      Claude one (cost is $0 for all three, so
                                       --max-cost-usd/--cost-override are no-ops).
                                       Progress -> stderr; the report path ->
                                       stdout. --show-plan prints the compiled IR without
@@ -4009,7 +4014,7 @@ AI (run a natural-language test — compile once, replay model-free, self-heal)
                                       Models: claude-haiku-4-5 | claude-sonnet-4-6
                                       (default) | claude-opus-4-8 | claude-fable-5 |
                                       gpt-5.4-mini | gpt-5.4 | gpt-5.5 | gpt-4.1 |
-                                      codex-cli | cursor-cli.
+                                      codex-cli | cursor-cli | claude-cli.
 
 SUITE (run a directory of natural-language tests as one gated suite)
   suite <dir> [--app <id>] [--name n] [--retries n] [--json]

@@ -7,7 +7,9 @@ import {
   CliProvider,
   CODEX_SPEC,
   CURSOR_SPEC,
+  CLAUDE_SPEC,
   cursorResultText,
+  claudeResultText,
   RunImpl,
   extractJson,
   schemaInstruction,
@@ -24,7 +26,7 @@ import { CliError } from '../src/errors';
 interface Captured {
   bin?: string;
   args?: string[];
-  opts?: { input?: string; timeout?: number; cwd?: string };
+  opts?: { input?: string; timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv };
 }
 
 function fakeRun(result: { code?: number; stdout?: string; stderr?: string }, captured?: Captured): RunImpl {
@@ -258,6 +260,186 @@ test('cursorResultText: peels `result`, maps is_error to exit 3, falls back to r
   assert.equal(cursorResultText('[1,2]'), '[1,2]'); // a JSON array is not the envelope
 });
 
+// claude takes a THIRD path through the same class: schema:'inline' (--json-schema wants the
+// schema text, not a path) and promptViaStdin (`--tools` is variadic, so a trailing positional
+// prompt would be read as a tool name). The answer comes back in a cursor-shaped envelope.
+
+/** A trimmed claude `-p --output-format json --json-schema` envelope. Shape measured against the
+ *  real binary (2.1.284): the object arrives twice — parsed in `structured_output`, serialized in
+ *  `result`. An error exits 1 with `is_error:true` and the reason in `result` — or, for an error
+ *  SUBTYPE, in `errors` with no `result` at all. */
+function claudeEnvelope(fields: {
+  result?: string;
+  structured_output?: unknown;
+  is_error?: boolean;
+  subtype?: string;
+  errors?: string[];
+}): string {
+  return JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    is_error: fields.is_error ?? false,
+    num_turns: 2,
+    total_cost_usd: 0.010488,
+    session_id: 'f1c59f06',
+    ...fields,
+  });
+}
+
+test('compile (claude): schema text in argv, prompt on stdin, plan from structured_output', () => {
+  return withTmp((dir) => {
+    const captured: Captured = {};
+    const stdout = claudeEnvelope({ result: PLAN_JSON, structured_output: JSON.parse(PLAN_JSON) });
+    const provider = new CliProvider({ spec: CLAUDE_SPEC, tmpDir: dir, runImpl: fakeRun({ stdout }, captured) });
+    return provider.compile({ nl: 'tap the login button', platform: 'android' }).then(({ plan, usage }) => {
+      assert.equal(captured.bin, 'claude');
+      const args = captured.args!;
+      assert.ok(args.includes('-p')); // non-interactive one-shot
+      assert.equal(argVal(args, '--output-format'), 'json');
+      assert.ok(args.includes('--safe-mode')); // keeps the user's CLAUDE.md/hooks/plugins/MCP out
+      assert.equal(argVal(args, '--tools'), ''); // no tool can run
+      assert.ok(args.includes('--no-session-persistence'));
+      // --bare would stop reading the OAuth login and demand ANTHROPIC_API_KEY — the whole point lost
+      assert.ok(!args.includes('--bare'));
+      assert.ok(!args.includes('--dangerously-skip-permissions'));
+      // the schema TEXT, in the plain ir.ts dialect (not a path, not OpenAI-strict)
+      assert.deepEqual(JSON.parse(argVal(args, '--json-schema')!), PLAN_JSON_SCHEMA);
+      // the prompt is on stdin and nowhere in argv, so `--tools` cannot swallow it
+      assert.match(captured.opts!.input!, /pure text-to-JSON transformer/);
+      assert.match(captured.opts!.input!, /tap the login button/);
+      assert.ok(!args.some((a) => a.includes('tap the login button')));
+      assert.equal(captured.opts!.cwd, dir);
+
+      assert.equal(plan.steps.length, 1);
+      assert.deepEqual(usage, {}); // subscription-billed ⇒ $0, whatever total_cost_usd says
+      assert.deepEqual(readdirSync(dir), []); // inline schema + stdout envelope ⇒ no temp files at all
+    });
+  });
+});
+
+test('claude never inherits an API credential that would outrank its login', () => {
+  return withTmp((dir) => {
+    // Measured on 2.1.284: with ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) exported, `claude -p`
+    // authenticates with THAT and ignores the subscription login — every call billed per token to
+    // the key while vk reports $0. And the key is what vk's own default model has users export.
+    const captured: Captured = {};
+    const env = { PATH: '/usr/bin', HOME: '/home/u', ANTHROPIC_API_KEY: 'sk-ant-x', ANTHROPIC_AUTH_TOKEN: 'tok' };
+    const stdout = claudeEnvelope({ structured_output: JSON.parse(PLAN_JSON) });
+    const provider = new CliProvider({ spec: CLAUDE_SPEC, tmpDir: dir, env, runImpl: fakeRun({ stdout }, captured) });
+    return provider.compile({ nl: 'x', platform: 'android' }).then(() => {
+      assert.deepEqual(captured.opts!.env, { PATH: '/usr/bin', HOME: '/home/u' }); // the rest passes through
+      assert.equal(env.ANTHROPIC_API_KEY, 'sk-ant-x'); // a copy: the caller's environment is untouched
+    });
+  });
+});
+
+test('repair (claude): a "repair" decision and a "give_up" decision both decode', () => {
+  return withTmp((dir) => {
+    const repair = { decision: 'repair', step: { type: 'command', command: 'tap', positionals: ['@ok'], flags: [] } };
+    const giveUp = { decision: 'give_up', reason: 'landed on the wrong screen' };
+    const captured: Captured = {};
+    const repairer = new CliProvider({
+      spec: CLAUDE_SPEC,
+      tmpDir: dir,
+      runImpl: fakeRun({ stdout: claudeEnvelope({ structured_output: repair }) }, captured),
+    });
+    const quitter = new CliProvider({
+      spec: CLAUDE_SPEC,
+      tmpDir: dir,
+      runImpl: fakeRun({ stdout: claudeEnvelope({ structured_output: giveUp }) }),
+    });
+    return Promise.all([
+      repairer.repair({ failedStep: FAILED_STEP, reason: 'selector not found', hierarchy: [] }).then((r) => {
+        assert.deepEqual(r.replaceStep, repair.step);
+        assert.match(captured.opts!.input!, /give_up/); // the REPAIR grammar, not the compile grammar
+      }),
+      quitter.repair({ failedStep: FAILED_STEP, reason: 'ambiguous', candidates: [], hierarchy: [] }).then((r) => {
+        assert.equal(r.replaceStep, null);
+        assert.equal(r.declineReason, 'landed on the wrong screen');
+      }),
+    ]);
+  });
+});
+
+test("claude's non-zero exit surfaces the envelope's reason, not stderr's tag or the login hint", () => {
+  return withTmp((dir) => {
+    // Measured: an unknown model exits 1 with a one-line tag on stderr and the real reason in
+    // the envelope — suggesting `claude auth login` there would send the user the wrong way.
+    const stdout = claudeEnvelope({ is_error: true, result: "There's an issue with the selected model (x)." });
+    const stderr = '[claude-code:unrecognized_model] {"model":"x"}';
+    const provider = new CliProvider({ spec: CLAUDE_SPEC, tmpDir: dir, runImpl: fakeRun({ code: 1, stdout, stderr }) });
+    return assert.rejects(
+      () => provider.compile({ nl: 'x', platform: 'android' }),
+      (e: unknown) =>
+        e instanceof CliError && e.exitCode === 3 && /`claude` reported an error: There's an issue with the selected model/.test(e.message),
+    );
+  });
+});
+
+test('a non-zero claude exit with nothing on stdout or stderr falls back to the login hint', () => {
+  return withTmp((dir) => {
+    const provider = new CliProvider({ spec: CLAUDE_SPEC, tmpDir: dir, runImpl: fakeRun({ code: 1 }) });
+    return assert.rejects(
+      () => provider.compile({ nl: 'x', platform: 'android' }),
+      (e: unknown) => e instanceof CliError && e.exitCode === 3 && /claude auth login/.test(e.message),
+    );
+  });
+});
+
+test('claudeResultText: prefers structured_output, then `result`, then raw stdout; is_error is exit 3', () => {
+  // structured_output is the copy claude validated against the schema — it wins over `result`
+  assert.equal(claudeResultText(claudeEnvelope({ result: 'prose', structured_output: { a: 1 } })), '{"a":1}');
+  assert.equal(claudeResultText(claudeEnvelope({ result: '{"a":1}' })), '{"a":1}');
+  assert.throws(
+    () => claudeResultText(claudeEnvelope({ is_error: true, result: 'usage limit reached' })),
+    (e: unknown) => e instanceof CliError && e.exitCode === 3 && /`claude` reported an error: usage limit reached/.test(e.message),
+  );
+  assert.equal(claudeResultText('plain text answer'), 'plain text answer');
+  assert.equal(claudeResultText('[1,2]'), '[1,2]'); // a JSON array is not the envelope
+});
+
+test("claudeResultText: an error subtype's reason comes from `errors`, not a missing `result`", () => {
+  // Envelope shape read out of the 2.1.284 binary: error_max_structured_output_retries and
+  // error_during_execution carry `errors: string[]` and NO `result`. The first is the one failure
+  // specific to --json-schema — the model never produced schema-valid output — and it read
+  // "(no detail)".
+  const exhausted = claudeEnvelope({
+    is_error: true,
+    subtype: 'error_max_structured_output_retries',
+    errors: ['no structured output survived validation', 'gave up after 5 attempts'],
+  });
+  assert.throws(
+    () => claudeResultText(exhausted),
+    (e: unknown) =>
+      e instanceof CliError &&
+      e.exitCode === 3 &&
+      e.message === '`claude` reported an error: no structured output survived validation; gave up after 5 attempts',
+  );
+  // neither field: still an error, and it says that it has nothing to say
+  assert.throws(
+    () => claudeResultText(claudeEnvelope({ is_error: true, subtype: 'error_during_execution' })),
+    (e: unknown) => e instanceof CliError && e.exitCode === 3 && /\(no detail\)$/.test(e.message),
+  );
+});
+
+test('codex and cursor are untouched by the claude-only fields: no stdin, no env, prompt still last', () => {
+  return withTmp((dir) => {
+    const codex: Captured = {};
+    const cursor: Captured = {};
+    const a = new CliProvider({ spec: CODEX_SPEC, tmpDir: dir, runImpl: fakeRun({ stdout: PLAN_JSON }, codex) });
+    const b = new CliProvider({ spec: CURSOR_SPEC, tmpDir: dir, runImpl: fakeRun({ stdout: cursorEnvelope(PLAN_JSON) }, cursor) });
+    return Promise.all([a.compile({ nl: 'x', platform: 'android' }), b.compile({ nl: 'x', platform: 'android' })]).then(() => {
+      for (const c of [codex, cursor]) {
+        assert.equal(c.opts!.input, undefined);
+        assert.equal(c.opts!.env, undefined); // they inherit this process's environment, as before
+        assert.match(args_prompt(c), /pure text-to-JSON transformer/);
+        assert.ok(!c.args!.includes('--json-schema'));
+      }
+      assert.ok(codex.args!.includes('--output-schema')); // codex still reads its schema from a file
+    });
+  });
+});
+
 test('extractJson: bare, fenced, prose-wrapped, and brace-in-string cases; throws exit 1 on garbage', () => {
   assert.deepEqual(extractJson('{"a":1}'), { a: 1 });
   assert.deepEqual(extractJson('```json\n{"a":1}\n```'), { a: 1 });
@@ -281,7 +463,7 @@ function args_prompt(captured: Captured): string {
   return args[args.length - 1];
 }
 
-// --- compileUserPrompt (shared by all four providers) -----------------------
+// --- compileUserPrompt (shared by all five providers) -----------------------
 
 test('compileUserPrompt: a whole test is headed NATURAL-LANGUAGE TEST and carries no section note', () => {
   const prompt = compileUserPrompt({ nl: '1. Tap Login', pkg: 'com.example', platform: 'android' });
