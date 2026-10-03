@@ -201,7 +201,7 @@ the next lease; unreachable devices retain pending restoration until admission.
 `LeaseTable` owns affinity, tombstones, exclusivity, in-flight counts and the FIFO. Waiters
 are dealt on release, without client reservations or parking. `x-verikun-wait-ms` measures
 server-wide no-progress time. Untagged refusals create no row and spend no retry.
-`health.deviceHealth` and `health.leaseHold` are required by the major client. A no-hold
+`health.deviceHealth` and `health.leaseHold` are required by the current client. A no-hold
 lease request returns HTTP 426; device execution without a hold returns HTTP 428.
 The RPC bodies no longer carry `evicted` or `deviceChanged`; typed errors carry the verdict.
 A lane child must provide `outcome`; missing outcomes in same-build JSON are internal failures.
