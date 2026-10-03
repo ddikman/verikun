@@ -1,3 +1,4 @@
+import { AdbRunner } from './adb-runner';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -6,8 +7,8 @@ import {
 } from '../types';
 import type { RawImage } from '../image';
 import { Companion, barrierRecycleDue, companionEnabled, releaseCompanionOn } from '../companion/manager';
-import { CliError, DumpKilledError, NoWindowError, dumpKilledMessage, probeFailure } from '../errors';
-import { runText, runBinary, sleepSync, commandExists, spawnDetached, TextResult } from '../exec';
+import { DeviceUnresponsiveError, CliError, DumpKilledError, NoWindowError, dumpKilledMessage, probeFailure } from '../errors';
+import { runText, sleepSync, commandExists, spawnDetached, TextResult } from '../exec';
 import { isInteresting, parseHierarchy, parseRotation } from '../ui/android-parse';
 import { describeBarrier, modalBarrierOnly } from '../ui/barrier';
 import { viewportFor } from '../ui/viewport';
@@ -681,12 +682,15 @@ export class AdbDriver implements Driver {
   private barrierRecycled = false;
   /** Until when `ensureAwake` may skip its probe. See AWAKE_FRESH_MS. */
   private awakeUntil = 0;
+  private adbRunner?: AdbRunner;
+  private runner(): AdbRunner { return this.adbRunner ??= new AdbRunner(ADB, this.resolvedSerial()); }
 
   constructor(serial?: string) {
     this.requested = serial;
   }
 
   preflight(): void {
+    if (this.adbRunner && !this.probeLiveness()) throw new DeviceUnresponsiveError('device did not answer a 5s liveness echo');
     const adb = probeAdb();
     if (!adb.ok) throw probeFailure(adb);
     // Resolving the serial is the other half of "can I drive anything?": it throws
@@ -706,6 +710,8 @@ export class AdbDriver implements Driver {
       });
     }
   }
+
+  probeLiveness(): boolean { return this.runner().probe(); }
 
   listDevices(): DeviceInfo[] {
     return listAdbDevices();
@@ -755,12 +761,10 @@ export class AdbDriver implements Driver {
     return usable;
   }
 
-  private withSerial(args: string[]): string[] {
-    return ['-s', this.resolvedSerial(), ...args];
-  }
-
   private shell(args: string[], timeout?: number): string {
-    return runText(ADB, this.withSerial(['shell', ...args]), { timeout }).stdout;
+    const r = this.runner().text(['shell', ...args], { timeout });
+    if (r.code !== 0) throw new CliError(r.stderr.trim() || r.stdout.trim() || `adb shell exited ${r.code}`, 3);
+    return r.stdout;
   }
 
   getElements(opts: { all?: boolean } = {}): Element[] {
@@ -926,6 +930,7 @@ export class AdbDriver implements Driver {
     if (this.companion === undefined) {
       this.companion = new Companion({
         adb: ADB,
+        runner: this.runner(),
         serial: this.resolvedSerial(),
         // Calibration compares the companion against exactly the dump the rest of verikun
         // would otherwise have used, so pass the stock path itself.
@@ -970,10 +975,10 @@ export class AdbDriver implements Driver {
       // from a screen that is minutes old. MEASURED: a dump killed at 18:46 happily served
       // the 18:44 hierarchy. Removing it first makes that impossible — `cat` can only
       // succeed if THIS dump wrote it.
-      const dump = runText(ADB, this.withSerial(['shell', `rm -f ${path}; uiautomator dump ${path}`]), {
+      const dump = this.runner().text(['shell', `rm -f ${path}; uiautomator dump ${path}`], {
         timeout: 15000,
       });
-      const cat = runBinary(ADB, this.withSerial(['exec-out', 'cat', path]));
+      const cat = this.runner().binary(['exec-out', 'cat', path]);
       const xml = cat.stdout.toString('utf8');
       if (xml.includes('<hierarchy')) return xml;
       lastErr = `${dump.stdout} ${dump.stderr} ${cat.stderr}`.replace(/\s+/g, ' ').trim();
@@ -1017,7 +1022,7 @@ export class AdbDriver implements Driver {
 
   screenshot(): Buffer {
     this.ensureAwake('taking a screenshot');
-    const r = runBinary(ADB, this.withSerial(['exec-out', 'screencap', '-p']));
+    const r = this.runner().binary(['exec-out', 'screencap', '-p']);
     if (r.stdout.length < 8 || r.stdout[0] !== 0x89 || r.stdout[1] !== 0x50) {
       throw new CliError(`screencap did not return a PNG. ${r.stderr}`.trim(), 3);
     }
@@ -1035,7 +1040,7 @@ export class AdbDriver implements Driver {
    */
   screenshotRaw(): RawImage | null {
     this.ensureAwake('taking a screenshot');
-    const r = runBinary(ADB, this.withSerial(['exec-out', 'screencap']));
+    const r = this.runner().binary(['exec-out', 'screencap']);
     const buf = r.stdout;
     if (buf.length < RAW_HEADER_SIZES[0]) return null;
     const width = buf.readUInt32LE(0);
@@ -1130,7 +1135,7 @@ export class AdbDriver implements Driver {
     // so a failed launch would otherwise read as success. The benign `Warning: Activity
     // not started` (intent delivered to a running instance, e.g. --no-restart) is NOT a
     // failure.
-    const r = runText(ADB, this.withSerial(['shell', 'am', 'start', '-n', component]));
+    const r = this.runner().text(['shell', 'am', 'start', '-n', component]);
     const combined = `${r.stdout}\n${r.stderr}`;
     const benignWarning = /Warning: Activity not started/.test(combined);
     if (/^Error\b/im.test(combined) || (r.code !== 0 && !benignWarning)) {
@@ -1156,7 +1161,7 @@ export class AdbDriver implements Driver {
     // signature conflict?" and only then "which package does it name?". A full disk, an
     // offline device or an unparseable APK is not a conflict and must keep the plain
     // message it has always had — both because a signing-key diagnosis would be a
-    // confident wrong answer, and because `device/failover.ts` classifies on that string.
+    // confident wrong answer.
     if (!isSignatureConflict(first)) throw new CliError(`Failed to install '${appPath}': ${first}`, 3);
     const pkg = blockingPackage(first);
     if (!pkg) throw new CliError(signatureConflictHelp(appPath, null, 'not-named', first), 3);
@@ -1189,15 +1194,14 @@ export class AdbDriver implements Driver {
    * signature-conflict replace below, because it carries no data-loss trade-off (inert
    * when there is no downgrade, and keeps data the same way `-r` does when there is).
    * Android only honors it for a debuggable build, so a release-signed downgrade still
-   * surfaces `INSTALL_FAILED_VERSION_DOWNGRADE` unresolved — see the comment on that
-   * code in `device/failover.ts`. A large APK can legitimately take minutes to stream +
+   * surfaces `INSTALL_FAILED_VERSION_DOWNGRADE` unresolved. A large APK can take minutes to stream +
    * install, so the timeout is far above the 30s default. adb reports failures both as a
    * non-zero exit AND as a `Failure [REASON]` line on stdout with exit 0 (varies by adb
    * version) — check both, and require `Success` positively rather than merely inferring
    * it from the absence of `Failure`.
    */
   private tryInstall(appPath: string): string | null {
-    const r = runText(ADB, this.withSerial(['install', '-r', '-d', appPath]), { timeout: 10 * 60 * 1000 });
+    const r = this.runner().text(['install', '-r', '-d', appPath], { timeout: 10 * 60 * 1000 });
     const combined = `${r.stdout}\n${r.stderr}`;
     if (r.code !== 0 || /^Failure\b/im.test(combined) || !/^Success\b/im.test(combined)) {
       return combined.replace(/\s+/g, ' ').trim() || `exit code ${r.code}`;
@@ -1212,7 +1216,7 @@ export class AdbDriver implements Driver {
    * outside `[A-Za-z0-9._]+` regardless.
    */
   private uninstallPackage(appId: string): void {
-    const r = runText(ADB, this.withSerial(['uninstall', appId]), { timeout: 60 * 1000 });
+    const r = this.runner().text(['uninstall', appId], { timeout: 60 * 1000 });
     const combined = `${r.stdout}\n${r.stderr}`;
     if (r.code !== 0 || /^Failure\b/im.test(combined) || !/^Success\b/im.test(combined)) {
       throw new CliError(combined.replace(/\s+/g, ' ').trim() || `exit code ${r.code}`, 3);
@@ -1301,7 +1305,7 @@ export class AdbDriver implements Driver {
     // Sample it from the device clock with a space-free format (so no device-shell
     // quoting is needed), then restore the space to match logcat's `-t` form.
     try {
-      return this.shell(['date', '+%m-%dT%H:%M:%S.000']).trim().replace('T', ' ');
+      return this.runner().text(['shell', 'date', '+%m-%dT%H:%M:%S.000'], { timeout: 3000, bestEffort: true }).stdout.trim().replace('T', ' ');
     } catch {
       return '';
     }
@@ -1318,7 +1322,7 @@ export class AdbDriver implements Driver {
    *  ("Permission denial", "cmd: Can't find service") arrives on stderr and would
    *  otherwise be invisible in the error we raise. */
   private shellFull(args: string[], timeout?: number): TextResult {
-    return runText(ADB, this.withSerial(['shell', ...args]), { timeout });
+    return this.runner().text(['shell', ...args], { timeout });
   }
 
   /** `settings get <ns> <key>`, with Android's literal "null" (unset) mapped to null. */
@@ -1595,7 +1599,7 @@ export class AdbDriver implements Driver {
 
   private readWakefulness(): boolean | null {
     try {
-      const m = /mWakefulness=(\w+)/.exec(this.shell(['dumpsys', 'power']));
+      const m = /mWakefulness=(\w+)/.exec(this.runner().text(['shell', 'dumpsys', 'power'], { timeout: 3000, bestEffort: true }).stdout);
       return m ? m[1].toLowerCase() === 'awake' : null;
     } catch {
       return null;

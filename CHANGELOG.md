@@ -6,17 +6,34 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Docs site** publishes a single `sitemap.xml`.
+
+## [1.0.0] - 2026-10-03
+
 ### Added
 - **Docs site** links unfurl with a social card image built from the illustration.
 
 ### Changed
-- **Docs site** publishes a single `sitemap.xml`.
+- **`vk server`**: fork one executor per device; confirmed failures kill its process group, including blocked adb/idb children.
+- **`vk server`**: supervise device health and readmit every pool; typed loss reruns free. Disable supervision with `VERIKUN_NO_DEVICE_WATCH`.
+- **Remote leases**: acquire after compilation; heartbeat holds, FIFO admission, and lease-end setting restoration release abandoned clients.
+- **Remote installs**: gate dealing by build SHA; return after first-success grace while failed targets catch up.
+- **`vk suite`**: use lanes at every remote capacity, bench local failures, and preserve archives with explicit JSON outcomes.
 - **Docs site and README** show the new verikun logo and an animated illustration, with light and
   dark variants.
 - **Docs site** primary color is now black, off-white in dark mode.
 
 ### Fixed
 - **Docs site** favicon no longer 404s; it shows the logo.
+- **Android actions**: surface device-shell failures and retry safe transport loss once; failed liveness confirmation opens a circuit breaker.
+- **Remote deadlines**: use native HTTP timers and keep draining executors out of dealing; any nonempty `VERIKUN_NO_ADB_RECYCLE` disables restart.
+
+### Removed
+- **Remote clients and servers**: upgrade both to versions supporting held leases and server-owned device health.
+- **Remote leases**: remove no-hold acquisition, implicit execution leases, five-minute takeover, and support for peers without holds and supervision.
+- **Remote RPC**: remove `evicted` and `deviceChanged` response fields; typed errors identify device loss.
+- **Suite children**: remove verdict inference for JSON without `outcome`; same-build results must supply it.
 
 ## [0.31.0] - 2026-09-27
 

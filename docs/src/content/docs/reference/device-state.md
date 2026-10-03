@@ -166,7 +166,9 @@ See [Rollover and device overrides](/verikun/reference/reports-and-test-runs/#ro
 — a same-device rollover carries unrestored overrides forward; a device-change rollover warns
 with the exact command needed to undo them.
 
-### Known gap: `--server`
+### Remote lease restoration
 
-Under `--server` the snapshot is written by the **server** process, so a crashed client leaves
-overrides applied on the device. Run `vk device reset` from the device box.
+Over `--server`, the server stores original values per run token and restores them on
+release, eviction or held-client disappearance before dealing the device again. If the
+device is unavailable, restoration waits for readmission. A running command drains before
+its late setting snapshot is restored.

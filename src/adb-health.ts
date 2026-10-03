@@ -7,12 +7,8 @@
  * of CPU on the error loop. `adb kill-server && adb start-server` took it to zero and every
  * device came back in ~5s.
  *
- * WHY VERIKUN CARES, rather than leaving this to the operator: adb rot DEFEATS DEVICE
- * FAILOVER. `device/failover.ts` moves the server off a device that fails, but every
- * candidate sits behind the same host adb — so when the transport is what broke, failover
- * walks the pool retiring healthy phones for a host-side fault. That is the same polarity
- * error `ARTIFACT_RULES` exists to prevent on the install path: enumerate the thing you can
- * actually attribute, and never blame the open-ended side.
+ * A host transport failure affects every device behind adb. The server supervises
+ * correlated losses together and recycles under a host lock, excluding foreign claims.
  *
  * THE RATE IS A LEAKED-HANDLE COUNTER, which is what makes this measurable rather than
  * guessed. adb scans USB at ~1Hz and each STALE device handle throws one violation per
@@ -131,7 +127,7 @@ export function describeRot(health: AdbServerHealth): string | undefined {
  * exactly, for the rare host running other adb work alongside the server.
  */
 export function adbRecycleEnabled(platform: string): boolean {
-  return platform === 'android' && process.env.VERIKUN_NO_ADB_RECYCLE !== '1';
+  return platform === 'android' && !process.env.VERIKUN_NO_ADB_RECYCLE;
 }
 
 /** The running adb server's pid. Undefined when there is none, or when `pgrep` is absent. */

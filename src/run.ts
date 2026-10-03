@@ -1,3 +1,5 @@
+import { withExecDeadline } from './exec';
+import { isDeviceLoss } from './errors';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Driver, Element } from './types';
@@ -657,7 +659,7 @@ export class Recorder {
     // The step failed BECAUSE the environment is broken, so evidence capture is
     // near-certain to fail the same way. Still attempt it (a screencap can succeed
     // where a dump doesn't), but don't narrate two more copies of the same error.
-    this.capture(driver, isEnvError(e));
+    if (!isDeviceLoss(e)) this.capture(driver, isEnvError(e));
     this.commit();
   }
 
@@ -665,6 +667,10 @@ export class Recorder {
   // The device may be unreachable (that may be why we failed) — swallow errors.
   private capture(driver?: Driver, quiet = false): void {
     if (!driver) return;
+    withExecDeadline(Date.now() + 20_000, () => this.captureWithinDeadline(driver, quiet));
+  }
+
+  private captureWithinDeadline(driver: Driver, quiet: boolean): void {
     // No device, no evidence. When resolution itself is what failed — nothing attached,
     // or another job holds every device — there is no screen to photograph, and both
     // attempts below would re-raise that same error and print it again. Staying silent

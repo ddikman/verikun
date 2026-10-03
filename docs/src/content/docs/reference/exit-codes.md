@@ -100,6 +100,10 @@ An environment abort is `3` so it is never read as a regression. A rejected comp
 not `2`, so `vk suite --retries` retries it. When a `vk server` ended the run because its device
 left the pool, `--json` also carries `evicted: true` — the run did not fail, so run it again.
 
+`vk ai --json` reports `outcome`: `pass`, `fail`, `env`, `lost-device`, `no-device`,
+`server-unreachable`, `budget`, `timeout`, `usage` or `internal`. Transport loss and
+a confirmed unresponsive device exit `3`; evidence capture is skipped for both.
+
 ## `vk suite`
 
 | Code | Meaning |
@@ -120,9 +124,10 @@ in `--json` is what tells them apart.
 `--max-suite-cost-usd` stops the suite at **`1`**, not `3`: the box is fine, the run just did
 not finish. `index.json`'s `aborted.kind` says which of the two happened.
 
-Across a [pool](/verikun/guides/suites/#running-across-several-devices), a broken device
-retires its lane and its tests move to the others; `3` arrives only once **every** device is
-gone, or no lane could get one for
+Across a [pool](/verikun/guides/suites/#running-across-several-devices), a broken local device
+is benched and probed every 45 seconds. Server lanes follow the server's health state.
+Typed device loss gets up to two free reruns and does not create a flaky row. The suite
+stops with `3` and `notRun` after no device progress for
 [`VERIKUN_SUITE_DEVICE_WAIT_MIN`](/verikun/reference/environment-variables/#tuning-behaviour)
 minutes.
 

@@ -15,6 +15,19 @@ export interface TextResult {
 
 const MAX_BUFFER = 64 * 1024 * 1024; // screenshots can be a few MB
 
+let execDeadline = Infinity;
+/** A shared wall-clock ceiling for synchronous evidence collection on this thread. */
+export function withExecDeadline<T>(deadline: number, fn: () => T): T {
+  const previous = execDeadline;
+  execDeadline = Math.min(previous, deadline);
+  try { return fn(); } finally { execDeadline = previous; }
+}
+function boundedTimeout(timeout = 30000): number {
+  const remaining = execDeadline - Date.now();
+  if (remaining <= 0) throw new CliError('evidence capture exceeded its deadline', 3);
+  return Math.max(1, Math.min(timeout, remaining));
+}
+
 /**
  * Block the calling thread for `ms`. Needed because the Driver interface is entirely
  * synchronous (every device call is a spawnSync), so a readback poll cannot await a
@@ -23,6 +36,7 @@ const MAX_BUFFER = 64 * 1024 * 1024; // screenshots can be a few MB
  */
 export function sleepSync(ms: number): void {
   if (ms <= 0) return;
+  ms = boundedTimeout(ms);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
@@ -31,7 +45,7 @@ function describeError(cmd: string, args: string[], err: NodeJS.ErrnoException):
     return new CliError(`'${cmd}' was not found on PATH. Is it installed and on your PATH?`, 3);
   }
   if (err.code === 'ETIMEDOUT') {
-    return new CliError(`'${cmd} ${args.join(' ')}' timed out`, 3);
+    return Object.assign(new CliError(`'${cmd} ${args.join(' ')}' timed out`, 3), { code: 'ETIMEDOUT' });
   }
   return new CliError(`Failed to run '${cmd}': ${err.message}`, 3);
 }
@@ -45,12 +59,16 @@ export function runText(
 ): TextResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
-    timeout: opts.timeout ?? 30000,
+    timeout: boundedTimeout(opts.timeout),
     input: opts.input,
     cwd: opts.cwd,
     maxBuffer: MAX_BUFFER,
   });
-  if (r.error) throw describeError(cmd, args, r.error as NodeJS.ErrnoException);
+  if (r.error) {
+    if ((r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT' && Number.isFinite(execDeadline))
+      throw new CliError('evidence capture exceeded its deadline', 3);
+    throw describeError(cmd, args, r.error as NodeJS.ErrnoException);
+  }
   return { code: r.status ?? 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
@@ -174,6 +192,9 @@ export function spawnCollect(
       windowsHide: true,
       ...(opts.timeout === undefined ? {} : { timeout: opts.timeout }),
     });
+    const forwardInt = (): void => { child.kill('SIGINT'); };
+    const forwardTerm = (): void => { child.kill('SIGTERM'); };
+    process.once('SIGINT', forwardInt); process.once('SIGTERM', forwardTerm);
     let stdout = '';
     let stderr = '';
     let pending = '';
@@ -203,6 +224,7 @@ export function spawnCollect(
       failure = describeError(cmd, args, e as NodeJS.ErrnoException).message;
     });
     child.on('close', (code, signal) => {
+      process.removeListener('SIGINT', forwardInt); process.removeListener('SIGTERM', forwardTerm);
       if (pending) {
         emit(pending);
         pending = '';
@@ -226,10 +248,14 @@ export function runBinary(
   opts: { timeout?: number } = {},
 ): { code: number; stdout: Buffer; stderr: string } {
   const r = spawnSync(cmd, args, {
-    timeout: opts.timeout ?? 30000,
+    timeout: boundedTimeout(opts.timeout),
     maxBuffer: MAX_BUFFER,
   });
-  if (r.error) throw describeError(cmd, args, r.error as NodeJS.ErrnoException);
+  if (r.error) {
+    if ((r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT' && Number.isFinite(execDeadline))
+      throw new CliError('evidence capture exceeded its deadline', 3);
+    throw describeError(cmd, args, r.error as NodeJS.ErrnoException);
+  }
   return {
     code: r.status ?? 0,
     stdout: (r.stdout as Buffer) ?? Buffer.alloc(0),
