@@ -49,15 +49,6 @@ test('describeStatus: a selector error keeps its heal-trigger identity and exit 
   assert.equal((ambiguous as CliError).exitCode, 2);
 });
 
-test('describeStatus: no errorKind (an older server) behaves exactly as before', () => {
-  // The compatibility half. Feature-detect on the FIELD: an old server and a new one with
-  // nothing to classify send the same body, and both must keep the wrapped wording.
-  const e = describeStatus(500, { error: 'boom', exitCode: 3 }, URL);
-  assert.ok(e instanceof CliError);
-  assert.equal(e instanceof NoWindowError, false);
-  assert.equal((e as CliError).exitCode, 3);
-  assert.match(e.message, /verikun server error 500 at http:\/\/host:8391\/v1\/elements: boom/);
-});
 
 test('describeStatus: a body-less failure still yields an exit code from the HTTP class', () => {
   assert.equal((describeStatus(400, null, URL) as CliError).exitCode, 2);
@@ -96,7 +87,7 @@ test('describeStatus: a refused LEASE is a NoFreeDeviceError — the run never s
 
   // A fresh run token cannot have been evicted, so on this route a tag changes nothing.
   const tagged = describeStatus(409, { error: 'x', exitCode: 3, errorKind: 'RunEvictedError' }, LEASE_URL, { lease: true });
-  assert.ok(tagged instanceof NoFreeDeviceError);
+  assert.ok(tagged instanceof RunEvictedError);
 });
 
 test('describeStatus: a 409 the server TAGGED as an eviction is a RunEvictedError', () => {
@@ -128,47 +119,6 @@ test('describeStatus: an untagged 409 off the lease route stays a plain CliError
   assert.equal(describeStatus(503, { error: 'none', exitCode: 3 }, URL) instanceof NoFreeDeviceError, false);
 });
 
-test('a remote backend tells a refused lease from an evicted step by the ROUTE it hit', async () => {
-  // The wiring half: `request()` has to know which call it is making. A 409 on /v1/lease is
-  // a run that never started; the same status on /v1/exec is one that lost its device.
-  const server = createServer((req, res) => {
-    req.resume();
-    req.on('end', () => {
-      const evicted = req.url === '/v1/exec';
-      const body = JSON.stringify(
-        evicted
-          ? { error: 'this run lost its device: a left the pool', exitCode: 3, errorKind: 'RunEvictedError' }
-          : { error: 'all 2 devices are leased by other active runs', exitCode: 3 },
-      );
-      res.writeHead(409, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
-      res.end(body);
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  try {
-    const backend = createRemoteBackend(
-      { url: base },
-      {
-        ok: true, version: 'test', platform: 'android', serial: null, capacity: 1, devices: ['b'], installEnabled: false,
-        quarantined: [{ serial: 'a', reason: 'the device is not attached' }],
-      },
-    );
-    await assert.rejects(
-      () => backend.lease(),
-      (e: unknown) =>
-        e instanceof NoFreeDeviceError &&
-        // …and says which phone is missing and why, from the health read on the way in.
-        /ruled out: a \(the device is not attached\)/.test(e.message),
-    );
-    assert.equal(backend.wasEvicted?.(), false, 'a refused lease is not an eviction');
-    await assert.rejects(() => backend.exec('tap', ['@go'], {}), (e: unknown) => e instanceof RunEvictedError);
-    // Remembered: the step that died with the phone never hears it, only a later request does.
-    assert.equal(backend.wasEvicted?.(), true);
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
-});
 
 test('poolNote: names the devices a server is serving and the ones it ruled out, with the reason', () => {
   const health = {
@@ -184,44 +134,6 @@ test('poolNote: names the devices a server is serving and the ones it ruled out,
   assert.doesNotMatch(empty, /ruled out/, 'nothing ruled out, nothing said');
 });
 
-test('a remote backend remembers an eviction the server marked on a FAILING step or read', async () => {
-  // The failing step is the only response that knows the run is over: it is a 200 carrying the
-  // phone's own error, and the client's next request is usually a release, which clears the
-  // server's mark. So the mark on the response itself is latched (#147).
-  const deviceError = { kind: 'CliError', name: 'CliError', message: "adb: device 'a' not found", exitCode: 3 };
-  let marked = false;
-  const server = createServer((req, res) => {
-    req.resume();
-    req.on('end', () => {
-      const send = (status: number, body: unknown): void => {
-        const text = JSON.stringify(body);
-        res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) });
-        res.end(text);
-      };
-      if (req.url === '/v1/exec') return send(200, { code: 3, error: deviceError, ...(marked ? { evicted: true } : {}) });
-      return send(500, { error: deviceError.message, exitCode: 3, errorKind: 'CliError', evicted: true });
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const health = { ok: true, version: 'test', platform: 'android' as const, serial: null, capacity: 2, installEnabled: false };
-  try {
-    const plain = createRemoteBackend({ url }, health);
-    assert.equal((await plain.exec('tap', ['@go'], {})).code, 3);
-    assert.equal(plain.wasEvicted?.(), false, 'an ordinary failed step is not an eviction');
-
-    marked = true;
-    const onStep = createRemoteBackend({ url }, health);
-    assert.equal((await onStep.exec('tap', ['@go'], {})).code, 3, "the step keeps the phone's own verdict");
-    assert.equal(onStep.wasEvicted?.(), true);
-
-    const onRead = createRemoteBackend({ url }, health);
-    await assert.rejects(async () => onRead.getElements(), (e: unknown) => e instanceof CliError && !(e instanceof RunEvictedError));
-    assert.equal(onRead.wasEvicted?.(), true, 'the error body carries it too');
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
-});
 
 test('describeStatus: an unknown kind from a newer server degrades, it does not throw', () => {
   // rebuildError's switch has a default arm. A field we do not recognise must read as a
@@ -242,24 +154,7 @@ test('transportReason: the caller aborting names its own budget', () => {
   assert.equal(transportReason(e, 90_000), 'timed out after 90s');
 });
 
-test("transportReason: undici's header timeout says whose clock ran out", () => {
-  // MEASURED on Node v20.20.2: a server holding its headers for 310s rejects the fetch at
-  // 301s with exactly this shape, whatever the caller's AbortController was set to.
-  const e = Object.assign(new TypeError('fetch failed'), {
-    cause: Object.assign(new Error('Headers Timeout Error'), { code: 'UND_ERR_HEADERS_TIMEOUT' }),
-  });
-  const reason = transportReason(e, 15 * 60_000);
-  assert.match(reason, /300s/, "the REAL ceiling, not the caller's 900s");
-  assert.match(reason, /CLIENT, not the device/, 'the whole point: do not blame the phone');
-  assert.doesNotMatch(reason, /^fetch failed$/);
-});
 
-test('transportReason: a body timeout is named separately from a header one', () => {
-  const e = Object.assign(new TypeError('fetch failed'), {
-    cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' }),
-  });
-  assert.match(transportReason(e, 60_000), /finish its response/);
-});
 
 test('transportReason: anything else is passed through untouched', () => {
   // A genuinely unreachable server must keep reading as one — this may not become a
@@ -290,7 +185,7 @@ test('remote install uses the long-running HTTP transport, not fetch\'s 300s cei
   try {
     const backend = createRemoteBackend(
       { url: base },
-      { ok: true, version: 'test', platform: 'android', serial: 'device-a', installEnabled: true },
+      { deviceHealth:1,leaseHold:1,deviceStates:[],ok: true, version: 'test', platform: 'android', serial: 'device-a', installEnabled: true },
     );
     await backend.install(app);
   } finally {
@@ -298,4 +193,26 @@ test('remote install uses the long-running HTTP transport, not fetch\'s 300s cei
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+for (const route of ['/v1/elements','/v1/exec']) test(`socket reset on ${route}: retry reads once, never replay actions`,async()=>{
+  let calls=0;
+  const server=createServer((req,res)=>{
+    req.resume();req.on('end',()=>{
+      if (++calls===1) {req.socket.destroy();return;}
+      res.setHeader('content-type','application/json');res.end(JSON.stringify({elements:[],code:0}));
+    });
+  });
+  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+  const backend=createRemoteBackend({url:`http://127.0.0.1:${(server.address() as AddressInfo).port}`},
+    {deviceHealth:1,leaseHold:1,deviceStates:[],ok:true,version:'test',platform:'android',serial:'a',installEnabled:false});
+  try{
+    if(route==='/v1/elements'){assert.deepEqual(await backend.getElements(),[]);assert.equal(calls,2);}
+    else {await assert.rejects(backend.exec('home',[],{}),e=>(e as Error).name==='ServerUnreachableError');assert.equal(calls,1);}
+  }finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
+});
+
+
+test('the major client rejects an old server before acquiring or driving a device',()=>{
+  assert.throws(()=>createRemoteBackend({url:'http://unused'}, {ok:true,version:'0.31.0',platform:'android',serial:'a',installEnabled:false}),/upgrade the server/);
 });

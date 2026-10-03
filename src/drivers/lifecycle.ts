@@ -10,7 +10,7 @@
 // Platform specifics stay in adb.ts / ios.ts, as CLAUDE.md requires; this module is
 // the dispatcher plus the pure target-resolution rules that cli.ts and server.ts share.
 
-import { isUsableState } from '../device/failover';
+import { isUsableState } from '../device/pool';
 import { DeviceKind, Platform, StartOpts, StartResult, StopOpts, StopResult } from '../types';
 import { CliError } from '../errors';
 import { DEFAULT_STOP_TIMEOUT_MS } from '../wait';

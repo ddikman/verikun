@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Element, Platform } from '../types';
 import { parseSelector, matchElements } from '../ui/selector';
 import { assertStateSupported } from '../ui/state-support';
-import { SelectorNotFoundError, AmbiguousSelectorError, RunEvictedError, TransientReadError, isEnvError } from '../errors';
+import { DeviceGoneError, isDeviceLoss, rethrowIfLost, SelectorNotFoundError, AmbiguousSelectorError, RunEvictedError, TransientReadError, isEnvError } from '../errors';
 import { sleep } from '../wait';
 import { Plan, PlanNode, LeafStep, ReadNode, leafToFlags, validateNode, InvalidPlanError } from './ir';
 import { CostTracker } from './cost';
@@ -82,6 +82,7 @@ export interface EngineResult {
    *  populated — this only says the failure is not a regression, so callers can exit 3
    *  and `vk suite` can stop instead of reporting every remaining test as broken. */
   abortedForEnv?: boolean;
+  lostDevice?: boolean;
 }
 
 type StepResult =
@@ -90,7 +91,7 @@ type StepResult =
    *  it is genuinely gone now. Stop this body; the enclosing guard treats it as done. */
   | { status: 'guard-gone' }
   | { status: 'fail'; reason: string; where: string }
-  | { status: 'env'; reason: string; where: string }
+  | { status: 'env'; reason: string; where: string; lostDevice?: boolean }
   | { status: 'budget' }
   | { status: 'timeout' };
 
@@ -118,17 +119,6 @@ class GuardBlindError extends Error {
     this.name = 'GuardBlindError';
   }
 }
-
-/**
- * A run the server EVICTED cannot continue: its phone left the pool, and every later call is
- * refused the same way. So the catches below that absorb a failed READ — a guard's retry, the
- * empty-tree fallback, a repair that could not be made — must let it through. Absorbed, a lost
- * phone read as an absent guard, a "read found no element" FAIL or a failed repair, and a
- * parallel suite lost the class it needs to re-run the test as a fresh run (#147).
- */
-const rethrowIfEvicted = (e: unknown): void => {
-  if (e instanceof RunEvictedError) throw e;
-};
 
 const describe = (leaf: LeafStep): string =>
   [leaf.command, ...leaf.positionals, ...leaf.flags.map((f) => (f.value === 'true' ? `--${f.name}` : `--${f.name} ${f.value}`))]
@@ -299,7 +289,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     try {
       return await deps.getElements();
     } catch (e) {
-      rethrowIfEvicted(e);
+      rethrowIfLost(e);
       return [];
     }
   };
@@ -355,6 +345,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     // is a bad read of a live screen, not a blind one, and it is already handled below.
     let everRead = false;
     let lastErr: unknown;
+    let lostSince: number | undefined;
     const minLooks = settleMs > 0 ? 2 : 1;
     for (;;) {
       let els: Element[] | undefined;
@@ -362,10 +353,14 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
         try {
           els = await deps.getElements();
           everRead = true;
+          lastErr = undefined;
+          lostSince = undefined;
         } catch (e) {
-          rethrowIfEvicted(e);
+          if (!(e instanceof DeviceGoneError)) rethrowIfLost(e);
           els = undefined; // transient dump failure — retry once before concluding "absent"
           lastErr = e;
+          if (e instanceof DeviceGoneError) lostSince ??= Date.now();
+          else lostSince = undefined;
         }
         // An EMPTY tree is not a screen, it is a bad read: a live app always has nodes, and
         // this device routinely returns a partial/blank dump mid-transition (measured: `ui`
@@ -389,7 +384,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
         // One successful read — even an empty tree — and the ordinary semantics resume exactly:
         // settleMs=0 is still a single-shot probe. It must never make a merely ABSENT selector
         // more patient, or every guard silently costs 10s.
-        if (!everRead && lastErr instanceof TransientReadError && Date.now() < transientDeadline) {
+        if (((!everRead && lastErr instanceof TransientReadError) || (lastErr instanceof DeviceGoneError && Date.now() - (lostSince ?? Date.now()) < 8000)) && Date.now() < transientDeadline) {
           await sleep(GUARD_POLL_MS);
           continue;
         }
@@ -399,6 +394,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
         //
         // A no-window that outlives its grace lands here too, and still aborts: at that point
         // the app really is gone, and reporting "absent" would be the same false green.
+        if (isDeviceLoss(lastErr)) throw lastErr;
         if (!everRead && isEnvError(lastErr)) throw new GuardBlindError(selector, lastErr as Error);
         return false;
       }
@@ -476,7 +472,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
         if (node.type !== 'command') throw new InvalidPlanError('repair must be a single command step');
         repaired = node;
       } catch (e) {
-        rethrowIfEvicted(e);
+        rethrowIfLost(e);
         const msg = e instanceof Error ? e.message : String(e);
         return { status: 'fail', where, reason: `repair failed: ${msg}` };
       }
@@ -504,6 +500,7 @@ export async function runPlan(plan: Plan, deps: EngineDeps): Promise<EngineResul
     // sets status=passed/exitCode=0 and drops the failure evidence) so the report and
     // JUnit stay consistent with the green run, then continue. Scoped to screenshot/
     // shot — every other command's failure stays terminal.
+    if (isDeviceLoss(outcome.error) || outcome.error instanceof RunEvictedError) rethrowIfLost(outcome.error);
     if (isScreenshotLeaf(current)) {
       const why = outcome.error ? outcome.error.message.split('\n')[0] : `exited ${outcome.code}`;
       deps.log(`[ai] ${where}: screenshot capture failed (${why}) — continuing (best-effort review screenshot)`);

@@ -1,0 +1,32 @@
+...@_style
+
+direction: down
+
+client: "Compile, then lease"
+host: Device host {
+  label.near: top-left
+  supervisor: "Server supervisor\nhealth, leases, builds" {
+    style.stroke: "#c8401f"
+    style.font-color: "#c8401f"
+  }
+  a: Device A {
+    label.near: top-left
+    executor: Forked executor
+    tools: Device tool children
+  }
+  b: Device B {
+    label.near: top-left
+    executor: Forked executor
+    tools: Device tool children
+  }
+}
+phone_a: Phone A {style.stroke-dash: 5; style.fill: "#fbfaf6"}
+phone_b: Phone B {style.stroke-dash: 5; style.fill: "#fbfaf6"}
+
+client -> host.supervisor: held HTTP + heartbeat
+host.supervisor -> host.a.executor: gated IPC
+host.supervisor -> host.b.executor: gated IPC
+host.a.executor -> host.a.tools: spawn
+host.b.executor -> host.b.tools: spawn
+host.a.tools -> phone_a: adb / idb
+host.b.tools -> phone_b: adb / idb

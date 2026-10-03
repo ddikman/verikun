@@ -1,6 +1,10 @@
+import { Worker } from 'node:worker_threads';
+import { join } from 'node:path';
+import { waitWindowMs, parseDuration } from '../commands/auto-wait';
+import { deviceWaitMs } from '../suite';
 // The remote execution backend: `vk ai/suite/install --server <url>` run their
 // device work through a `vk server` sitting next to the device, over HTTP+JSON
-// (Node's global fetch — no SDK, zero runtime deps). One validated leaf command =
+// (Node's native HTTP clients — no SDK, zero runtime deps). One validated leaf command =
 // ONE round-trip: the server keeps the whole auto-wait/dump loop on its side.
 //
 // The step detail each exec produces (selector, tier, resolved element, failure
@@ -13,7 +17,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { extname } from 'node:path';
-import { CliError, NoFreeDeviceError, RunEvictedError } from '../errors';
+import { ServerUnreachableError, CliError, NoFreeDeviceError, RunEvictedError } from '../errors';
 import { REMOTE_INSTALL_TIMEOUT_MS } from '../install-timeouts';
 import { err } from '../output';
 import type { Element } from '../types';
@@ -23,7 +27,6 @@ import {
   ExecRequest,
   ExecResponse,
   ElementsResponse,
-  DeviceChange,
   DeviceListResponse,
   DeviceOpRequest,
   DeviceOpResponse,
@@ -43,52 +46,18 @@ export interface RemoteOpts {
   /** Receives each exec'd step + its artifact buffers for splicing into the local run.
    *  `logStart` is the server's device-clock marker (optional on older servers). */
   onStep?: (step: RunStep, artifacts: Record<string, Buffer>, logStart?: string) => void;
-  /**
-   * The server moved itself onto a different device. Mirrors `onStep`: the transport
-   * reports, the caller decides what it means (a log line, and re-pointing the run
-   * context so later spliced steps are attributed to the device that ran them).
-   *
-   * Fires from THREE places, because a move is reported on success bodies AND on error
-   * bodies — `/v1/elements` and an install that exhausted the pool both fail, and the
-   * client still needs to know the ground shifted.
-   */
-  onDeviceChange?: (change: DeviceChange) => void;
   /** Devices a pooled server could not install this build onto, and which therefore left
-   *  its pool. Same shape of side-channel as `onDeviceChange`: the caller keeps the list,
+   *  its pool. The caller keeps the list,
    *  because `Driver.install` returns void and this is remote-only by nature. */
   onInstallSkipped?: (skipped: InstallSkip[]) => void;
 }
 
-/**
- * The ceiling fetch-based calls below cannot exceed, whatever their own budgets say.
- *
- * Node's global `fetch` is undici, whose `headersTimeout` and `bodyTimeout` both default to
- * 300s, and there is no dependency-free way to raise them: a `dispatcher` needs `undici`
- * itself, which is bundled but not importable. Long-running install uploads therefore use
- * Node's built-in http/https client instead; its explicit 15-minute timer is the real
- * upload-and-response ceiling. The other AbortControllers remain a floor when set above 300s.
- *
- * MEASURED on Node v20.20.2 against a server that held its headers for 310s: the fetch
- * rejected at 301s with `TypeError: fetch failed`, cause `HeadersTimeoutError`, code
- * `UND_ERR_HEADERS_TIMEOUT`. The bare `fetch failed` is the whole problem — `describeStatus`
- * never sees it, the suite reads the resulting exit 3 as the DEVICE being unreachable, and a
- * healthy phone gets retired for a client-side clock. Named in `request` below so it says so.
- */
-const FETCH_HEADERS_CEILING_MS = 300_000;
-
-// Per-call ceilings. exec is generous: a single leaf may legitimately block for its
-// whole auto-wait window or an explicit `wait --timeout`, plus device time. Anything here
-// above FETCH_HEADERS_CEILING_MS is aspirational unless it uses requestWithNodeHttp.
+// Caller-owned ceilings, enforced by node:http for uploads and responses alike.
 const HEALTH_TIMEOUT_MS = 10_000;
-const ELEMENTS_TIMEOUT_MS = 60_000;
-const EXEC_TIMEOUT_MS = 10 * 60_000;
-const DEVICE_LIST_TIMEOUT_MS = 30_000;
-// Meant to sit above the server's own 4-minute boot ceiling, so the SERVER reports why a
-// boot timed out rather than the client aborting first. It is exactly AT
-// FETCH_HEADERS_CEILING_MS, so a boot that runs the full four minutes and then some is a
-// photo finish — which is survivable only because `transportReason` now names the loser.
-const DEVICE_START_TIMEOUT_MS = 5 * 60_000;
-const DEVICE_STOP_TIMEOUT_MS = 60_000;
+const ELEMENTS_TIMEOUT_MS = 150_000;
+const DEVICE_LIST_TIMEOUT_MS = 150_000;
+const DEVICE_START_TIMEOUT_MS = 6 * 60_000;
+const DEVICE_STOP_TIMEOUT_MS = 150_000;
 
 const trimUrl = (url: string): string => url.replace(/\/+$/, '');
 
@@ -174,8 +143,8 @@ export function describeStatus(status: number, body: RpcErrorBody | null, url: s
   }
   if (status === 409) {
     const busy = `verikun server device is busy (409)${detail || ' — another run holds the device; retry when it finishes'}.`;
-    if (opts.lease) return new NoFreeDeviceError(busy);
     if (body?.errorKind === 'RunEvictedError') return new RunEvictedError(`verikun server ended this run (409)${detail}.`);
+    if (opts.lease) return new NoFreeDeviceError(busy);
     return new CliError(busy, 3);
   }
   if (status === 503) {
@@ -206,15 +175,6 @@ export function describeStatus(status: number, body: RpcErrorBody | null, url: s
 export function transportReason(e: unknown, timeoutMs: number): string {
   const ex = e as { name?: string; message?: string; cause?: { code?: string } };
   if (ex?.name === 'AbortError') return `timed out after ${Math.round(timeoutMs / 1000)}s`;
-  const code = ex?.cause?.code;
-  if (code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT') {
-    const what = code === 'UND_ERR_HEADERS_TIMEOUT' ? 'send a response' : 'finish its response';
-    return (
-      `the server did not ${what} within ${Math.round(FETCH_HEADERS_CEILING_MS / 1000)}s — ` +
-      "this is Node's own fetch ceiling on the CLIENT, not the device. " +
-      'The server may still be working; check its log before blaming the device'
-    );
-  }
   return ex?.message ?? String(e);
 }
 
@@ -230,49 +190,35 @@ class RemoteTransport {
   private readonly base: string;
   /** One token per backend = one logical run holding the server's device lock. */
   readonly runToken = randomUUID();
-  /** The server has said this run was evicted. Latched, because the request that hears it is
-   *  usually not the step that failed — see ExecBackend.wasEvicted. */
-  evicted = false;
+  private holdWorker?: Worker;
 
   constructor(private readonly opts: RemoteOpts) {
     this.base = trimUrl(opts.url);
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
-    const h: Record<string, string> = { 'x-verikun-run': this.runToken, ...extra };
+    const h: Record<string, string> = { 'x-verikun-run': this.runToken, ...(process.env.VERIKUN_AVOID_DEVICE ? { 'x-verikun-avoid': process.env.VERIKUN_AVOID_DEVICE } : {}), ...extra };
     if (this.opts.authKey) h.authorization = `Bearer ${this.opts.authKey}`;
     return h;
   }
 
-  async request<T>(method: 'GET' | 'POST', path: string, body: Buffer | string | undefined, timeoutMs: number, extraHeaders: Record<string, string> = {}, transport: 'fetch' | 'node-http' = 'fetch'): Promise<T> {
+  async request<T>(method: 'GET' | 'POST', path: string, body: Buffer | string | undefined, timeoutMs: number, extraHeaders: Record<string, string> = {}): Promise<T> {
     const url = `${this.base}${path}`;
-    let timer: NodeJS.Timeout | undefined;
     let res: Response;
     try {
-      if (transport === 'node-http') {
-        res = await requestWithNodeHttp(url, method, this.headers(extraHeaders), body, timeoutMs);
-      } else {
-        const controller = new AbortController();
-        timer = setTimeout(() => controller.abort(), timeoutMs);
-        res = await fetch(url, {
-          method,
-          headers: this.headers(extraHeaders),
-          body,
-          signal: controller.signal,
-        });
+      const idempotent = method === 'GET' || ['/v1/elements', '/v1/logs', '/v1/release'].includes(path);
+      const headers = this.headers({ ...extraHeaders, 'x-verikun-deadline-ms': String(Math.max(60_000, timeoutMs - 5000)) });
+      try { res = await requestWithNodeHttp(url, method, headers, body, timeoutMs); }
+      catch (e) {
+        if (!idempotent || !/ECONNRESET|socket hang up/.test((e as Error).message + (e as NodeJS.ErrnoException).code)) throw e;
+        res = await requestWithNodeHttp(url, method, headers, body, timeoutMs);
       }
     } catch (e) {
-      throw new CliError(`cannot reach verikun server at ${url} (${transportReason(e, timeoutMs)})`, 3);
-    } finally {
-      if (timer) clearTimeout(timer);
+      throw new ServerUnreachableError(`cannot reach verikun server at ${url} (${transportReason(e, timeoutMs)})`);
     }
     if (!res.ok) {
       const body = await readBody<RpcErrorBody>(res);
-      // Before throwing: a failing request may still have moved the device, and that is
-      // exactly the case a caller must not miss (an exhausted install, a dead-device read).
-      if (body?.deviceChanged) this.opts.onDeviceChange?.(body.deviceChanged);
       const error = describeStatus(res.status, body, url, { lease: path === '/v1/lease' });
-      if (error instanceof RunEvictedError || body?.evicted) this.evicted = true;
       throw error;
     }
     const parsed = await readBody<T>(res);
@@ -280,16 +226,38 @@ class RemoteTransport {
     return parsed;
   }
 
+  hold(waitMs: number): Promise<LeaseResponse> {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(join(__dirname, 'lease-heartbeat.js'), { workerData: {
+        url: `${this.base}/v1/lease`, timeoutMs: waitMs + 120_000,
+        headers: this.headers({ 'x-verikun-hold': '1', 'x-verikun-wait-ms': String(waitMs) }),
+      } });
+      this.holdWorker = worker;
+      let acquired = false;
+      worker.on('message', m => {
+        if (m.kind === 'leased') { acquired = true; worker.unref(); resolve(m.body as LeaseResponse); }
+        else if (m.kind === 'status') reject(describeStatus(m.status, m.body, this.base, { lease: true }));
+        else if (m.kind === 'error') {
+          if (!acquired) reject(new ServerUnreachableError(`cannot hold verikun server lease: ${m.message}`));
+        }
+      });
+      worker.on('error', e => { if (!acquired) reject(new ServerUnreachableError(e.message)); });
+      worker.on('exit', code => { if (!acquired) reject(new ServerUnreachableError(`lease worker exited (${code})`)); });
+    });
+  }
+  closeHold(): void { this.holdWorker?.postMessage('close'); this.holdWorker = undefined; }
+
   postJson<T>(path: string, payload: unknown, timeoutMs: number): Promise<T> {
     return this.request<T>('POST', path, JSON.stringify(payload), timeoutMs, { 'content-type': 'application/json' });
   }
 
-  /** Best-effort: give the device lock back. A lock we fail to release ages out. */
+  /** Best-effort: give the device lock back. Closing the held stream releases ownership independently. */
   async release(): Promise<void> {
+    this.closeHold();
     try {
       await this.postJson<{ ok: boolean }>('/v1/release', {}, HEALTH_TIMEOUT_MS);
     } catch {
-      /* the idle takeover covers it */
+      /* the hold closes independently of this best-effort request */
     }
   }
 }
@@ -303,7 +271,13 @@ export async function pingServer(opts: RemoteOpts): Promise<HealthResponse> {
   if (!health.ok || !health.platform) {
     throw new CliError(`'${trimUrl(opts.url)}' does not look like a verikun server (unexpected /v1/health payload).`, 3);
   }
+  requireServerProtocol(health);
   return health;
+}
+
+export function requireServerProtocol(health: HealthResponse): void {
+  if (health.leaseHold !== 1 || health.deviceHealth !== 1 || !Array.isArray(health.deviceStates))
+    throw new CliError('this client requires a server with held leases and device supervision; upgrade the server to verikun 1.0 or later', 3);
 }
 
 /**
@@ -338,10 +312,7 @@ export async function remoteDeviceOp(
   try {
     return await t.postJson<DeviceOpResponse>(`/v1/devices/${op}`, body, timeout);
   } finally {
-    // This is a one-shot administrative call under its own run token, not a run —
-    // so hand the device lock straight back. Without this, `vk devices start
-    // --server` (and the --ensure-device preflight, which uses its own token) would
-    // 409 the very run it just booted the device for, until the 5-minute idle takeover.
+    // Administrative calls hold no execution lease; release is idempotent.
     await t.release();
   }
 }
@@ -366,22 +337,18 @@ export interface RemoteBackend extends ExecBackend {
    * The transport's run token IS the lease key, so this needs no argument and is
    * idempotent — and, crucially, it must be called on the BACKEND's transport rather
    * than a fresh one: `pingServer` mints its own token, so a lease taken there would
-   * belong to nobody. Returns null against a server that predates pooling.
+   * belong to nobody. The server must support streaming held leases.
    */
   lease(): Promise<LeaseResponse | null>;
 }
 
 export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): RemoteBackend {
+  requireServerProtocol(health);
   const t = new RemoteTransport(opts);
 
   const execRaw = async (req: ExecRequest, record: boolean): Promise<{ code: number; error?: Error }> => {
-    const res = await t.postJson<ExecResponse>('/v1/exec', req, EXEC_TIMEOUT_MS);
+    const res = await t.postJson<ExecResponse>('/v1/exec', { ...req, record }, leafTimeoutMs(req));
     if (record && res.step) opts.onStep?.(res.step, decodeArtifacts(res.artifacts), res.logStart);
-    // A failing step is a 200, so this is the ordinary path for a mid-run device death.
-    if (res.deviceChanged) opts.onDeviceChange?.(res.deviceChanged);
-    // …and for the eviction that death caused: the step keeps the phone's own error, and this
-    // response is the only one that says the run is over (see ExecResponse.evicted).
-    if (res.evicted) t.evicted = true;
     return { code: res.code, error: res.error ? rebuildError(res.error) : undefined };
   };
 
@@ -389,11 +356,8 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
     exec: (command, positionals, flags) => execRaw({ command, positionals, flags }, true),
 
     async lease(): Promise<LeaseResponse | null> {
-      // Feature-detect on a FIELD, never on the version: `capacity` and /v1/lease landed
-      // together, and a client cannot otherwise tell "old server" from "new server".
-      if (health.capacity === undefined) return null;
       try {
-        return await t.postJson<LeaseResponse>('/v1/lease', {}, HEALTH_TIMEOUT_MS);
+        return await t.hold(deviceWaitMs());
       } catch (e) {
         // Say what the pool looks like. `health` was read moments ago, on the way here, and
         // it is what names a phone that left — the refusal itself only counts devices.
@@ -405,6 +369,13 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
     async getElements(): Promise<Element[]> {
       const res = await t.postJson<ElementsResponse>('/v1/elements', {}, ELEMENTS_TIMEOUT_MS);
       return res.elements;
+    },
+
+    async captureFailure() {
+      try {
+        const res = await t.postJson<ElementsResponse>('/v1/elements', {}, 20_000);
+        return { hierarchy: res.elements };
+      } catch { return {}; }
     },
 
     async getLogs(logOpts = {}): Promise<string> {
@@ -426,14 +397,11 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
         throw new CliError(`install: cannot read '${appPath}' (${(e as Error).message})`, 2);
       }
       const sha256 = createHash('sha256').update(buf).digest('hex');
-      const res = await t.request<InstallResponse>('POST', '/v1/install', buf, REMOTE_INSTALL_TIMEOUT_MS, {
+      const res = await installWhenFree(t, buf, REMOTE_INSTALL_TIMEOUT_MS, {
         'content-type': 'application/octet-stream',
         'x-verikun-ext': ext,
         'x-verikun-sha256': sha256,
-      }, 'node-http');
-      // Install is the one operation the server replays elsewhere, so a move here means
-      // the build DID land — on a different device than the one we started with.
-      if (res.deviceChanged) opts.onDeviceChange?.(res.deviceChanged);
+      });
       // A PARTIAL install is a success, and it must not be a silent one: capacity just
       // dropped, and the operator's next question is which phone to go and look at.
       if (res.skipped?.length) {
@@ -455,17 +423,28 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
       if (code !== 0) throw error ?? new CliError(`reset (${command} ${appId}) failed on the server (exit ${code})`, 3);
     },
 
-    wasEvicted: () => t.evicted,
-
-    async close(): Promise<void> {
-      // Free the server's device lock so the next command (a fresh run token, e.g.
-      // `vk install` then `vk suite` in one CI job) isn't 409'd until the idle
-      // takeover. Best-effort: a dead server just means the lock ages out.
-      try {
-        await t.postJson<{ ok: boolean }>('/v1/release', {}, HEALTH_TIMEOUT_MS);
-      } catch {
-        /* the idle takeover covers a lock we failed to release */
-      }
-    },
+    close: () => t.release(),
   };
+}
+
+/** The leaf's own wait budget plus evidence/restart margin, without undici's ceiling. */
+export function leafTimeoutMs(req: ExecRequest): number {
+  let budget = 30_000;
+  if (req.command === 'wait') budget = parseDuration(req.flags.timeout ?? '10000', 'timeout');
+  else if (['tap', 'text', 'assert', 'find', 'swipe'].includes(req.command)) budget += waitWindowMs(req.flags);
+  else if (req.command === 'install') budget = 600_000;
+  else if (req.command === 'launch') budget = 60_000;
+  return Math.max(60_000, budget + 120_000);
+}
+async function installWhenFree(t: RemoteTransport, buf: Buffer, timeout: number, headers: Record<string, string>): Promise<InstallResponse> {
+  const until = Date.now() + deviceWaitMs();
+  let backoff = 500;
+  for (;;) {
+    try { return await t.request<InstallResponse>('POST', '/v1/install', buf, timeout, headers); }
+    catch (e) {
+      if (!(e instanceof CliError) || e instanceof RunEvictedError || !/\(409\)/.test(e.message) || Date.now() >= until) throw e;
+      await new Promise(resolve => setTimeout(resolve, Math.min(backoff, Math.max(0, until - Date.now()))));
+      backoff = Math.min(5000, backoff * 2);
+    }
+  }
 }

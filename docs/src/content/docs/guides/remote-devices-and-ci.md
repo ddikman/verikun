@@ -56,10 +56,10 @@ serial that is not attached is a startup error, not a silently smaller pool.
 and cannot be combined with `--server` (exit `2`).
 
 A pooled server keeps one URL and one secret. Each run token **leases** one device for its
-whole run — compile, every step, every repair — so a client needs no device id and cannot end
+execution — every step and every repair, after compilation — so a client needs no device id and cannot end
 up half-way through a flow on a different phone. A parallel
 [`vk suite --server`](/verikun/guides/suites/#running-across-several-devices) reads the pool's
-capacity from `/v1/health` and sizes itself to match, so the CI line does not change.
+device states from `/v1/health` and sizes itself to match, with at least one lane, so the CI line does not change.
 
 Two things behave differently on a pool: `vk install --server` installs on **every** device
 (otherwise later lanes would run the previous build), and `/v1/devices/{start,restart,stop}`
@@ -168,17 +168,15 @@ off if you do not want that.
 
 ### One run per device
 
-A run token **leases** a device. A caller that arrives when every device is already leased
-gets **`409`**. The lease is released when the command finishes, so `vk install` then
-`vk suite` chain seamlessly.
+A run token leases one device after compilation. New clients wait in a server FIFO when
+all devices are occupied. Heartbeats run on a separate client thread every ten seconds;
+closing the socket or 30 seconds of silence releases and tombstones the lease. Device
+setting overrides restore before the next run. A tagged `409` means that run lost its
+device and must restart from the beginning. Upgrade client and server together; streaming holds are required.
 
-A lease that has been silent for **5 minutes** may be taken over — but only by a run that
-actually needs a device, so a crashed CI job cannot wedge a device permanently while a merely
-slow one (a cold compile, a model repair) keeps its phone. A run that *does* lose its device
-is told so with a `409` naming it, never handed a different one: its earlier steps ran
-somewhere else.
-
-A pooled server therefore serves as many concurrent runs as it has devices — and no more.
+A suite releases between tests and checks the retained install SHA each time. Sharing
+its server with another installer can produce `build changed mid-suite`; isolate CI jobs
+when the installed build must remain fixed. `vk install` waits for an occupied server.
 
 ### Bind is loopback by default
 
@@ -380,118 +378,29 @@ server never recycles.
 
 ## When the bound device fails
 
-When the device a server is bound to cannot serve a request, the server moves to another
-attached device and rules the bad one out:
+The server owns health for every device, including a single-device server. A transport
+loss or a timed-out call confirmed by a five-second echo ends its holder's run. The failed
+step keeps its original verdict and is never replayed elsewhere. A suite reruns that test
+from the beginning without spending a retry, at most twice; these attempts are evidence,
+not flaky passes.
 
-```
-[server] install: FAILED on emulator-5554 — the device is out of space (INSTALL_FAILED_INSUFFICIENT_STORAGE)
-[server] failover: emulator-5554 quarantined (the device is out of space)
-[server] failover: 2 candidate(s) — emulator-5556, 032AY1UNR2
-[server] failover: emulator-5556 probe ok — moving
-[server] device: android · emulator-5556
-[server] install: retrying on emulator-5556… done on emulator-5556 (after 1 move)
-```
+The server probes before removing capacity and readmits wanted devices every five seconds
+with bounded backoff. A recovering device restores settings and takes the retained build
+before it is dealt. Android can skip reinstall when SHA, boot ID and package update
+metadata still match. iOS always reinstalls. `/v1/health` includes `deviceStates`, reasons,
+`installedSha`, `deviceHealth` and `leaseHold`; `quarantined` and `degraded` are derived summaries of these states.
 
-### It is on by default, unless you pinned the device
+`--no-failover` and `VERIKUN_NO_FAILOVER` disable recruitment of a spare. They do not
+disable readmission or health checks. A pinned `--device` stays pinned; an unpinned
+single-device server may recruit one free running spare, bounded by `--allow-failover=<list>`.
+`VERIKUN_NO_DEVICE_WATCH=1` disables health supervision for troubleshooting.
 
-|  | Failover |
-|---|---|
-| `vk server` (no `--device`) | **on** — the server auto-selected a free device, so moving to another free one is the same decision made again |
-| `vk server --device X` | **off** — a pin means what it says |
-| `--allow-failover` | on even for a pinned server; any attached, running, unclaimed device |
-| `--allow-failover=<a,b>` | as above, bounded to those serials or AVD/simulator names |
-| `--no-failover`, `VERIKUN_NO_FAILOVER=1` | off outright |
-
-A candidate must already be **running**: failover never boots anything. Booting is
-`vk devices start --server`'s job.
-
-### An install is retried. A step is not.
-
-`install` is idempotent, carries no app session, and its uploaded bytes are still on the
-server's disk — so it is replayed on the new device and your job simply succeeds.
-
-A **step** is never replayed: step 12 of a flow presupposes steps 1–11 ran *on that device*,
-and the new device's app is wherever an earlier run left it. So the step fails, carrying
-**the old device's error**, and it is the *next* run — the next `vk suite` test, or the next
-`--retries` attempt — that lands somewhere healthy:
-
-```
-[verikun] server moved device: emulator-5554 → 032AY1UNR2 (the device is not attached) — this step failed on the old device; the next runs on the new one
-```
-
-Which failures move: an install failure moves unless it is provably the **build's** fault
-(`INSTALL_PARSE_FAILED_*`, `INSTALL_FAILED_INVALID_APK`, `_TEST_ONLY`, an unreadable `.apk`),
-because a broken build fails identically everywhere. A step moves only if the device is
-genuinely gone — verikun re-probes it twice, a second apart, first. On iOS only the
-unreachable-device check exists; see [Platform support](/verikun/guides/platform-support/#behaviour-and-reporting).
-
-At most **two** moves per request, and on exhaustion the client is given the **first** device's
-error, never the last, so the real cause stays the headline:
-
-```
-Failed to install '…apk': adb: device offline
-[failover] no working device remains; ruled out:
-  emulator-5554  the device is offline
-[failover] reattach or fix a device and the pool re-adopts it within a minute; an emulator can also be power-cycled with `vk devices restart <name> --server <url>`
-```
-
-### Failover on a pool
-
-With [`--devices`](#serving-several-devices-from-one-address) the same machinery keeps the pool
-at **full capacity**: a healthy unclaimed device that is attached and not yet a member joins,
-the failed one leaves, and every other lease keeps serving. Usually there is no such spare,
-because `--devices all` already pooled everything attached. Then a device that is still
-attached is **demoted, not dropped**:
-
-- It keeps its worker, its claim and its place in the pool, and `/v1/health` lists it under
-  `degraded` rather than `quarantined`.
-- Leases are dealt **healthy first, then least-recently-used**, so a demoted device is chosen
-  only when nothing else is free.
-- It is **restored by working**, not by a timer — the first step or hierarchy read that
-  succeeds on it puts it back in the healthy rotation.
-- **The lease follows the move.** The run whose device failed lands on the replacement
-  without losing its place in the queue; the failing step is still not replayed — the client
-  seals that run and opens a fresh one on the new device, so no report spans two.
-- **A device that is GONE leaves the pool** — unplugged, offline, unauthorized. `/v1/health`
-  drops it from `capacity` and `devices` and lists it under `quarantined`, and the run holding
-  it is evicted. A `--devices` server sheds even its last device, down to `capacity: 0`, because
-  the sweep below brings it back; a plain `vk server` keeps its only device.
-
-### A device that comes back rejoins by itself
-
-A pooled server sweeps once a minute for devices that *should* be serving and are not — a
-worker that died or was terminated for hanging, a phone unplugged and replugged, an emulator
-restarted out of band, or (with `--devices all`) one attached after startup; an explicit
-`--devices a,b,c` only re-adopts from that list. Starting the worker **is** the probe, so a
-device that is still broken simply fails to come back; each failure doubles the wait, up to
-30 minutes, and every attempt is logged. A rejoining device is brought up to the session's
-last install before it is dealt any work, and stays out if that install fails.
-Single-device servers do not sweep.
-
-```
-[server] pool: emulator-5556 left the pool — worker exited with code 1
-[server] reconcile: emulator-5556 should be serving and is not — attempt 1
-[server] reconcile: emulator-5556 did not rejoin — next attempt in 120s
-[server] pool: emulator-5556 joined the pool (2 device(s) serving)
-[server] reconcile: emulator-5556 brought up to the current build
-```
-
-### What was ruled out, and how to clear it
-
-A quarantine says "never move *onto* this device", and is also where a device that has **left**
-the pool is listed. It lasts as long as the server process and has no timer — a device that ran
-out of disk ten minutes ago is still out of disk. A successful `vk devices restart|start|stop`
-for that device clears it, and so does rejoining the pool. An install that fails on *every*
-device is read as a bad build, not a bad pool, so the quarantines that attempt set are rolled
-back.
-
-```sh
-curl -s "$VERIKUN_SERVER/v1/health" | jq '{capacity, devices, degraded, quarantined}'
-vk devices --server "$VERIKUN_SERVER"     # a NOTE column shows why each was ruled out
-```
-
-Failover makes a full disk *survivable*, not impossible: a long-lived CI device accumulates
-builds and app data from every job pointed at it, so budget for cleaning it up.
+Install fans out to ready devices with a four-minute limit per target. It returns after
+all finish or 60 seconds after the first success, listing failures and stragglers in
+`skipped`. Those targets remain unavailable until they catch up. A soft step deadline
+also removes dealability until the original call drains. Confirmed down devices and install
+deadlines kill the executor's detached process group, including blocked device-tool children.
+Cleanup finishes before a replacement executor starts.
 
 ## Running the server as a long-lived service
 
@@ -502,7 +411,7 @@ For anything beyond experimentation, the server should survive a reboot. On macO
 - Bind to the tailnet address, not `0.0.0.0`.
 - Pass `--allow-install` only if CI actually needs to push builds.
 - Restart on failure — a restart mid-run does not permanently wedge anything, because an
-  idle lease is taken over after 5 minutes.
+  held lease ends on socket close or after 30 seconds without heartbeat bytes.
 
 The server writes its own log, so a service unit needs no output redirection — by default
 `~/.verikun/logs/server-<port>.log`, rotated at 10 MB keeping one previous generation and named
@@ -513,7 +422,7 @@ client was sent, and every lease, failover and pool change:
 
 ```
 2026-09-02T09:14:22.108Z [server] POST /v1/exec run=a1b2c3d4 dev=emulator-5554 → 200 (812ms)
-2026-09-02T09:14:31.744Z [server] pool: emulator-5556 degraded — the device stopped answering (dealt last until it works again)
+2026-09-02T09:14:31.744Z [server] pool: emulator-5556 down — the device stopped answering
 2026-09-02T09:14:31.745Z [server] lease: run 9f8e7d6c… evicted from emulator-5556 — emulator-5556 is no longer in the pool
 ```
 
@@ -521,17 +430,17 @@ client was sent, and every lease, failover and pool change:
 
 | Symptom | Cause |
 |---|---|
-| `409` from the server | Another run holds the device. Check your `concurrency` group; a lease silent for 5 minutes is taken over when someone else needs it. A `409` saying the run "cannot continue on another device" means yours was the one taken over — rerun it. |
+| `409` from the server | Another run holds the device. Check your `concurrency` group; a held lease ends when its socket closes or heartbeat bytes stop for 30 seconds. A `409` saying the run "cannot continue on another device" means its device was lost — rerun it. |
 | `401` | The auth key does not match. Both sides must use the same `VERIKUN_SERVER_AUTH_KEY`. |
 | Exit `3`, "server unreachable" | Network path, not verikun. Check the tailnet is up on the runner. |
 | Installs rejected | The server was started without `--allow-install`. |
 | `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / `signatures do not match` | The device holds a build of the same package signed by a different key. On Android the server removes it and retries by itself; if it still fails, the message names the package and the `adb uninstall` to run on the host. iOS has no such recovery. |
 | `INSTALL_FAILED_VERSION_DOWNGRADE` | The device holds a newer build of the same package. verikun always installs with `adb install -d`, which resolves this automatically for a debuggable build (the common CI/test case). A release-signed build still fails — install a build with a higher version code, or free the device with `adb uninstall <package>`. |
-| `not enough space` / `Requested internal only, but not enough space` / `INSTALL_FAILED_INSUFFICIENT_STORAGE` | The device's disk is full. With failover on the server moves to another attached device by itself; if it reports `no working device remains`, free space on the named device or `vk devices restart` it. |
-| The suite ran on a device you did not expect | The server failed over. `[verikun] server moved device:` on the client, and `/v1/health`'s `quarantined`, say which device was ruled out and why. |
-| A pool's `capacity` fell during a run | Read the server log. A device only leaves the pool when its worker died; one that merely failed is `degraded` and still serving. Anything that left is retried automatically, with the reason and the next attempt logged. |
-| A device never rejoins the pool | Its rejoin attempts are failing — the log names the reason each time. Backoff doubles to a 30-minute ceiling, so check the most recent `reconcile:` line rather than waiting. |
+| `not enough space` / `Requested internal only, but not enough space` / `INSTALL_FAILED_INSUFFICIENT_STORAGE` | The device's disk is full. Partial installs list it in `skipped`; free space on that device so catch-up can succeed. If every target fails, the install exits `3`. |
+| The suite ran on a device you did not expect | A lost-device test reran on another lease. `/v1/health`'s `deviceStates` names unavailable devices and reasons. |
+| A pool's `capacity` fell during a run | Read `deviceStates`: checking, draining, installing and down devices are excluded from dealing. The server confirms liveness and readmits wanted devices automatically. |
+| A device never rejoins the pool | Its admission attempts are failing; the log names the reason. Backoff caps at five minutes for liveness and 30 minutes for installs. |
 | Steps take seconds each on Android | The server is on the stock read path. `curl "$VERIKUN_SERVER/v1/health" \| jq .reads` says which, and why — most often `VERIKUN_COMPANION` is set in the **server's** environment, or the [companion](/verikun/guides/companion/) declined on that device. |
-| Device overrides left applied after a client crashed | Under `--server` the [device-state](/verikun/reference/device-state/) snapshot is written by the server process, so a client that dies outright cannot restore it. Run `vk device reset` on the device box. |
+| Device overrides left applied after a client crashed | Held leases restore their [device-state](/verikun/reference/device-state/) originals on socket close or 30 seconds of heartbeat silence, before another lease is dealt. Clients and servers must both support held leases. |
 
 More in [Troubleshooting](/verikun/guides/troubleshooting/).

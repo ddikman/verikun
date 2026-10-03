@@ -3,6 +3,7 @@ import { strict as assert } from 'node:assert';
 import { describeError, rebuildError } from '../src/rpc';
 import type { ExecResponse, RpcErrorBody } from '../src/rpc';
 import {
+  DeviceGoneError, DeviceUnresponsiveError, UnsupportedOnPlatformError, ServerUnreachableError,
   CliError, SelectorNotFoundError, AmbiguousSelectorError, DumpKilledError, NoWindowError, NoFreeDeviceError, RunEvictedError,
   dumpKilledMessage, isEnvError, envError,
 } from '../src/errors';
@@ -15,6 +16,17 @@ import { makeEl } from './helpers';
 // so a non-serializable field can't sneak through.
 
 const wire = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+for (const ErrorClass of [DeviceGoneError, DeviceUnresponsiveError, UnsupportedOnPlatformError, ServerUnreachableError]) {
+  test(`${ErrorClass.name} survives the RPC boundary as a terminal exit-3 sibling`, () => {
+    const original = new ErrorClass('specific failure');
+    const rebuilt = rebuildError(wire(describeError(original)));
+    assert.ok(rebuilt instanceof ErrorClass);
+    assert.ok(!(rebuilt instanceof NoWindowError));
+    assert.equal((rebuilt as CliError).exitCode, 3);
+    assert.equal(rebuilt.message, original.message);
+  });
+}
 
 test('rpc codec: SelectorNotFoundError survives with class + exit code', () => {
   const original = new SelectorNotFoundError("No element matched selector '@login'.");
@@ -68,26 +80,10 @@ test('rpc codec: a non-CliError throw maps to a plain Error (exit 3 semantics)',
   assert.equal(rebuilt.message, 'boom');
 });
 
-test('rpc wire: deviceChanged is optional everywhere — old servers simply omit it', () => {
-  // The standing rule (rpc.ts): feature-detect on the FIELD, never on `version`. An
-  // older server and a newer one that did not move device send the same thing, and both
-  // must read as "nothing moved" rather than as a protocol error.
-  const oldServer: ExecResponse = { code: 0 };
-  assert.equal(oldServer.deviceChanged, undefined);
-  const oldError: RpcErrorBody = { error: 'boom', exitCode: 3 };
-  assert.equal(oldError.deviceChanged, undefined);
-
-  const moved: ExecResponse = {
-    code: 3,
-    deviceChanged: { from: 'emulator-5554', to: 'emulator-5556', reason: 'the device is offline', retried: false },
-  };
-  assert.equal(moved.deviceChanged?.retried, false, 'exec never replays, so this is always false');
-});
 
 test('rpc codec: NoWindowError survives — it must not flatten into a bare CliError', () => {
   // describeError checks this subclass BEFORE the CliError arm; swap the order and this is
-  // the test that notices. Losing the class costs twice: device/failover.ts stops
-  // recognising a mid-launch gap as transient, and the `vk ai` guard stops riding it out
+  // the test that notices. Losing the class means the `vk ai` guard stops riding it out
   // (issue #80).
   const rebuilt = rebuildError(wire(describeError(new NoWindowError())));
   assert.ok(rebuilt instanceof NoWindowError, 'instanceof NoWindowError');

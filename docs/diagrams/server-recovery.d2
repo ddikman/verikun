@@ -1,0 +1,28 @@
+...@_style
+
+direction: down
+
+loss: Typed device loss {shape: oval}
+end: End the lease
+check: Confirm device liveness
+alive: Device answers? {shape: diamond}
+recover: Clear driver breaker
+kill: Kill process group {
+  style.stroke: "#c8401f"
+  style.font-color: "#c8401f"
+}
+cleanup: Wait for cleanup
+warm: Restore + retained build
+ready: Ready for new leases {shape: oval}
+rerun: Fresh test on sibling {shape: oval}
+
+loss -> end: typed verdict
+end -> check: server probes
+end -> rerun: client reruns whole test
+check -> alive: echo result
+alive -> recover: yes
+recover -> warm: recovered
+alive -> kill: no
+kill -> cleanup: actual executor exit
+cleanup -> warm: bounded readmission
+warm -> ready: admission passes

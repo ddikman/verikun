@@ -101,8 +101,7 @@ lives in the run file, not memory, so `vk device reset` works from a later proce
 `cmdBatch`, `cmdAi` and `cmdSuiteEntry` call reset from a `finally`; a bare `vk device set`
 from a shell stays applied.
 
-**Known gap:** under `--server` the snapshot is written by the *server* process, so a crashed
-client leaves overrides applied.
+Over `--server`, lease-end restoration owns the snapshot, including when a held client disappears.
 
 ## Device claims: acquire exclusively, prove liveness
 
@@ -132,7 +131,7 @@ already driving". User-facing behaviour: [Device claims](/verikun/reference/devi
 | | Where | Identity | Question it answers |
 |---|---|---|---|
 | **Claims** | `device/claims.ts`, `~/.verikun/devices/` | cwd / session / pid | Which of this **host's** jobs may drive this serial? |
-| **Leases** | `server.ts` (`leaseFor`, `/v1/lease`) | the run token every remote backend mints | Which serial does this **server's** run hold? |
+| **Leases** | `server-leases.ts` (`/v1/lease`) | the run token every remote backend mints | Which serial does this **server's** run hold? |
 | **Lanes** | `suite.ts` | lane id | Which worker pulls the next test? |
 
 Claims and leases stay **separate implementations** (different trust domains: a pid on the
@@ -142,103 +141,87 @@ for a device somebody else holds (`--devices all` asked for a *set*); `requireCl
 throws exit `2` (a named serial must not be dropped silently). Idle takeover, eviction and
 affinity are pool policy and live only in the server.
 
-## Only the server may repoint the server
+## Device health belongs to the server
 
-`vk server` binds a device at startup, and no `/v1/exec` request can change it. Two things
-can: **a client, via `/v1/devices/*`** — gated on `--allow-device-control` and allowlisted by
-name — and **the server itself, by failing over**: never at a client's request, never to a
-device outside the operator's set, never to one that is not already running, and never when
-`--device` pinned the binding.
+`DeviceTable` is the authority for `joining`, `ready`, `leased`, `draining`, `checking`,
+`down` and `installing`. Only ready/leased records with a live executor are dealable.
+Every server, including a pool of one, readmits wanted devices on a five-second async tick.
+An explicit serial set never grows; `all` retains the initial virtual/physical kind.
+Failover flags gate substitution by a free spare, not health or readmission.
 
-| Invariant | Because |
-|---|---|
-| **A step is never replayed on the new device.** Only `install` retries; everything else rebinds and returns the **original** device's error, and `/v1/elements` never answers with the new device's hierarchy. | Replaying step 12 on a device that never ran 1–11 is a false green or a repair against the wrong screen. |
-| **The install classifier enumerates the FILE, not the device.** The file-attributable set is small and closed; everything else moves, including wordings nobody has met. The named device-state strings are a fast path, never the gate. | The device side is open-ended and OEM-specific. `tests/failover.test.ts` feeds the classifier gibberish that must still move. |
-| **On exhaustion the client gets the FIRST device's error.** A step keeps the opposite default — stay unless a two-probe re-check confirms the device dead — and the re-probe's own error is classified too. | Exit 3 on a step is dominated by transient noise; a wrong move must cost time, never the diagnosis. |
-| **An install that fails on EVERY device condemns the build, not the pool**: the per-device quarantines are rolled back. | The fan-out has just proved the artifact is the common factor. |
-| **An install that fails on SOME devices is a success**, reported as `devices` + `skipped`. Every device that missed the build leaves the pool first, and the build is retained either way. | The 500 existed to stop a lane running the previous build and reporting green. Removing the device answers that; failing the whole run does not, and cost a CI job per detached phone. Retaining is what stops the sweep readmitting a device onto the build before. |
+Drivers raise `DeviceGoneError` for corroborated transport loss and
+`DeviceUnresponsiveError` after a timed-out call fails a real five-second shell echo.
+Android retries a safe transport failure once, within a ten-second recovery window;
+input with device output is never replayed. Its breaker fails subsequent calls immediately.
+Polling absorbs consecutive DeviceGone reads for at most eight seconds within its own
+window. A final typed loss is rethrown even after earlier successful reads; a blind read
+cannot satisfy `--gone`. NoWindow and DumpKilled keep their separate existing semantics.
 
-Operator view: [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
+A typed loss tombstones the holder immediately, even if the confirming echo succeeds.
+The original step is returned; it never replays or crosses devices. The checking probe
+waits up to eight seconds before retiring a device. Two missed 15-second watchdog echoes
+start checking without immediately evicting a holder. Three generic exit-3/killed-dump
+windows trigger HOME plus a hierarchy read; NoWindow and unsupported operations never strike.
+`VERIKUN_NO_DEVICE_WATCH` disables this supervision for diagnosis.
 
-## A pool degrades; it sheds only what is gone
+The executor's hard backstop remains 30 minutes. A client soft deadline is advisory,
+`max(x-verikun-deadline-ms, 60s)`: expiry returns exit 3, removes dealability, and probes
+while the outstanding call drains. It does not terminate the worker by itself.
+Retirement removes advertisement synchronously, but companion release and claim release
+wait for actual worker exit. No second executor may start for a serial before cleanup.
+Each executor is a detached fork with advanced IPC serialization. A confirmed down transition
+SIGKILLs its whole process group, including blocked adb/idb children. Re-adoption waits for
+actual exit and companion cleanup. A soft deadline alone still lets a live call drain.
 
-A pool's own members are excluded from its failover candidates, so on `--devices all`
-"nothing healthier to move to" is the **normal** case.
+## Build identity gates dealing
 
-- **Demote a device that is present; shed one that is gone.** A failing member keeps its
-  worker, claim and slot and is reported as `degraded` (disjoint from `quarantined`) — unless
-  the verdict is `unreachable`, which says the device is not there at all. Degradation is a
-  sort key in `leaseFor`, so "dealt last" is still dealt every round once the healthy devices
-  are busy, and recovery-by-traffic can never fire for a phone that will never answer: a
-  detached device kept being leased indefinitely. It now leaves.
-- **Only where something sweeps.** Shedding is bounded to a `--devices` server, because only
-  that one reconciles. On a single-device server there is nothing to bring the device back, so
-  it keeps the device and its error.
-- **Leases are dealt healthy-first, then least-recently-used.** First-fit would hand a broken
-  device out most often, because it fails fastest.
-- **Recovery is proven by traffic, not a clock.** Any exec that is not an environment failure,
-  or any successful hierarchy read, restores the device.
-- **A device that left is swept for**, once a minute, from what `--devices` asked for;
-  starting the worker is the probe, each failure doubles the wait to a 30-minute ceiling, and a
-  rejoining device gets the session's last install first. Single-device servers do not sweep.
-- **Every worker call is bounded** (`WORKER_CALL_TIMEOUT_MS`): a wedged thread is terminated,
-  which turns a wedged device into a departed one the sweep can replace.
+Install fans out only to ready devices. Every target has a four-minute deadline; the
+response arrives when all finish or 60 seconds after the first success. Successful targets
+advance `currentBuild`; failures and stragglers cannot run tests on the previous SHA.
+All-device non-timeout rejection retains the previous ready build; timeout targets stay down.
+Admissions install the retained artifact before becoming ready, with bounded attempts and
+backoff. Android skips catch-up only when retained SHA, boot ID and a snapshot of package
+versions/update times match. A failed identity probe forces reinstall; iOS always reinstalls.
 
-Operator view: [Failover on a pool](/verikun/guides/remote-devices-and-ci/#failover-on-a-pool).
+Each lease reports `installedSha`. A suite captures it at startup and children refuse a
+different SHA with environment outcome `build changed mid-suite`. A remote suite releases
+between tests, including at capacity one; sharing that server with an independent installer
+can abort the suite. Isolate CI jobs when the installed build must stay fixed.
 
-## No device is not a failure
+## Held leases and FIFO admission
 
-A lane over `--server` is a slot, not a device, so a pool that sheds a phone has more lanes than
-phones.
+Compilation precedes lease acquisition, while the run timeout still starts before compilation.
+`POST /v1/lease` with `x-verikun-hold: 1` streams heartbeat dots in the request body.
+The first response line is NDJSON lease metadata; the response remains open. A worker thread
+writes every ten seconds, independently of synchronous model repair. Socket close or 30
+seconds without bytes releases and tombstones the token. An abandoned call still drains
+before its device can be dealt again. Original setting values, earliest first, restore before
+the next lease; unreachable devices retain pending restoration until admission.
 
-- **A refused lease is not an attempt.** `NoFreeDeviceError` is built only for `/v1/lease` (a
-  fresh run token can be refused, never evicted); the suite hands the test back to the front of
-  the queue and the lane waits — no row, no retry, no streak. Read as an environment failure it
-  failed tests that never ran and retired the lane.
-- **Ask `/v1/health`, not the lease.** A lease request that finds nothing free lets the server
-  take over any lease silent for 5 minutes — a sibling lane's included, mid-compile. The suite
-  checks capacity and reserves its slot with no `await` in between.
-- **An eviction is a result, never absorbed.** The server tags it (`RunEvictedError`), and
-  marks the failing response that caused it (`evicted`): the step that dies with the phone
-  keeps the phone's own error, and the client's next request may be only a release, which
-  clears the server's record. The client latches either signal; the engine rethrows the tag
-  past every catch that absorbs a failed read. `vk ai` returns it with its archive, and the
-  suite re-runs it without spending a retry, twice at most.
-- **Only the whole suite gives up**: no lane busy, nothing has run for
-  `VERIKUN_SUITE_DEVICE_WAIT_MIN`, and one last look after that deadline has also been refused.
+`LeaseTable` owns affinity, tombstones, exclusivity, in-flight counts and the FIFO. Waiters
+are dealt on release, without client reservations or parking. `x-verikun-wait-ms` measures
+server-wide no-progress time. Untagged refusals create no row and spend no retry.
+`health.deviceHealth` and `health.leaseHold` are required by the major client. A no-hold
+lease request returns HTTP 426; device execution without a hold returns HTTP 428.
+The RPC bodies no longer carry `evicted` or `deviceChanged`; typed errors carry the verdict.
+A lane child must provide `outcome`; missing outcomes in same-build JSON are internal failures.
 
-## Recycling adb is host-global, so it needs evidence
+`vk ai --json` carries one `outcome`: pass, fail, env, lost-device, no-device,
+server-unreachable, usage, budget, timeout or internal. Every failure after Recorder.start
+returns sealed evidence and device attribution. Only lost-device priors receive up to two
+free reruns and are excluded from flaky accounting. Environment failures consume ordinary
+retries. Local lanes bench and probe every 45 seconds; server health supersedes client
+retirement. A suite with no work progressing stops after `VERIKUN_SUITE_DEVICE_WAIT_MIN`,
+exit 3, with unstarted files in `notRun`. SIGINT/SIGTERM release grants with a two-second cap.
 
-A long-lived adb server leaks IOKit Mach ports until it drops devices mid-run, and only a
-restart clears it. Measured on macOS: a 9-day-old server emitting kernel guard violations at
-2/sec, all from the adb pid; a restart took it to zero and every device returned in ~5s.
+## Recycling adb is host-global
 
-Why the server owns this rather than the operator: **adb rot defeats device failover.**
-`device/failover.ts` moves off a device that fails, but every candidate sits behind the same
-host adb — so when the transport is what broke, failover retires healthy phones for a
-host-side fault. That is the polarity error `ARTIFACT_RULES` exists to prevent on the install
-path: attribute only what you can actually attribute.
-
-Four rules hold a default-on, host-global restart safe:
-
-- **Evidence, never age.** A healthy server measures exactly zero violations; a rotted one
-  60–120 per minute. There is no middle ground to tune a threshold against, so any nonzero
-  count is the signal — and a healthy host is never touched. Age alone would restart a good
-  server on a timer, which is a new way to fail.
-- **The rate is a leaked-handle counter.** adb scans USB at ~1 Hz and each *stale* handle
-  throws one violation per pass, so the per-minute count reads as "how many handles adb has
-  leaked". It steps up at the instant a device re-enumerates and never comes back down.
-- **Fully idle only.** `kill-server` drops every transport on the machine, so anything
-  mid-run vetoes. `othersActive` is the gate, and it already steps over an idle lease, so a
-  crashed client cannot wedge the recycle forever. `exclusive` is held across the restart, so
-  a client arriving inside the ~2s window gets the clean refusal the lease layer already
-  gives — accepted deliberately, because we only get here when adb is *already* dropping
-  devices.
-- **No evidence is never rot.** Off macOS there is no guard-violation log, so the check
-  reports nothing and the server does nothing. It never degrades to a blind restart.
-
-`VERIKUN_NO_ADB_RECYCLE=1` restores the previous behaviour exactly, the equivalence
-`VERIKUN_NO_CLAIM` and `VERIKUN_NO_FAILOVER` are held to.
+Detection and restart use asynchronous subprocesses. Kernel guard violations supply evidence;
+age alone never causes restart. Recycle requires no in-flight work, a host-wide exclusive
+lock, and no live foreign verikun claim. Devices enter joining(host), retaining their leases
+through a 15-second grace. Correlated loss from at least two serials and half the pool is
+handled as a host event. `VERIKUN_NO_ADB_RECYCLE` disables restart for any nonempty value.
+Health and listing remain responsive while executors or lifecycle probes are busy.
 
 ## The plan cache fingerprint
 

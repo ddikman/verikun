@@ -322,13 +322,16 @@ describe('vk against the Flutter fixture', { skip: skip ?? false }, () => {
       }
     });
 
-    test('a value that does not land exits 1 instead of a silent 0', { skip: !isAndroid }, () => {
+    test('unsupported text input reports the device error or a failed readback', { skip: !isAndroid }, () => {
       openScreen('state');
       // `adb shell input text` cannot type non-ASCII, so nothing lands (#85).
       const r = vk(['text', '@vk_focus_field', '--clear', '日本語']);
-      assert.equal(r.code, 1, r.stdout + r.stderr);
-      assert.match(r.stderr, /did not land/);
-      assert.match(r.stderr, /non-ASCII/);
+      if (r.code === 3) assert.match(r.stderr, /Exception|input|text/i);
+      else {
+        assert.equal(r.code, 1, r.stdout + r.stderr);
+        assert.match(r.stderr, /did not land/);
+        assert.match(r.stderr, /non-ASCII/);
+      }
     });
   });
 

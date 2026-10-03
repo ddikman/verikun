@@ -1,3 +1,6 @@
+import { spawnCollect } from './exec';
+import { parseAdbDevices } from './drivers/adb';
+import { parseSimulatorList, parsePhysicalDevices } from './drivers/ios';
 // The device-lifecycle seam `buildServer` is injected with — start / restart / stop / list
 // by name — and its production implementation over drivers/lifecycle.ts. Kept apart from
 // the server so the interface the unit suite fakes and the real one live side by side.
@@ -62,3 +65,17 @@ export const realLifecycle: ServerLifecycle = {
       }));
   },
 };
+
+/** Host enumeration must not block HTTP while a device or adb is wedged. */
+export async function listDevicesAsync(platform: Platform): Promise<DeviceInfo[]> {
+  if (platform === 'android') {
+    const r = await spawnCollect(process.env.ADB || 'adb', ['devices', '-l'], { timeout: 5000 });
+    if (r.code !== 0) throw new CliError(r.stderr || 'adb enumeration failed', 3);
+    return parseAdbDevices(r.stdout);
+  }
+  const [sim, phone] = await Promise.all([
+    spawnCollect(process.env.XCRUN || 'xcrun', ['simctl', 'list', 'devices', 'available', '--json'], { timeout: 5000 }),
+    spawnCollect(process.env.XCRUN || 'xcrun', ['devicectl', 'list', 'devices'], { timeout: 5000 }),
+  ]);
+  return [...(sim.code === 0 ? parseSimulatorList(sim.stdout) : []), ...(phone.code === 0 ? parsePhysicalDevices(phone.stdout) : [])];
+}
