@@ -6,15 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-### Changed
-- **Server diagrams**: explain device reservations, test reruns and recovery in plain language.
-
-## [1.0.0] - 2026-10-03
+## [0.32.0-rc.1] - 2026-10-03
 
 ### Added
 - **Docs site** links unfurl with a social card image built from the illustration.
 
 ### Changed
+- **Server diagrams**: explain device reservations, test reruns and recovery in plain language.
 - **`vk server`**: fork one executor per device; confirmed failures kill its process group, including blocked adb/idb children.
 - **`vk server`**: supervise device health and readmit every pool; typed loss reruns free. Disable supervision with `VERIKUN_NO_DEVICE_WATCH`.
 - **Remote leases**: acquire after compilation; heartbeat holds, FIFO admission, and lease-end setting restoration release abandoned clients.

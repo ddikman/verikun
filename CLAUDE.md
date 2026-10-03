@@ -269,7 +269,8 @@ the supervision kill switch; any nonempty VERIKUN_NO_ADB_RECYCLE disables restar
 
 Failover flags gate only free-spare recruitment. A pin remains a pin; explicit wanted sets
 never grow, `all` retains its initial device kind. Remote peers must support held leases
-and server-owned device health; v1 removes implicit leases and eviction/move wire fields. Full protocol and failure invariants live in docs/internals/contracts.md.
+and server-owned device health. This release removes implicit leases and eviction/move wire
+fields. Full protocol and failure invariants live in docs/internals/contracts.md.
 
 ## Device claims and grants (`src/device/claims.ts`, `src/device/grant.ts`)
 
