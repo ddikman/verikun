@@ -9,13 +9,15 @@
 // unit tests) can import it without dragging in transport code.
 
 import {
-  CliError, DumpKilledError, NoWindowError, NoFreeDeviceError, RunEvictedError, SelectorNotFoundError, AmbiguousSelectorError,
+  DeviceGoneError, DeviceUnresponsiveError, UnsupportedOnPlatformError, ServerUnreachableError, CliError, DumpKilledError, NoWindowError, NoFreeDeviceError, RunEvictedError, SelectorNotFoundError, AmbiguousSelectorError,
 } from './errors';
 import type { DeviceInfo, Element, HierarchySource, Platform } from './types';
 import type { RunStep } from './run';
 
 /** One validated leaf command, exactly the triple `executeOutcome` consumes. */
 export interface ExecRequest {
+  record?: boolean;
+  sampleDeviceTime?: boolean;
   command: string;
   positionals: string[];
   /** args-parser flag map; a boolean flag is carried as "true" (same as plan-IR leafToFlags). */
@@ -25,6 +27,10 @@ export interface ExecRequest {
 export interface ErrorDescriptor {
   /** Which class to rebuild. 'Error' covers a non-CliError throw (exit 3 semantics). */
   kind:
+    | 'DeviceGoneError'
+    | 'DeviceUnresponsiveError'
+    | 'UnsupportedOnPlatformError'
+    | 'ServerUnreachableError'
     | 'CliError'
     | 'SelectorNotFoundError'
     | 'AmbiguousSelectorError'
@@ -40,45 +46,9 @@ export interface ErrorDescriptor {
   candidates?: Element[];
 }
 
-/**
- * The server moved itself off the device it was bound to, mid-request.
- *
- * OPTIONAL twice over — absent from every older server AND absent when nothing moved —
- * so a client MUST feature-detect on the FIELD, never on `version` (the standing rule
- * on HealthResponse.deviceControlEnabled below: "old server" and "new server, nothing
- * moved" are indistinguishable and need the same answer).
- */
-export interface DeviceChange {
-  /** The device that failed. */
-  from: string;
-  /** The device the server is now bound to. */
-  to: string;
-  /** One line: "the device is out of space (INSTALL_FAILED_INSUFFICIENT_STORAGE)". */
-  reason: string;
-  /**
-   * Was the failed operation REPLAYED on `to`?
-   *
-   * true only for `install`, which is stateless. false everywhere else, and that is the
-   * load-bearing half: a `vk ai` step twelve deep presupposes the eleven before it ran
-   * on `from`, so replaying it on `to` would either pass meaninglessly (a false green)
-   * or wake the repair model against the wrong screen. The step still fails; it is the
-   * NEXT one that benefits from the move.
-   */
-  retried: boolean;
-}
-
 export interface ExecResponse {
   code: number;
   error?: ErrorDescriptor;
-  /** Set when this request moved the server's device. `retried` is always false here. */
-  deviceChanged?: DeviceChange;
-  /**
-   * This step's failure made the server shed the device and EVICT the run (#147): the step
-   * keeps the device's own error, but the run cannot continue anywhere. The only response that
-   * knows — the client's next request is usually a release, which clears the server's mark.
-   * Absent from older servers and when nothing was evicted; feature-detect on the field.
-   */
-  evicted?: true;
   /** The step the server's ephemeral recorder produced (selector, tier, resolved
    *  element, failure evidence refs) — spliced into the caller's run verbatim. */
   step?: RunStep;
@@ -113,9 +83,7 @@ export interface InstallResponse {
    *  readmits each one and installs this build before dealing it work. Absent when empty,
    *  and on older servers, which answered 500 instead. */
   skipped?: InstallSkip[];
-  /** Set when a device failed and the build went on to another. `retried: true`. On a pool
-   *  that moved more than one device this is the first move; the server logs the rest. */
-  deviceChanged?: DeviceChange;
+
 }
 
 export interface LogsRequest {
@@ -130,18 +98,9 @@ export interface LogsResponse {
   logs: string;
 }
 
-/**
- * POST /v1/lease — which device this run token is driving.
- *
- * Affinity needs no device id on the wire: the `x-verikun-run` header already scopes a
- * whole run, so the server keys the lease on it and every later call of that run lands
- * on the same device. The client asks up front purely so it can ATTRIBUTE its steps
- * before the first one executes; a client that never asks still gets a lease implicitly
- * on its first /v1/exec, it just cannot name the device in its report.
- *
- * Idempotent per token, and 409 when every device is already leased.
- */
+/** First NDJSON response line for a required streaming held lease. */
 export interface LeaseResponse {
+  installedSha?: string;
   platform: Platform;
   serial: string;
   /** The read path of THIS device — the per-device answer `/v1/health` cannot give
@@ -150,43 +109,40 @@ export interface LeaseResponse {
 }
 
 export interface HealthResponse {
+  deviceHealth?: 1;
+  leaseHold?: 1;
+  installedSha?: string;
+  deviceStates?: Array<{ serial: string; state: string; reason: string; since: number }>;
   ok: boolean;
   version: string;
   platform: Platform;
   /**
    * Resolved serial/udid for a SINGLE-device server, or null when there is no one
    * answer — either nothing is attached, or this server pools several devices (see
-   * `capacity`). Kept as-is for one device so every existing client is untouched.
+   * `capacity`). Single-device diagnostics remain unambiguous.
    */
   serial: string | null;
-  /** How many devices this server can drive at once. ABSENT on servers predating the
-   *  pool, where it is always 1 (or 0 when `serial` is null). A client sizing a
-   *  parallel suite reads this; treat undefined as 1. */
+  /** How many ready devices this server can drive at once. */
   capacity?: number;
-  /** The serials in the pool, for diagnostics. Absent on older servers. */
+  /** The serials in the pool, for diagnostics. */
   devices?: string[];
   /** Whether POST /v1/install is enabled on this server (`--allow-install`). */
   installEnabled: boolean;
   /**
    * Which read path this server's driver will use for the next hierarchy read, and why.
    *
-   * OPTIONAL because an older server does not send it (and a backend with one read path has
-   * no answer). Added in 0.21.1: reads happen server-side, so a `--server` client could
+   * Optional because a backend with one read path has no answer. Added in 0.21.1: reads happen server-side, so a `--server` client could
    * previously only infer the read path from its own step durations — which is how a
    * companion that had silently stood down went unnoticed for a whole suite (issue #77).
    */
   reads?: HierarchySource;
-  /** Whether POST /v1/devices/* is available (`--allow-device-control`). ABSENT on
-   *  servers predating the flag, so a client MUST treat undefined as false — and must
-   *  feature-detect on these fields rather than comparing `version`, because "old
-   *  server" and "new server, flag off" are indistinguishable and need the same answer. */
+  /** Whether POST /v1/devices/* is available (`--allow-device-control`). */
   deviceControlEnabled?: boolean;
   /** Whether a named target may be requested (`--allow-device-control=<names>`). */
   deviceNamingEnabled?: boolean;
   /** Derived from `serial` wherever health is built, so the two can never disagree. */
   deviceState?: 'ready' | 'none';
-  /** Whether this server may move off a device that fails. ABSENT on older servers;
-   *  feature-detect on the field, as with deviceControlEnabled above. */
+  /** Whether this server may recruit an unclaimed spare device. */
   failoverEnabled?: boolean;
   /**
    * Devices this server has ruled out this session, and why. Omitted when empty, so a
@@ -238,9 +194,7 @@ export interface RpcErrorBody {
   exitCode?: number;
   /**
    * The thrown error's CLASS, so a non-2xx carries the same identity `/v1/exec` already
-   * carries on its 200s. OPTIONAL twice over — absent from every older server AND absent
-   * when the failure never had a class worth naming — so a client MUST feature-detect on
-   * the FIELD, exactly as with `deviceChanged` above.
+   * carries on its 200s. Unnamed HTTP failures may omit the class.
    *
    * MEASURED, and this field exists because of it (issue #80): a `/v1/elements` read that
    * fails mid-launch is a `NoWindowError`, which survives the worker→main thread hop intact
@@ -249,14 +203,7 @@ export interface RpcErrorBody {
    * `--server` run read a transient as a fatal environment error and aborted.
    */
   errorKind?: ErrorDescriptor['kind'];
-  /**
-   * The server moved device while failing this request. Lives on the ERROR body because
-   * that is where it matters most: `/v1/elements` and an install that exhausted the pool
-   * both fail, and the client still needs to know the ground shifted under it.
-   */
-  deviceChanged?: DeviceChange;
-  /** This request's failure evicted the run — see ExecResponse.evicted. */
-  evicted?: true;
+
 }
 
 // --- error codec ------------------------------------------------------------
@@ -271,7 +218,7 @@ export function describeError(e: Error): ErrorDescriptor {
     return { kind: 'SelectorNotFoundError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
   // BEFORE the CliError arm — both transient reads extend it, so a subclass check must come
-  // first or the identity is flattened away. device/failover.ts classifies on the CLASS
+  // first or the identity is flattened away. DeviceTable classifies on the CLASS
   // deliberately ("identity first, never message text"), and losing it turns every mid-launch
   // gap into an unknown that costs two device probes and can quarantine a perfectly healthy
   // phone. Flattening DumpKilledError also costs a poller its ride-out, which is the whole of
@@ -291,6 +238,9 @@ export function describeError(e: Error): ErrorDescriptor {
   if (e instanceof RunEvictedError) {
     return { kind: 'RunEvictedError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
+  for (const Class of [DeviceGoneError, DeviceUnresponsiveError, UnsupportedOnPlatformError, ServerUnreachableError]) {
+    if (e instanceof Class) return { kind: e.name as ErrorDescriptor['kind'], name: e.name, message: e.message, exitCode: e.exitCode };
+  }
   if (e instanceof CliError) {
     return { kind: 'CliError', name: e.name, message: e.message, exitCode: e.exitCode };
   }
@@ -301,6 +251,10 @@ export function describeError(e: Error): ErrorDescriptor {
  *  checks (and `candidates` / `exitCode`) behave as if it were thrown locally. */
 export function rebuildError(d: ErrorDescriptor): Error {
   switch (d.kind) {
+    case 'DeviceGoneError': return new DeviceGoneError(d.message);
+    case 'DeviceUnresponsiveError': return new DeviceUnresponsiveError(d.message);
+    case 'UnsupportedOnPlatformError': return new UnsupportedOnPlatformError(d.message);
+    case 'ServerUnreachableError': return new ServerUnreachableError(d.message);
     case 'AmbiguousSelectorError':
       return new AmbiguousSelectorError(d.message, d.candidates ?? []);
     case 'SelectorNotFoundError':
@@ -334,6 +288,7 @@ export function rebuildError(d: ErrorDescriptor): Error {
  * auto-wait loop server-side and makes a leaf command exactly one round-trip.
  */
 export interface ExecBackend {
+  lease?(): Promise<LeaseResponse | null>;
   /** Run one leaf command, returning its raw outcome (matches the engine's ExecFn). */
   exec(command: string, positionals: string[], flags: Record<string, string>): Promise<{ code: number; error?: Error }>;
   /** Live hierarchy for engine control-flow guards and repair context. */
@@ -352,7 +307,7 @@ export interface ExecBackend {
   preflight?(): Promise<void> | void;
   /** Release held resources when the command finishes — the remote backend frees
    *  the server's device lock so the NEXT command (a fresh run token) isn't 409'd
-   *  until the idle takeover. Best-effort; local backends need none. */
+   *  while its held stream remains open. Best-effort; local backends need none. */
   close?(): Promise<void> | void;
   /** Best-effort evidence for a failure the `vk ai` ENGINE produced outside a command
    *  (a control node giving up, a budget/timeout abort). Those never run through
@@ -360,9 +315,5 @@ export interface ExecBackend {
    *  get is simply omitted, since the device being gone is often WHY we failed. The
    *  remote backend has no screenshot route, so it returns the hierarchy only. */
   captureFailure?(): Promise<{ png?: Buffer; hierarchy?: Element[] }>;
-  /** True once the server has told this run it was EVICTED — its device left the pool (#147).
-   *  The step running when a phone vanishes fails with the phone's own error; only a LATER
-   *  request (the failure evidence, the log fetch) hears the eviction, so the caller asks once
-   *  the run is over. Remote only: absent means "never". */
-  wasEvicted?(): boolean;
+
 }

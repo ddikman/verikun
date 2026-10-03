@@ -9,7 +9,6 @@ import {
   assertSafeAppId,
   stateFromFlags,
   terminalFailure,
-  retryAfterDeviceMove,
   laneArgv,
   laneEnv,
   lastJsonObject,
@@ -356,66 +355,6 @@ test('terminalFailure: a non-ok result with no detail at all still records somet
   assert.equal(t?.where, 'run');
 });
 
-// --- retryAfterDeviceMove (the --server connect probe's one retry) ----------
-
-test('retryAfterDeviceMove: a read that works is not re-run', async () => {
-  let calls = 0;
-  const got = await retryAfterDeviceMove(
-    () => {
-      calls++;
-      return 'ok';
-    },
-    () => true,
-  );
-  assert.equal(got, 'ok');
-  assert.equal(calls, 1, 'a healthy read must never be doubled');
-});
-
-test('retryAfterDeviceMove: a failure with NO device move propagates on the first try', async () => {
-  // The fail-fast property of the connect probe. Retrying every failure would double the
-  // wait on a device that is simply broken, for no chance of a different answer.
-  let calls = 0;
-  await assert.rejects(
-    retryAfterDeviceMove(
-      () => {
-        calls++;
-        throw new CliError('device is wedged', 3);
-      },
-      () => false,
-    ),
-    (e: unknown) => e instanceof CliError && e.exitCode === 3,
-  );
-  assert.equal(calls, 1);
-});
-
-test('retryAfterDeviceMove: a failure AFTER a device move re-asks the new device once', async () => {
-  let calls = 0;
-  const got = await retryAfterDeviceMove(
-    () => {
-      calls++;
-      if (calls === 1) throw new CliError("device 'emulator-5554' not found", 3);
-      return 'the new device answered';
-    },
-    () => true,
-  );
-  assert.equal(got, 'the new device answered');
-  assert.equal(calls, 2);
-});
-
-test('retryAfterDeviceMove: it re-asks exactly ONCE, never in a loop', async () => {
-  let calls = 0;
-  await assert.rejects(
-    retryAfterDeviceMove(
-      () => {
-        calls++;
-        throw new CliError('still broken', 3);
-      },
-      () => true,
-    ),
-  );
-  assert.equal(calls, 2, 'a pool that keeps moving must not spin the connect probe');
-});
-
 // --- suite lanes ------------------------------------------------------------
 
 test('laneArgv: the lane supplies the device; the suite\'s own flags never leak', () => {
@@ -629,25 +568,25 @@ test('grantLanes: VERIKUN_NO_CLAIM keeps every lane and holds nothing', () => {
 });
 
 test('laneResult: the EXIT CODE is the verdict, the JSON only adds detail', () => {
-  const green = laneResult(0, { ok: true, costUsd: 0.02, cost: 'est $0.02', runDir: '/r/1', device: 'emu-1' }, '', { id: 'd1' });
+  const green = laneResult(0, { outcome:'pass', ok: true, costUsd: 0.02, cost: 'est $0.02', runDir: '/r/1', device: 'emu-1' }, '', { id: 'd1' });
   assert.equal(green.ok, true);
   assert.equal(green.costUsd, 0.02);
   assert.equal(green.device, 'emu-1');
   assert.equal(green.failure, undefined);
   // A stale success document cannot turn a failed process green.
-  assert.equal(laneResult(1, { ok: true }, 'assert failed', { id: 'd1' }).ok, false);
+  assert.equal(laneResult(1, { outcome:'pass', ok: true }, 'assert failed', { id: 'd1' }).ok, false);
 });
 
 test('laneResult: the plan SIZE travels on the wire, unlike the step tally', () => {
   // steps/passedSteps are read back off the archived run; the plan's size is nowhere on disk
   // (the run file records what EXECUTED), so it has to come across in the child's JSON.
-  assert.equal(laneResult(0, { ok: true, planSteps: 37 }, '', { id: 'd1' }).planSteps, 37);
+  assert.equal(laneResult(0, { outcome:'pass', ok: true, planSteps: 37 }, '', { id: 'd1' }).planSteps, 37);
   // Absent from a pre-0.26.0-rc.6 child, and absent is not zero: the row must simply omit it.
-  assert.equal(laneResult(0, { ok: true }, '', { id: 'd1' }).planSteps, undefined);
+  assert.equal(laneResult(0, { outcome:'pass', ok: true }, '', { id: 'd1' }).planSteps, undefined);
 });
 
 test('laneResult: exit 3 and a failed spawn both read as an environment problem', () => {
-  assert.equal(laneResult(3, { ok: false, abortedForEnv: true }, '', { id: 'd1' }).abortedForEnv, true);
+  assert.equal(laneResult(3, { outcome:'env', ok: false, abortedForEnv: true }, '', { id: 'd1' }).abortedForEnv, true);
   // 127: the child never started. Same class of problem — the suite should probe the
   // lane, not blame the app.
   const missing = laneResult(127, null, "'node' was not found on PATH", { id: 'd1' });
@@ -656,7 +595,7 @@ test('laneResult: exit 3 and a failed spawn both read as an environment problem'
 });
 
 test('laneResult: a thrown child (mapError shape) still becomes a failed row', () => {
-  const r = laneResult(2, { error: "suite: 'x' is not a directory", exitCode: 2 }, '', { id: 'd1' });
+  const r = laneResult(2, { outcome:'usage',error: "suite: 'x' is not a directory", exitCode: 2 }, '', { id: 'd1' });
   assert.equal(r.ok, false);
   assert.equal(r.abortedForEnv, undefined, 'a usage error is not the environment');
   assert.equal(r.failure?.reason, "suite: 'x' is not a directory");
@@ -675,9 +614,9 @@ test('laneResult: unparseable output falls back to the child\'s last stderr line
 });
 
 test('laneResult: budget and timeout aborts survive the process boundary', () => {
-  const budget = laneResult(1, { ok: false, abortedForBudget: true }, '', { id: 'd1' });
+  const budget = laneResult(1, { outcome:'budget', ok: false, abortedForBudget: true }, '', { id: 'd1' });
   assert.equal(budget.abortedForBudget, true);
-  const timeout = laneResult(1, { ok: false, abortedForTimeout: true }, '', { id: 'd1' });
+  const timeout = laneResult(1, { outcome:'timeout', ok: false, abortedForTimeout: true }, '', { id: 'd1' });
   assert.equal(timeout.abortedForTimeout, true);
 });
 
@@ -694,19 +633,19 @@ test('laneResult: an abort keeps its own wording instead of a stray stderr line'
   // The engine returns budget/timeout aborts as a bare FLAG with no `failure`, and
   // `toSuiteResult` composes "aborted: cost ceiling reached" from it. Synthesizing one
   // here from the child's last stderr line made that wording unreachable on a pool.
-  const budget = laneResult(1, { ok: false, abortedForBudget: true }, '[ai] estimated total cost: $0.51', { id: 'd1' });
+  const budget = laneResult(1, { outcome:'budget', ok: false, abortedForBudget: true }, '[ai] estimated total cost: $0.51', { id: 'd1' });
   assert.equal(budget.abortedForBudget, true);
   assert.equal(budget.failure, undefined);
-  const timeout = laneResult(1, { ok: false, abortedForTimeout: true }, 'noise', { id: 'd1' });
+  const timeout = laneResult(1, { outcome:'timeout', ok: false, abortedForTimeout: true }, 'noise', { id: 'd1' });
   assert.equal(timeout.failure, undefined);
 });
 
 test('laneResult: an internal child crash is NOT an environment failure', () => {
   // `mapError` flattens every non-CliError throw to exit 3. Reading that as "the box is
   // broken" makes the suite probe a healthy lane, retry, and retire it on the streak.
-  const bug = laneResult(3, { error: "Cannot read properties of undefined", exitCode: 3, errorKind: 'Error' }, '', { id: 'd1' });
+  const bug = laneResult(3, { outcome:'internal', error: "Cannot read properties of undefined", exitCode: 3, errorKind: 'Error' }, '', { id: 'd1' });
   assert.equal(bug.abortedForEnv, undefined);
-  const env = laneResult(3, { error: 'device not found', exitCode: 3, errorKind: 'CliError' }, '', { id: 'd1' });
+  const env = laneResult(3, { outcome:'env', error: 'device not found', exitCode: 3, errorKind: 'CliError' }, '', { id: 'd1' });
   assert.equal(env.abortedForEnv, true);
 });
 
@@ -717,7 +656,7 @@ test('laneResult: a refused lease is "never ran", not an environment failure (#1
   const lane = { id: 'd1', server: 'http://h:8391', label: 'h:8391#1' };
   const refused = laneResult(
     3,
-    { error: 'verikun server device is busy (409): all 2 devices are leased by other active runs.', exitCode: 3, errorKind: 'NoFreeDeviceError' },
+    { outcome:'no-device', error: 'verikun server device is busy (409): all 2 devices are leased by other active runs.', exitCode: 3, errorKind: 'NoFreeDeviceError' },
     '',
     lane,
   );
@@ -727,8 +666,8 @@ test('laneResult: a refused lease is "never ran", not an environment failure (#1
   assert.equal(refused.ok, false);
   assert.match(refused.failure?.reason ?? '', /all 2 devices are leased/, 'the reason travels for the waiting warning');
   // The EXIT CODE is still the verdict: the kind alone never makes a finished run "never ran".
-  assert.equal(laneResult(0, { ok: true, errorKind: 'NoFreeDeviceError' }, '', lane).noDevice, undefined);
-  assert.equal(laneResult(1, { ok: false, errorKind: 'NoFreeDeviceError' }, '', lane).noDevice, undefined);
+  assert.equal(laneResult(0, { outcome:'pass', ok: true, errorKind: 'NoFreeDeviceError' }, '', lane).noDevice, undefined);
+  assert.equal(laneResult(1, { outcome:'fail', ok: false, errorKind: 'NoFreeDeviceError' }, '', lane).noDevice, undefined);
 });
 
 test('laneResult: an evicted run is marked, from its result document or from a thrown one', () => {
@@ -737,7 +676,7 @@ test('laneResult: an evicted run is marked, from its result document or from a t
   // so the attempt keeps its report link and names the phone that left.
   const r = laneResult(
     3,
-    { ok: false, abortedForEnv: true, evicted: true, runDir: '/r/7', device: 'R58N', failure: { where: 'run', reason: 'a left the pool' } },
+    { outcome:'lost-device', ok: false, abortedForEnv: true, evicted: true, runDir: '/r/7', device: 'R58N', failure: { where: 'run', reason: 'a left the pool' } },
     '',
     lane,
   );
@@ -746,14 +685,14 @@ test('laneResult: an evicted run is marked, from its result document or from a t
   assert.equal(r.device, 'R58N');
   assert.equal(r.runDir, '/r/7');
   // Belt and braces: an eviction that escaped as a throw is still recognised by its class.
-  const thrown = laneResult(3, { error: 'verikun server ended this run (409): a left the pool', exitCode: 3, errorKind: 'RunEvictedError' }, '', lane);
+  const thrown = laneResult(3, { outcome:'lost-device',error: 'verikun server ended this run (409): a left the pool', exitCode: 3, errorKind: 'RunEvictedError' }, '', lane);
   assert.equal(thrown.evicted, true);
   // And nothing else is: an ordinary environment abort stays exactly that.
-  assert.equal(laneResult(3, { ok: false, abortedForEnv: true }, '', lane).evicted, undefined);
+  assert.equal(laneResult(3, { outcome:'env', ok: false, abortedForEnv: true }, '', lane).evicted, undefined);
 });
 
 test('laneResult: an empty device from the child falls back to the lane', () => {
-  const r = laneResult(0, { ok: true, device: '' }, '', { id: 'd1', device: 'emulator-5554' });
+  const r = laneResult(0, { outcome:'pass', ok: true, device: '' }, '', { id: 'd1', device: 'emulator-5554' });
   assert.equal(r.device, 'emulator-5554', 'a blank Device column is the one thing it must not produce');
 });
 
@@ -766,4 +705,14 @@ test('lastJsonObject: stray output on EITHER side of the document is harmless', 
   assert.deepEqual(lastJsonObject(`${doc}\nshutdown hook said }\n`), JSON.parse(doc));
   assert.deepEqual(lastJsonObject('{"first":1}\n{"second":2}'), { second: 2 }, 'the LAST document wins');
   assert.equal(lastJsonObject('nothing here'), null);
+});
+
+test('laneResult rejects a same-build JSON result missing its outcome',()=>{
+  const r=laneResult(0,{ok:true},'',{id:'d1'});
+  assert.equal(r.ok,false);assert.equal(r.outcome,'internal');assert.equal(r.abortedForEnv,undefined);
+});
+
+test('laneResult preserves an explicit loss verdict even when a child exits zero',()=>{
+  const r=laneResult(0,{outcome:'lost-device',ok:true},'',{id:'d1'});
+  assert.equal(r.outcome,'lost-device');assert.equal(r.ok,false);assert.equal(r.evicted,true);
 });

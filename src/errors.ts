@@ -195,3 +195,32 @@ export class AmbiguousSelectorError extends CliError {
     this.name = 'AmbiguousSelectorError';
   }
 }
+
+/** Device-addressed transport disappeared; a fresh run may safely use another device. */
+export class DeviceGoneError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'DeviceGoneError'; }
+}
+/** A shell timeout confirmed by a failed real device round trip. */
+export class DeviceUnresponsiveError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'DeviceUnresponsiveError'; }
+}
+export class UnsupportedOnPlatformError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'UnsupportedOnPlatformError'; }
+}
+export class ServerUnreachableError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'ServerUnreachableError'; }
+}
+export function isDeviceLoss(e: unknown): e is DeviceGoneError | DeviceUnresponsiveError {
+  return e instanceof DeviceGoneError || e instanceof DeviceUnresponsiveError;
+}
+export function rethrowIfLost(e: unknown): void {
+  if (isDeviceLoss(e) || e instanceof RunEvictedError) throw e;
+}
+export type Outcome = 'pass' | 'fail' | 'env' | 'lost-device' | 'no-device' | 'server-unreachable' | 'usage' | 'budget' | 'timeout' | 'internal';
+export function errorOutcome(e: unknown): Outcome {
+  if (isDeviceLoss(e) || e instanceof RunEvictedError) return 'lost-device';
+  if (e instanceof NoFreeDeviceError) return 'no-device';
+  if (e instanceof ServerUnreachableError) return 'server-unreachable';
+  if (!(e instanceof CliError)) return 'internal';
+  return e.exitCode === 2 ? 'usage' : e.exitCode === 1 ? 'fail' : 'env';
+}

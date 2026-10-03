@@ -137,15 +137,20 @@ Clients pass `--server <url>` (or `VERIKUN_SERVER`) plus `--auth-key` (or
 apply** — no flag on an `exec` request can repoint them. With `--allow-device-control` a
 client may `restart`/`stop` the server's own device, and with `--allow-device-control=<names>`
 also `start` one of those targets; the device lifecycle commands below all accept
-`--server <url>`. The server may also move itself off a device that fails — see
+`--server <url>`. An unpinned server may recruit a replacement for a down device; existing runs are evicted — see
 [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
 
 | Flag | Effect |
 |---|---|
 | *(none)* | Failover is **on** when the server auto-selected its device, and **off** when `--device` (or `VERIKUN_DEVICE` / `ANDROID_SERIAL`) pinned it. |
-| `--allow-failover` | Turn it on even for a pinned server; it may move to any attached, running, unclaimed device. |
+| `--allow-failover` | Enable substitution even for a pinned server; it may recruit an attached, running, unclaimed device. |
 | `--allow-failover=<a,b>` | As above, but bounded to those serials or AVD/simulator names. |
 | `--no-failover` | Off outright. Same as `VERIKUN_NO_FAILOVER=1`, which wins over every flag. |
+
+An install may return `200` after its first successful device plus a 60-second grace.
+`devices` lists successful targets and `skipped` lists those still unavailable. A skipped
+device cannot serve a test until it has the retained build. Busy installs wait within
+`VERIKUN_SUITE_DEVICE_WAIT_MIN`.
 
 ## Environment
 
@@ -201,7 +206,7 @@ Every command accepts these; the environment-variable forms are listed in
 |---|---|
 | `-d, --device <serial>` | Target a specific device. Resolution order: `--device`, then `VERIKUN_DEVICE`, then `ANDROID_SERIAL` (Android only). With none set, verikun picks a device **no other job is driving** and says which on stderr; naming a device another job holds, or every device being claimed, is exit `2` — see [Device claims](/verikun/reference/device-claims/). `VERIKUN_NO_CLAIM=1` turns claims off: one attached device auto-resolves, more than one exits `2`. |
 | `-p, --platform <android\|ios>` | Platform, default `android`. `--ios` / `--android` are shortcuts. |
-| `-j, --json` | Machine-readable output — **also serializes errors** as `{error, exitCode, errorKind}` with the exit code unchanged, so one parser handles both outcomes. `errorKind` is the error's class (`SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`, `DumpKilledError`, `NoFreeDeviceError`, `RunEvictedError`, `CliError`, `Error`), so a caller can tell "the app has not drawn yet" from "the device is gone" although both are exit `3`. |
+| `-j, --json` | Machine-readable output — **also serializes errors** as `{error, exitCode, errorKind}` with the exit code unchanged, so one parser handles both outcomes. `errorKind` is the error's class (`SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`, `DumpKilledError`, `NoFreeDeviceError`, `RunEvictedError`, `DeviceGoneError`, `DeviceUnresponsiveError`, `UnsupportedOnPlatformError`, `ServerUnreachableError`, `CliError`, `Error`), so a caller can tell "the app has not drawn yet" from "the device is gone" although both are exit `3`. |
 | `--server <url>` | For `ai` / `suite` / `install`: run against a remote [`vk server`](/verikun/guides/remote-devices-and-ci/) (or `VERIKUN_SERVER`). The server's device and platform apply. |
 | `--auth-key <k>` | Key for `--server` (or `VERIKUN_SERVER_AUTH_KEY`, which keeps it out of `ps`). |
 | `--` | End flag parsing, so text may start with `-`: `vk type -- "-50% off"`. |

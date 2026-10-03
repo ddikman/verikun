@@ -208,9 +208,9 @@ first tap rather than half-way through a half-modified device.
 <tr><td>Failure screenshot + hierarchy</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td>Failure screenshot over <code>--server</code></td><td>❌ hierarchy only</td><td>❌ hierarchy only</td><td>❌ hierarchy only</td><td>❌ hierarchy only</td></tr>
 <tr><td>Device claims (auto-pick a free device)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
-<tr><td><code>vk server</code> failover — unreachable device</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
-<tr><td><code>vk server</code> failover — device cannot serve an install</td><td>✅</td><td>✅</td><td>❌ probe only</td><td>❌ probe only</td></tr>
-<tr><td><code>vk server</code> pool degrade / rejoin sweep</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>vk server</code> eviction and readmission</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>vk server</code> partial install and catch-up</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td><code>vk server</code> device health supervision</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>vk server</code> adb-server recycle</td><td>✅ macOS host only</td><td>✅ macOS host only</td><td>⊘ no adb</td><td>⊘ no adb</td></tr>
 <tr><td><code>vk server --log-file</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 </tbody>
@@ -221,10 +221,9 @@ first tap rather than half-way through a half-modified device.
   macOS kernel's guard-violation log, so on a Linux host the server never recycles and
   `vk doctor` stays quiet. iOS has no adb to recycle. See
   [Remote devices & CI](/verikun/guides/remote-devices-and-ci/#it-keeps-the-hosts-adb-server-healthy).
-- **Failover on iOS moves only for an unreachable device.** Telling "this device cannot take
-  the build" from "this build is broken" relies on `adb`'s `INSTALL_FAILED_*` vocabulary,
-  which `idb` does not share, so a full simulator does not trigger a move: the install fails.
-  See [When the bound device fails](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails).
+- **iOS device loss requires corroboration.** An idb connection failure convicts a
+  simulator only when `simctl` reports it absent or no longer Booted. A companion
+  failure remains a toolchain error. Failed installs keep that device out until catch-up.
 - **Device claims are host-side and identical everywhere.** Over `--server` the claim is held
   by the server process on the host where the devices are. See
   [Device claims](/verikun/reference/device-claims/).

@@ -1,65 +1,37 @@
-// One `vk server` device, driven on its own thread.
-//
-// WHY A THREAD. Every device call bottoms out in `spawnSync` (exec.ts), which blocks the
-// thread it runs on. A single-threaded server therefore serves one device at a time no
-// matter how many are attached — so a pooled server that kept everything on the main
-// thread would buy exactly nothing, which is the same trap `Promise.all` over tests falls
-// into on the client. A worker per device is the smallest thing that makes the blocking
-// call block only its own device. It also gives each device its own copy of the module
-// globals that are per-job by nature (`quiet` in output.ts, `processScoped` and the
-// acquired-claims set in device/claims.ts).
-//
-// WHAT STAYS ON THE MAIN THREAD. Everything that is policy: bearer auth, the validateNode
-// grammar gate, body caps, the logs charset gate, install streaming. This module is only
-// the device call at the end of that pipeline — so the server's trust boundary does not
-// move and does not get re-implemented per device.
-//
-// Errors cross the boundary through rpc.ts's existing pure codec, so a SelectorNotFound /
-// AmbiguousSelector keeps its class identity all the way to the `vk ai` engine that has
-// to tell a heal trigger from a terminal failure.
+// One device executor in a detached child process. Blocking device tools cannot stall
+// HTTP or another device; the parent can kill this entire process group on retirement.
+// Authentication, validation, leases and health remain in the parent server.
 
-import { parentPort, workerData } from 'node:worker_threads';
 import { getDriver } from './drivers';
 import { executeForServer } from './cli';
 import { setOutputQuiet } from './output';
 import { setProcessScoped } from './device/claims';
 import { describeError, ErrorDescriptor } from './rpc';
+import { DeviceUnresponsiveError } from './errors';
 import type { Driver, Element, HierarchySource, Platform } from './types';
 import type { RunStep } from './run';
 import type { LogFetchOpts } from './run';
 
-export interface DeviceWorkerData {
-  platform: Platform;
-  serial: string;
-}
-
 export type WorkerCall =
-  | { kind: 'exec'; command: string; positionals: string[]; flags: Record<string, string> }
+  | { kind: 'exec'; sampleDeviceTime?: boolean; command: string; positionals: string[]; flags: Record<string, string> }
   | { kind: 'elements' }
   | { kind: 'logs'; opts: LogFetchOpts }
   | { kind: 'install'; path: string }
-  /** Re-probe this device's toolchain. The failover classifier deliberately leaves the
-   *  timing-dependent question ("is it actually dead, or was that a blip?") to the caller,
-   *  and this is how the caller asks — on the device's OWN thread, so a probe of one
-   *  device cannot stall another's in-flight step. */
-  | { kind: 'preflight' }
-  /** Which read path this device's NEXT hierarchy read would take. Answered without
-   *  touching the device (it reads the companion's cached verdict), which is why the
-   *  pool may dispatch it outside the per-device queue — `/v1/health` has to stay
-   *  answerable while a step is in flight, and a companion that silently stood down
-   *  mid-suite is exactly what this field exists to expose (issue #77). */
-  | { kind: 'reads' };
+  /** Confirm liveness and clear the driver's circuit breaker after a successful probe. */
+  | { kind: 'recover' };
 
 export type WorkerRequest = WorkerCall & { id: number };
 
 /** What an `exec` produces — `ExecResponse` minus the base64 encoding, which the main
- *  thread applies (Buffers survive structured clone, so the wire encoding stays there). */
+ *  process applies (advanced IPC serialization preserves binary artifacts). */
 export interface WorkerExecResult {
   code: number;
   error?: ErrorDescriptor;
   step?: RunStep;
   artifacts?: Record<string, Buffer>;
   logStart?: string;
+  originals?: Record<string, string>;
+  reads?: HierarchySource;
 }
 
 export type WorkerReply =
@@ -93,8 +65,8 @@ function prefixStderr(tag: string): () => void {
     cb?.();
     return ok;
   }) as typeof process.stderr.write;
-  // A partial line is BUFFERED until the next write or this flush. A thread killed by
-  // `terminate()` runs no code at all — not even an 'exit' handler — so that path cannot
+  // A partial line is BUFFERED until the next write or this flush. A process killed by
+  // SIGKILL runs no code at all — not even an 'exit' handler — so that path cannot
   // be flushed and this is not claimed to cover it; the caller flushes on an uncaught
   // throw, which is the one ending a worker gets to observe.
   return () => {
@@ -106,11 +78,14 @@ function prefixStderr(tag: string): () => void {
 }
 
 function main(): void {
-  const port = parentPort;
-  if (!port) throw new Error('server-worker must be started as a worker thread');
-  const { platform, serial } = workerData as DeviceWorkerData;
+  if (!process.send) throw new Error('server-worker must be forked with an IPC channel');
+  const platform = process.argv[2] as Platform;
+  const serial = process.argv[3];
+  if (!['android', 'ios'].includes(platform) || !serial) throw new Error('invalid device executor arguments');
+  const send = (reply: WorkerReply): void => { if (process.connected) process.send!(reply); };
+  process.on('disconnect', () => process.exit(0));
   const flushStderr = prefixStderr(serial);
-  // The ONLY teardown a worker can flush on. `terminate()` — how every normal path ends a
+  // The ONLY teardown a worker can flush on. SIGKILL — how every normal path ends a
   // worker (dispose/retire/rebind/ready-timeout) — runs no handler at all, so a
   // `beforeExit` listener would be dead code claiming otherwise.
   process.on('uncaughtException', (e) => {
@@ -133,7 +108,7 @@ function main(): void {
     // capacity it cannot serve and every request to this device would 500.
     driver.preflight();
   } catch (e) {
-    port.postMessage({ kind: 'failed', error: describeError(e as Error) } satisfies WorkerReply);
+    send({ kind: 'failed', error: describeError(e as Error) } satisfies WorkerReply);
     return;
   }
 
@@ -143,14 +118,14 @@ function main(): void {
   } catch {
     /* best-effort: a read-path probe must never be why a device is unusable */
   }
-  port.postMessage({ kind: 'ready', serial, ...(reads ? { reads } : {}) } satisfies WorkerReply);
+  send({ kind: 'ready', serial, ...(reads ? { reads } : {}) } satisfies WorkerReply);
 
-  port.on('message', (req: WorkerRequest) => {
+  process.on('message', (req: WorkerRequest) => {
     void (async () => {
       try {
-        port.postMessage({ kind: 'reply', id: req.id, ok: true, value: await handle(driver, platform, req) } satisfies WorkerReply);
+        send({ kind: 'reply', id: req.id, ok: true, value: await handle(driver, platform, req) } satisfies WorkerReply);
       } catch (e) {
-        port.postMessage({ kind: 'reply', id: req.id, ok: false, error: describeError(e as Error) } satisfies WorkerReply);
+        send({ kind: 'reply', id: req.id, ok: false, error: describeError(e as Error) } satisfies WorkerReply);
       }
     })();
   });
@@ -159,24 +134,27 @@ function main(): void {
 async function handle(driver: Driver, platform: Platform, req: WorkerRequest): Promise<unknown> {
   switch (req.kind) {
     case 'exec': {
-      const { code, error, step, artifacts, logStart } = await executeForServer(
+      const { code, error, step, artifacts, logStart, originals } = await executeForServer(
         req.command,
         req.positionals,
         req.flags,
         driver,
         platform,
+        req.sampleDeviceTime,
       );
       const result: WorkerExecResult = {
         code,
+        ...(originals ? { originals } : {}),
         ...(error ? { error: describeError(error) } : {}),
         ...(step ? { step } : {}),
         ...(artifacts && Object.keys(artifacts).length ? { artifacts } : {}),
         ...(logStart ? { logStart } : {}),
       };
+      try { result.reads = driver.hierarchySource?.() ?? undefined; } catch { /* cached path is advisory */ }
       return result;
     }
-    case 'preflight':
-      driver.preflight(); // throws CliError(3), which crosses back through the codec
+    case 'recover':
+      if (driver.probeLiveness && !driver.probeLiveness()) throw new DeviceUnresponsiveError('device failed its recovery echo');
       return null;
     case 'elements':
       return driver.getElements() satisfies Element[];
@@ -185,12 +163,6 @@ async function handle(driver: Driver, platform: Platform, req: WorkerRequest): P
     case 'install':
       driver.install(req.path);
       return null;
-    case 'reads':
-      try {
-        return driver.hierarchySource?.() ?? null;
-      } catch {
-        return null;
-      }
   }
 }
 

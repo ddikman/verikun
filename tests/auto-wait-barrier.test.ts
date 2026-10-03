@@ -217,3 +217,38 @@ test('ReadTally: a good read early does NOT license a pass from a blind read lat
   assert.equal(tally.lastWasBlind(), true, 'this read still proves nothing');
   tally.rethrowIfBlind(); // and the window as a whole was readable, so no throw
 });
+
+// Typed loss never becomes a fabricated selector absence, even after a good read.
+test('transport loss followed by recovery fits inside the selector window', async () => {
+  const { DeviceGoneError } = await import('../src/errors');
+  const ctx = ctxThrowing(new DeviceGoneError('USB disconnected'), 1, [confirm()]);
+  assert.equal((await resolveOneWaiting(ctx, parseSelector('@vk_sheet_confirm'))).element.id, 'vk_sheet_confirm');
+});
+test('the final lost read rethrows after an earlier successful hierarchy', async () => {
+  const { DeviceGoneError } = await import('../src/errors');
+  const loss = new DeviceGoneError('USB disconnected');
+  let reads = 0;
+  const ctx = ctxWith([]);
+  ctx.driver = makeDriver({ viewport: () => VP, getElements: () => {
+    if (++reads === 1) return [content()];
+    throw loss;
+  } });
+  await assert.rejects(resolveOneWaiting(ctx, parseSelector('@vk_sheet_confirm')), e => e === loss);
+});
+test('unresponsive device errors fail polling immediately without an absence', async () => {
+  const { DeviceUnresponsiveError } = await import('../src/errors');
+  const loss = new DeviceUnresponsiveError('shell echo failed');
+  await assert.rejects(matchWaiting(ctxThrowing(loss, Infinity), parseSelector('@vk_sheet_confirm')), e => e === loss);
+});
+test('a lost read cannot satisfy a gone predicate', async () => {
+  const { DeviceGoneError } = await import('../src/errors');
+  const tally = new ReadTally(ctxWith([]));
+  tally.note([confirm()]);
+  const loss = new DeviceGoneError('offline');
+  tally.noteLost(loss);
+  assert.equal(tally.lastWasBlind(), true);
+  assert.throws(() => tally.rethrowIfBlind(), e => e === loss);
+  tally.note([]);
+  assert.equal(tally.lastWasBlind(), false);
+  assert.doesNotThrow(() => tally.rethrowIfBlind());
+});

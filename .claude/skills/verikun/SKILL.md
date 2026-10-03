@@ -491,7 +491,7 @@ vk suite tests/ --app com.example.app --servers http://a:8391,http://b:8391
   `totals.wallClockMs` (how long the gate took) from `totals.durationMs` (device-seconds).
 - `--concurrency N` caps how many run at once — more devices on one host can thrash it.
   `--max-suite-cost-usd N` stops the suite once total model spend crosses it (exit `1`).
-- A device that breaks retires; its tests move to the others. Exit `3` only when all are gone.
+- Local devices bench and rejoin after 45-second probes; server health owns remote membership. Typed loss reruns free on another device at most twice.
 - Over `--server`, a lane with no free device waits instead of failing tests, and a test whose
   device left the pool re-runs without spending a retry. With no device for any lane the suite
   stops after `VERIKUN_SUITE_DEVICE_WAIT_MIN` (default 10) with exit `3` and a `notRun` list.
@@ -510,8 +510,9 @@ vk install ./app-debug.apk --server "$VERIKUN_SERVER"   # server needs --allow-i
 vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
 ```
 
-A wrong URL/key fails fast with exit 3; `409` means every device is already
-leased by another run; `503` means the server has no device attached — boot one
+A wrong URL/key fails fast with exit 3. New clients wait in the server FIFO; a tagged
+`409` means the run lost its device and must restart. `503` after the wait means no device
+became available — boot one
 (below). To expose a device from THIS machine: `vk server --allow-install`
 (add `--bind <addr>` to leave loopback; auth key auto-generates if unset).
 
@@ -532,22 +533,17 @@ repairs always land on the same phone. `vk install --server` then installs on ev
 `vk devices start|restart|stop --server` is refused (`403`) — a pool has no single device
 to act on.
 
-**If you see `[verikun] server moved device: A → B` on stderr**, the server left a
-device that failed and is now on another one. What that means depends on the line:
+Remote peers must support held leases and device supervision; upgrade them together.
+Compilation holds no lease. A heartbeat thread keeps the execution lease alive during
+synchronous model repair. Closing the socket or 30 seconds without bytes ends it and
+restores device settings before the next run. Every server, including capacity one,
+readmits wanted devices with boot/build checks before dealing. `--no-failover` disables
+spare recruitment, not readmission. `VERIKUN_NO_DEVICE_WATCH=1` disables supervision.
 
-- `— retried there` (installs only): the build DID land, on **B**. Anything you go on
-  to do with an explicit serial must name B, not A.
-- `— this step failed on the old device; the next runs on the new one`: your step
-  failed on **A**. Do NOT re-run it expecting a different answer for the same reason —
-  the failure was real on A, and B has none of the state your flow built up. Start the
-  flow again from the top if you want it on B.
-
-The server rules the bad device out; `vk devices --server <url>` shows why in its `NOTE`
-column, and a pooled server re-adopts a device that comes back within a minute. A device
-that is still attached keeps its place and is simply dealt last, so its own error keeps
-reaching you rather than a bare "no device attached". A device that is **gone** leaves the
-pool — so `capacity` can drop mid-job, and an install can come back `exit 0` having skipped
-it. That is a success: nothing can be dealt a device running the previous build.
+`vk ai --json` exposes `outcome`; only lost-device gets free reruns. Env failures use normal
+retries. A remote suite checks installedSha between tests and refuses a changed build.
+A single `--server` accepts `--ensure-device`, once in the parent. Install waits for holders,
+returns successful devices plus skipped targets, and keeps stale builds out of dealing.
 
 ## The device is missing or wedged
 
