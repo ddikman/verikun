@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format is based on
 - **Docs site** links unfurl with a social card image built from the illustration.
 
 ### Changed
+- **Docs site** publishes a single `sitemap.xml`.
 - **Docs site and README** show the new verikun logo and an animated illustration, with light and
   dark variants.
 - **Docs site** primary color is now black, off-white in dark mode.
