@@ -2,27 +2,27 @@
 
 direction: down
 
-loss: Typed device loss {shape: oval}
-end: End the lease
-check: Confirm device liveness
+loss: "Test failed:\nadb/idb stopped responding" {shape: oval}
+end: Remove device lease
+check: Check device response
 alive: Device answers? {shape: diamond}
-recover: Clear driver breaker
-kill: Kill process group {
+recover: Resume device commands
+kill: "Kill device subprocess\nand stuck commands" {
   style.stroke: "#c8401f"
   style.font-color: "#c8401f"
 }
 cleanup: Wait for cleanup
-warm: Restore + retained build
-ready: Ready for new leases {shape: oval}
-rerun: Fresh test on sibling {shape: oval}
+warm: "Restore settings\nand prepare latest app"
+ready: Device available again {shape: oval}
+rerun: "Fresh test on\nanother device" {shape: oval}
 
-loss -> end: typed verdict
-end -> check: server probes
-end -> rerun: client reruns whole test
-check -> alive: echo result
+loss -> end: test stops
+end -> check: check device
+end -> rerun: start again
+check -> alive: response
 alive -> recover: yes
-recover -> warm: recovered
+recover -> warm: responding again
 alive -> kill: no
-kill -> cleanup: actual executor exit
-cleanup -> warm: bounded readmission
-warm -> ready: admission passes
+kill -> cleanup: after it stops
+cleanup -> warm: device responds again
+warm -> ready: ready

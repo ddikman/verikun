@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 - **Docs site** publishes a single `sitemap.xml`.
+- **Server diagrams**: explain device reservations, test reruns and recovery in plain language.
 
 ## [1.0.0] - 2026-10-03
 

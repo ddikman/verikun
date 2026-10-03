@@ -2,31 +2,31 @@
 
 direction: down
 
-client: "Compile, then lease"
-host: Device host {
+client: "Prepare test,\nthen reserve device"
+host: Server computer {
   label.near: top-left
-  supervisor: "Server supervisor\nhealth, leases, builds" {
+  supervisor: "Server checks devices\nand assigns tests" {
     style.stroke: "#c8401f"
     style.font-color: "#c8401f"
   }
   a: Device A {
     label.near: top-left
-    executor: Forked executor
-    tools: Device tool children
+    executor: Device subprocess
+    tools: adb / idb commands
   }
   b: Device B {
     label.near: top-left
-    executor: Forked executor
-    tools: Device tool children
+    executor: Device subprocess
+    tools: adb / idb commands
   }
 }
 phone_a: Phone A {style.stroke-dash: 5; style.fill: "#fbfaf6"}
 phone_b: Phone B {style.stroke-dash: 5; style.fill: "#fbfaf6"}
 
-client -> host.supervisor: held HTTP + heartbeat
-host.supervisor -> host.a.executor: gated IPC
-host.supervisor -> host.b.executor: gated IPC
-host.a.executor -> host.a.tools: spawn
-host.b.executor -> host.b.tools: spawn
-host.a.tools -> phone_a: adb / idb
-host.b.tools -> phone_b: adb / idb
+client -> host.supervisor: reserve + keep alive
+host.supervisor -> host.a.executor: send test step
+host.supervisor -> host.b.executor: send test step
+host.a.executor -> host.a.tools: run
+host.b.executor -> host.b.tools: run
+host.a.tools -> phone_a: control device
+host.b.tools -> phone_b: control device
