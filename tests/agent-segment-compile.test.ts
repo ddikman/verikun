@@ -1,15 +1,16 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compileFromSegments, obtainPlan, assertBudgetForCompile, cachedSegment } from '../src/cli';
 import { CostTracker, Price } from '../src/agent/cost';
 import { Segment, resolveIncludes } from '../src/agent/include';
 import { CacheKeyInput, planKey, writePlan } from '../src/agent/cache';
-import { AgentProvider, CompileInput, CompileResult, RepairResult } from '../src/agent/provider';
-import { InvalidPlanError, Plan, LeafStep } from '../src/agent/ir';
+import { AgentProvider, CompileInput, CompileResult, RepairResult, compileResult } from '../src/agent/provider';
+import { Plan, LeafStep } from '../src/agent/ir';
 import { CliError } from '../src/errors';
+import { setErrSink } from '../src/output';
 
 // compileFromSegments is what makes `@include` more than a textual paste: one compile per
 // chunk of prose, each cached under its own key. It writes under ./.verikun (cwd-relative),
@@ -34,6 +35,12 @@ function seg(text: string, source = 'a.md', startLine = 1, compilable = true): S
 
 const leaf = (command: string): LeafStep => ({ type: 'command', command, positionals: ['@x'], flags: [] });
 
+/** What a scripted compile answers: a plan, or one of the ways a compile goes wrong. */
+type Answer = Plan | 'no-steps' | 'invalid' | 'truncated';
+
+/** The stray leaf issue #158 is about: a loop spelled as a command, which the validator rejects. */
+const STRAY = { type: 'command', command: 'repeat', positionals: ['@x'], flags: [] };
+
 /** A provider that answers from a scripted table keyed by the prose it is handed.
  *  `retryAnswers` lets a GUIDED recompile of the same prose answer differently, which is the
  *  only way to exercise "the second attempt fixed it" — the whole point of retryFeedback. */
@@ -41,20 +48,22 @@ class FakeProvider implements AgentProvider {
   readonly seen: string[] = [];
   readonly feedback: (string | undefined)[] = [];
   readonly seeds: (Plan | undefined)[] = [];
+  readonly sections: (boolean | undefined)[] = [];
   constructor(
-    private readonly answers: Record<string, Plan | 'no-steps'>,
-    private readonly retryAnswers: Record<string, Plan> = {},
+    private readonly answers: Record<string, Answer>,
+    private readonly retryAnswers: Record<string, Answer> = {},
   ) {}
   async compile(input: CompileInput): Promise<CompileResult> {
     this.seen.push(input.nl);
     this.feedback.push(input.retryFeedback);
     this.seeds.push(input.seed);
-    const retry = input.retryFeedback ? this.retryAnswers[input.nl] : undefined;
-    if (retry) return { plan: retry, usage: ONE_DOLLAR };
-    const answer = this.answers[input.nl];
+    this.sections.push(input.section);
+    const answer = (input.retryFeedback ? this.retryAnswers[input.nl] : undefined) ?? this.answers[input.nl];
     if (answer === undefined) throw new Error(`fake provider has no answer for ${JSON.stringify(input.nl)}`);
-    if (answer === 'no-steps') throw new InvalidPlanError('plan: has no steps', 'no-steps');
-    return { plan: answer, usage: ONE_DOLLAR };
+    if (answer === 'truncated') throw new CliError('Model output was truncated (max_tokens) before a complete result.', 1);
+    // Through the providers' own reader, so a rejection is shaped — and billed — exactly as a real one.
+    const json = answer === 'no-steps' ? { version: 1, steps: [] } : answer === 'invalid' ? { version: 1, steps: [STRAY] } : answer;
+    return compileResult(json, ONE_DOLLAR);
   }
   async repair(): Promise<RepairResult> {
     throw new Error('not used');
@@ -494,4 +503,150 @@ test('compileFromSegments: a prior section that names only what its prose gives 
   const provider = new FakeProvider({ [TABS]: waitOn('text:Home') });
   await compileFromSegments([seg(TABS)], { ...KEY, build: 'new' }, opts(), new CostTracker(PRICE), provider);
   assert.deepEqual(provider.seeds[0]?.steps, waitOn('text:Home').steps);
+});
+
+// --- an invalid compile: one guided recompile, billed (issue #158) ---------------------------
+//
+// The schema the model decodes against is looser than the validator, so a compile can come back
+// with a plan `parsePlan` rejects. That used to kill the attempt as an "Unexpected error" (exit 3)
+// with the call's cost dropped. Every call below bills $1.
+
+test('obtainPlan: a plan the validator rejects buys one guided recompile that names the problem', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: 'tap it' };
+  const provider = new FakeProvider({ 'tap it': 'invalid' }, { 'tap it': planOf('tap') });
+  const cost = new CostTracker(PRICE, 100);
+  const { plan } = await obtainPlan(key, 't.md', opts(), cost, provider, []);
+  assert.deepEqual(provider.seen, ['tap it', 'tap it']);
+  assert.match(provider.feedback[1] ?? '', /unknown command "repeat"/);
+  assert.match(provider.feedback[1] ?? '', /"command":"repeat"/, 'the offending node is shown, not just its index');
+  assert.equal(plan.steps.length, 1);
+  assert.equal(cached(key), true);
+  assert.equal(cost.usd(), 2, 'the rejected call is billed too');
+});
+
+test('obtainPlan: a plan rejected twice fails the test at exit 1, uncached, and names the node', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: 'tap it' };
+  const provider = new FakeProvider({ 'tap it': 'invalid' });
+  const cost = new CostTracker(PRICE, 100);
+  await assert.rejects(
+    () => obtainPlan(key, 't.md', opts(), cost, provider, []),
+    (e: unknown) => e instanceof CliError && e.exitCode === 1 && /'t\.md'/.test(e.message) && /"command":"repeat"/.test(e.message),
+  );
+  assert.deepEqual(provider.seen, ['tap it', 'tap it'], 'exactly one recompile');
+  assert.equal(cached(key), false);
+  assert.equal(cost.usd(), 2);
+});
+
+test('obtainPlan: a whole test that compiles to NO steps is recompiled like any other rejection', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: 'tap it' };
+  const provider = new FakeProvider({ 'tap it': 'no-steps' }, { 'tap it': planOf('tap') });
+  const { plan } = await obtainPlan(key, 't.md', opts(), new CostTracker(PRICE, 100), provider, []);
+  assert.deepEqual(provider.seen, ['tap it', 'tap it']);
+  assert.equal(plan.steps.length, 1);
+});
+
+test('obtainPlan: an invalid plan is not recompiled once the ceiling is crossed', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: 'tap it' };
+  const provider = new FakeProvider({ 'tap it': 'invalid' }, { 'tap it': planOf('tap') });
+  await assert.rejects(
+    () => obtainPlan(key, 't.md', opts(0.5), new CostTracker(PRICE, 0.5), provider, []),
+    (e: unknown) => e instanceof CliError && e.exitCode === 1,
+  );
+  assert.deepEqual(provider.seen, ['tap it']);
+});
+
+test('obtainPlan: when the lint recompile comes back invalid, the first plan is kept', async () => {
+  // The first plan only tripped a non-fatal finding, so it is runnable — throwing it away for
+  // a retry that is worse would turn a warning into a failed test.
+  const key: CacheKeyInput = { ...KEY, nl: TABS };
+  const provider = new FakeProvider({ [TABS]: waitOn('id:home_tab_id') }, { [TABS]: 'invalid' });
+  const cost = new CostTracker(PRICE, 100);
+  const { plan } = await obtainPlan(key, 't.md', opts(), cost, provider, []);
+  assert.deepEqual(provider.seen, [TABS, TABS]);
+  assert.deepEqual(plan.steps, waitOn('id:home_tab_id').steps);
+  assert.equal(cost.usd(), 2);
+});
+
+test('obtainPlan: when the lint recompile fails outright (exit 1), the first plan is kept', async () => {
+  const key: CacheKeyInput = { ...KEY, nl: TABS };
+  const provider = new FakeProvider({ [TABS]: waitOn('id:home_tab_id') }, { [TABS]: 'truncated' });
+  const { plan } = await obtainPlan(key, 't.md', opts(), new CostTracker(PRICE, 100), provider, []);
+  assert.deepEqual(plan.steps, waitOn('id:home_tab_id').steps);
+});
+
+test('obtainPlan: a short plan whose recompile comes back invalid is still refused', async () => {
+  // Keeping the first plan must not launder a FATAL finding: it does not cover the test.
+  const key: CacheKeyInput = { ...KEY, nl: LONG };
+  const provider = new FakeProvider({ [LONG]: planOf('tap') }, { [LONG]: 'invalid' });
+  await assert.rejects(
+    () => obtainPlan(key, 't.md', opts(), new CostTracker(PRICE, 100), provider, []),
+    (e: unknown) => e instanceof CliError && e.exitCode === 1 && /does not cover 't\.md'/.test(e.message),
+  );
+  assert.equal(cached(key), false);
+});
+
+test('obtainPlan: a dropped echo is reported, not silent', async () => {
+  const loop = { type: 'repeat', selector: '@row', cap: 5, body: [leaf('swipe')] };
+  const echo = { type: 'command', command: 'repeat', positionals: ['@row'], flags: [] };
+  const key: CacheKeyInput = { ...KEY, nl: 'tap it' };
+  const provider = new FakeProvider({ 'tap it': { version: 1, steps: [echo, loop] } as unknown as Plan });
+  const lines: string[] = [];
+  setErrSink((l) => void lines.push(l));
+  try {
+    const { plan } = await obtainPlan(key, 't.md', opts(), new CostTracker(PRICE, 100), provider, []);
+    assert.equal(plan.steps.length, 1);
+  } finally {
+    setErrSink(null);
+  }
+  assert.ok(lines.some((l) => /dropped steps\[0\]/.test(l)), lines.join('\n'));
+});
+
+test('compileFromSegments: an invalid section buys one guided recompile, AS a section, and caches the fix', async () => {
+  const provider = new FakeProvider({ 'launch it': planOf('launch'), 'tap it': 'invalid' }, { 'tap it': planOf('tap') });
+  const cost = new CostTracker(PRICE);
+  const plan = await compileFromSegments([seg('launch it'), seg('tap it')], KEY, opts(), cost, provider);
+  assert.deepEqual(plan?.steps.map((s) => (s as LeafStep).command), ['launch', 'tap']);
+  assert.deepEqual(provider.seen, ['launch it', 'tap it', 'tap it']);
+  assert.match(provider.feedback[2] ?? '', /unknown command "repeat"/);
+  assert.equal(provider.sections[2], true);
+  assert.equal(cached({ ...KEY, nl: 'tap it' }), true);
+  assert.equal(cost.usd(), 3);
+});
+
+test('compileFromSegments: a section rejected twice drops the split rather than failing the test', async () => {
+  // The whole-file path sees the whole test and no section framing; the split contract is that
+  // a section we cannot trust falls back to it.
+  const provider = new FakeProvider({ 'launch it': planOf('launch'), 'tap it': 'invalid' });
+  const cost = new CostTracker(PRICE);
+  assert.equal(await compileFromSegments([seg('launch it'), seg('tap it')], KEY, opts(), cost, provider), null);
+  assert.deepEqual(provider.seen, ['launch it', 'tap it', 'tap it']);
+  assert.equal(cached({ ...KEY, nl: 'tap it' }), false);
+  const locks = join('.verikun', 'plan-locks');
+  assert.deepEqual(existsSync(locks) ? readdirSync(locks) : [], [], 'the lock was released');
+  assert.equal(cost.usd(), 3);
+});
+
+test('compileFromSegments: a section that comes back EMPTY on its recompile is not silently skipped', async () => {
+  // One instruction line, so a FIRST-attempt no-steps would be swallowed as rationale. But the
+  // first attempt emitted steps — the section states something — so skipping it would drop it.
+  const line = 'Repeat until the list ends: swipe up.';
+  const provider = new FakeProvider({ 'launch it': planOf('launch'), [line]: 'invalid' }, { [line]: 'no-steps' });
+  assert.equal(await compileFromSegments([seg('launch it'), seg(line)], KEY, opts(), new CostTracker(PRICE), provider), null);
+});
+
+test('compileFromSegments: an invalid section is not recompiled once the ceiling is crossed', async () => {
+  const provider = new FakeProvider({ 'tap it': 'invalid' }, { 'tap it': planOf('tap') });
+  await assert.rejects(
+    () => compileFromSegments([seg('tap it'), seg('b')], KEY, opts(0.5), new CostTracker(PRICE, 0.5), provider),
+    (e: unknown) => e instanceof CliError && e.exitCode === 1,
+  );
+  assert.deepEqual(provider.seen, ['tap it']);
+});
+
+test('compileFromSegments: a section that compiles to nothing is still billed', async () => {
+  const note = 'Wait times on this screen vary by device and build.';
+  const provider = new FakeProvider({ [note]: 'no-steps', 'tap it': planOf('tap') });
+  const cost = new CostTracker(PRICE);
+  await compileFromSegments([seg(note), seg('tap it')], KEY, opts(), cost, provider);
+  assert.equal(cost.usd(), 2, 'a call that produced nothing still cost a call');
 });

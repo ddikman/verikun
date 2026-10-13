@@ -152,6 +152,7 @@ test('validateNode: the innermost while-present may NOT contain another control 
 test('validateNode: rejects an empty control body (silence must not read as success)', () => {
   assert.throws(() => validateNode({ type: 'if-present', selector: 'x', body: [] }, 'x'), InvalidPlanError);
   assert.throws(() => validateNode({ type: 'repeat', selector: 'x', cap: 3, body: [] }, 'x'), InvalidPlanError);
+  assert.throws(() => validateNode({ type: 'while-present', selector: 'x', cap: 3, body: [] }, 'x'), InvalidPlanError);
 });
 
 test("validateNode: when's else MAY be empty — the explicit \"do nothing\" opt-in", () => {
@@ -311,4 +312,107 @@ test('parsePlan: an invalid device step fails the whole plan, not just the step'
     () => parsePlan({ version: 1, steps: [deviceLeaf(['set', 'wifi=off'])] }),
     InvalidPlanError,
   );
+});
+
+// --- issue #158: what the compile schema admits and the validator used to reject ----------
+
+/** The rejection a call throws — failing the test if it throws anything else, or nothing. */
+function rejection(fn: () => unknown): InvalidPlanError {
+  try {
+    fn();
+  } catch (e) {
+    if (e instanceof InvalidPlanError) return e;
+    throw e;
+  }
+  return assert.fail('expected an InvalidPlanError');
+}
+
+const swipeLeaf = { type: 'command', command: 'swipe', positionals: ['up'], flags: [] };
+const loop = { type: 'repeat', selector: 'id:target', cap: 20, body: [swipeLeaf] };
+/** What the model wrote in 11 of 20 rejected compiles: the loop spelled as a command, then the loop. */
+const echo = { type: 'command', command: 'repeat', positionals: ['id:target'], flags: [{ name: 'cap', value: '20' }] };
+
+test('parsePlan: drops a command leaf that echoes the loop right after it, and says so (#158)', () => {
+  const notes: string[] = [];
+  const plan = parsePlan({ version: 1, steps: [tapLeaf, echo, loop] }, notes);
+  assert.deepEqual(plan.steps.map((s) => s.type), ['command', 'repeat']);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /steps\[1\]/);
+});
+
+test('parsePlan: the echo is dropped inside a control body too (#158)', () => {
+  const guard = { type: 'if-present', selector: '@ok', body: [tapLeaf] };
+  const echoGuard = { type: 'command', command: 'if-present', positionals: ['@ok'], flags: [] };
+  const plan = parsePlan({
+    version: 1,
+    steps: [{ type: 'repeat', selector: '@done', cap: 5, body: [{ type: 'when', branches: [{ selector: '@q', body: [echoGuard, guard] }] }] }],
+  });
+  const outer = plan.steps[0];
+  assert.ok(outer.type === 'repeat' && outer.body[0].type === 'when');
+  assert.deepEqual(outer.body[0].branches[0].body.map((s) => s.type), ['if-present']);
+});
+
+test('parsePlan: an error after a dropped echo still names the RAW index the model wrote (#158)', () => {
+  const bad = { type: 'command', command: 'frobnicate', positionals: [], flags: [] };
+  assert.match(rejection(() => parsePlan({ version: 1, steps: [echo, loop, bad] })).message, /^steps\[2\]/);
+});
+
+test('parsePlan: a control-word leaf that does not echo the node after it is still rejected (#158)', () => {
+  const cases: Record<string, unknown[]> = {
+    // 8 of 20: the plan STOPS at the stray leaf — the loop and every later step are missing.
+    trailing: [echo],
+    'after the loop, not before it': [loop, echo],
+    'a different selector': [{ ...echo, positionals: ['id:other'] }, loop],
+    'followed by a leaf': [echo, tapLeaf],
+    // `when` has no selector to match on, so "the same node" cannot be shown.
+    'before a when': [
+      { type: 'command', command: 'when', positionals: [], flags: [] },
+      { type: 'when', branches: [{ selector: '@a', body: [tapLeaf] }] },
+    ],
+    // `command` is a node type but not a control word; nothing here was written twice.
+    'command spelled as a command': [{ type: 'command', command: 'command', positionals: [], flags: [] }, tapLeaf],
+  };
+  for (const [name, steps] of Object.entries(cases)) {
+    assert.throws(() => parsePlan({ version: 1, steps }), InvalidPlanError, name);
+  }
+});
+
+test('an InvalidPlanError carries the node it rejected, so a failed compile can show it (#158)', () => {
+  const err = rejection(() => parsePlan({ version: 1, steps: [tapLeaf, echo] }));
+  assert.deepEqual(err.node, echo);
+});
+
+test('a body error names the control node that owns the body (#158)', () => {
+  const emptyGuard = { type: 'if-present', selector: '@x', body: [] };
+  const err = rejection(() => parsePlan({ version: 1, steps: [{ type: 'repeat', selector: '@done', cap: 5, body: [emptyGuard] }] }));
+  assert.deepEqual(err.node, emptyGuard);
+});
+
+test('validateNode: a when BRANCH may be empty — "this screen is expected, nothing to do" (#158)', () => {
+  // The plan the model wrote for "the second panel — do nothing, it clears by itself".
+  const plan = parsePlan({
+    version: 1,
+    steps: [
+      {
+        type: 'repeat',
+        selector: '@ready',
+        cap: 20,
+        body: [{ type: 'when', branches: [{ selector: '@panel_a', body: [tapLeaf] }, { selector: '@panel_b', body: [] }] }],
+      },
+    ],
+  });
+  const outer = plan.steps[0];
+  assert.ok(outer.type === 'repeat' && outer.body[0].type === 'when');
+  assert.deepEqual(outer.body[0].branches[1].body, []);
+});
+
+test('validateNode: a when with only empty branches and no else still checks the screen — kept (#158)', () => {
+  // No match and no else FAILS, so this asserts "the screen is one of these" — it does something.
+  const node = validateNode({ type: 'when', branches: [{ selector: '@a', body: [] }, { selector: '@b', body: [] }] }, 'x');
+  assert.equal(node.type, 'when');
+});
+
+test('validateNode: a when that can neither act nor fail is rejected (#158)', () => {
+  // Every branch empty AND an empty else: no screen makes it do anything, and none makes it fail.
+  assert.throws(() => validateNode({ type: 'when', branches: [{ selector: '@a', body: [] }], else: [] }, 'x'), InvalidPlanError);
 });

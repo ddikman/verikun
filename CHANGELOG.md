@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-13
+
+### Fixed
+- **`vk ai`**: a compiled plan the validator rejects gets one guided recompile; a second rejection
+  fails at compile with exit `1`, not `Unexpected error` exit `3`. ([#158])
+- **`vk ai` cost** now counts compiles the validator rejected; a refused or truncated response
+  still counts as zero. ([#158])
+
+### Changed
+- **`vk ai` plans**: a `when` branch may have an empty body ("expected, nothing to do"), and a
+  command leaf restating the loop after it is dropped. ([#158])
+- **`vk suite`** reports a failed compile as `FAIL at compile`, not `FAIL at run`; `--retries`
+  still retries it, unless it hit the cost ceiling. ([#158])
+- **`vk ai --json`** returns a result document for a failed compile (`failure.where: "compile"`,
+  `costUsd`), not an error document. ([#158])
+
+[#158]: https://github.com/ddikman/verikun/issues/158
+
 ## [0.32.0] - 2026-10-03
 
 ### Added
