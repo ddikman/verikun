@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { OpenAiProvider, mapUsage, toStrictSchema, HttpResponse, FetchImpl } from '../src/agent/openai';
-import { PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from '../src/agent/ir';
+import { InvalidPlanError, PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from '../src/agent/ir';
 import { CliError } from '../src/errors';
 
 // The provider is a good pure unit-test target the way engine.ts is: inject a fake fetch
@@ -98,6 +98,22 @@ test('compile: posts a strict json_schema chat request and parses the returned p
     output_tokens: 200,
     cache_read_input_tokens: 800,
     cache_creation_input_tokens: 0,
+  });
+});
+
+test('compile: a plan the validator rejects still reports what the call cost (#158)', async () => {
+  // The tokens were spent either way; dropping them under-counted every rejected compile.
+  const stray = { type: 'command', command: 'repeat', positionals: ['@row'], flags: [] };
+  const provider = new OpenAiProvider({
+    model: 'gpt-5.4',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(chatOk(JSON.stringify({ version: 1, steps: [stray] }))),
+  });
+  await assert.rejects(provider.compile({ nl: 'x', platform: 'android' }), (e: unknown) => {
+    assert.ok(e instanceof InvalidPlanError);
+    assert.deepEqual(e.usage, { input_tokens: 200, output_tokens: 200, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 });
+    assert.deepEqual(e.node, stray);
+    return true;
   });
 });
 

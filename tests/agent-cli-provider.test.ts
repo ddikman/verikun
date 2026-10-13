@@ -12,8 +12,8 @@ import {
   extractJson,
   schemaInstruction,
 } from '../src/agent/cli-provider';
-import { PLAN_JSON_SCHEMA } from '../src/agent/ir';
-import { compileUserPrompt } from '../src/agent/provider';
+import { InvalidPlanError, PLAN_JSON_SCHEMA } from '../src/agent/ir';
+import { compileResult, compileUserPrompt } from '../src/agent/provider';
 import { SECTION_NOTE } from '../src/agent/grammar';
 import { CliError } from '../src/errors';
 
@@ -90,6 +90,36 @@ test('compile (codex): builds a read-only exec argv, parses the plan, reports $0
       assert.deepEqual(readdirSync(dir), []); // nothing left behind in the dir
     });
   });
+});
+
+test('compile (codex): a plan the validator rejects is an InvalidPlanError carrying $0 usage (#158)', () => {
+  return withTmp((dir) => {
+    const stdout = JSON.stringify({ version: 1, steps: [{ type: 'command', command: 'frobnicate', positionals: [], flags: [] }] });
+    const provider = new CliProvider({ spec: CODEX_SPEC, tmpDir: dir, runImpl: fakeRun({ stdout }) });
+    return assert.rejects(provider.compile({ nl: 'x', platform: 'android' }), (e: unknown) => {
+      assert.ok(e instanceof InvalidPlanError);
+      assert.deepEqual(e.usage, {});
+      return true;
+    });
+  });
+});
+
+test('compileResult: a rejected plan keeps its error code and gains the call\'s usage (#158)', () => {
+  const usage = { input_tokens: 7, output_tokens: 3 };
+  // `no-steps` is the one rejection a section compile may swallow — losing the code would turn
+  // every rationale-only section into a hard failure.
+  assert.throws(
+    () => compileResult({ version: 1, steps: [] }, usage),
+    (e: unknown) => e instanceof InvalidPlanError && e.code === 'no-steps' && e.usage === usage,
+  );
+});
+
+test('compileResult: a dropped echo reaches the caller as a note (#158)', () => {
+  const loop = { type: 'repeat', selector: '@row', cap: 5, body: [{ type: 'command', command: 'swipe', positionals: ['up'], flags: [] }] };
+  const echo = { type: 'command', command: 'repeat', positionals: ['@row'], flags: [] };
+  const { plan, notes } = compileResult({ version: 1, steps: [echo, loop] }, {});
+  assert.equal(plan.steps.length, 1);
+  assert.equal(notes?.length, 1);
 });
 
 test('compile (codex): the --output-schema file is OpenAI-strict (every property required)', () => {

@@ -9,7 +9,7 @@ that a deterministic engine replays against a real Android/iOS device with NO fu
 model calls on the happy path. Emit ONLY the plan object matching the provided schema.
 
 A plan has { "version": 1, "package"?, "platform"?, "steps": [...] }.
-Each step is one of three node types:
+Each step is one of six node types, named by its "type":
 
 1. COMMAND leaf — { "type":"command", "command":<name>, "positionals":[...], "flags":[{"name","value"}] }
    A boolean flag is {"name":"clear","value":"true"}. A valued flag is {"name":"wait","value":"5s"}.
@@ -63,6 +63,10 @@ Each step is one of three node types:
    If no branch matches and there is no "else", the test FAILS (the app showed something
    this test does not handle — that is a real result, not something to skip past).
    Use "else": [] to say explicitly "if none match, do nothing".
+   A branch may have an empty body: "this screen is expected; nothing to do". But inside a
+   repeat, wait out a screen that clears by itself — { wait <its selector> --gone --timeout
+   <all the time the test allows> } — since an iteration that changes nothing makes the loop
+   stop early ("no progress") and fail.
    WHEN vs IF-PRESENT: if-present = "this may or may not be there, carry on either way".
    when = "it is one of these; if it is none of them, that is a failure".
 
@@ -83,6 +87,10 @@ Each step is one of three node types:
    when the test must ACT ON a value it cannot know in advance — e.g. read the correct
    answer's text, then type that text into a field.
 
+repeat, when, if-present, while-present and read are node TYPES, never a "command". Write each
+loop or branch ONCE, as its own node: a leaf like {"type":"command","command":"repeat",…} is
+rejected, and so is a plan that stops at one.
+
 PLACEHOLDERS — any positional or flag value, and any control-node selector, may contain:
   {{ctx.NAME}}   a value stored by read, or a while-present counter
   {{env.NAME}}   an environment variable (use for credentials; never inline a secret)
@@ -93,7 +101,8 @@ like "user-{{uuid}}@example.com" — never a hard-coded literal, which collides 
 
 NESTING: control nodes may nest ONE level — a control node inside a control node, whose
 body is command leaves. A repeat containing a when is the shape for "until the flow ends,
-handle whichever screen is showing", and it is legal. Three levels is not.
+handle whichever screen is showing", and it is legal. Three levels is not: flatten it, or
+lift it to an outer step — never spell the control node as a command leaf instead.
 EXCEPT: if-present and while-present may go one level deeper (their bodies are leaves), so
   repeat { when { while-present { tap ... } } }     — walk an index-addressed list
   repeat { when { if-present { tap ... } } }        — an optional step inside a branch
@@ -156,7 +165,8 @@ RULES:
   is just \`tap X\`. Do NOT wrap a tap in a repeat-until-visible loop to reach something
   below the fold — that is now redundant. Emit an explicit swipe only when the SCROLLING
   ITSELF is what the test asks for ("scroll the feed three times"), or to reveal content
-  that is not in the hierarchy until it is built (an infinite/lazy list).
+  that is not in the hierarchy until it is built (an infinite/lazy list). A test that itself
+  says to repeat a step until something shows is asking for that loop: emit the REPEAT.
 - IDS COME FROM THE TEST. Use @x / id:x only with an id the test writes (or one a PRIOR PLAN
   shown to you already uses). You cannot see the app, so never compose an id from a label, a
   description, or the pattern of the app's other ids: a made-up id matches nothing, and a

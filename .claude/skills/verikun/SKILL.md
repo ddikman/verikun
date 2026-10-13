@@ -411,7 +411,9 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   plan references what the test's closing steps name); a failure buys one guided recompile,
   and a plan still short after that is **rejected at exit `1` and not cached**, so rerunning
   compiles again rather than replaying it. Under `vk suite` that means `--retries` cannot turn
-  a truncated compile green. `VERIKUN_NO_COMPILE_CHECK=1` turns the check off. The stderr line
+  a truncated compile green. `VERIKUN_NO_COMPILE_CHECK=1` turns the check off. A plan the
+  validator rejects gets the same one recompile; rejected twice, the test fails at compile
+  (exit `1`, `FAIL at compile` in a suite). The stderr line
   `compiled N top-level step(s)` (`planSteps` in `--json` and in a suite manifest row) is the
   number to compare across runs of an unchanged test.
 - **Progress streams to stderr** (never silent in CI); **stdout is the report path**
@@ -433,7 +435,7 @@ vk ai onboarding.md --timeout 5m        # tighten the run timeout (default 15m)
   replay is always $0, and every non-`ai` command is $0 always. Full mechanism, the estimate
   formula and the cache multipliers: <https://ddikman.github.io/verikun/reference/cost/>.
 - Exit `0` pass · `1` a step failed (or the budget/timeout was hit, or the compile did not
-  cover the test) · `2` usage · `3` environment
+  cover the test or was rejected twice) · `2` usage · `3` environment
   (e.g. the model's API key — `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` — unset, or the `codex` /
   `cursor-agent` CLI missing / not logged in for `--model codex-cli` / `cursor-cli`).
 - **`3` also means the device toolchain is broken**, checked *before* anything is compiled

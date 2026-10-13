@@ -15,7 +15,10 @@ import {
   lanesFromFlags,
   laneResult,
   grantLanes,
+  compileFailure,
 } from '../src/cli';
+import { CostTracker } from '../src/agent/cost';
+import { outcomeAction, toSuiteResult } from '../src/suite';
 import { parseDuration, waitNote, waitWindowMs } from '../src/commands/auto-wait';
 import { tokenizeLine, withBatchGlobals } from '../src/commands/batch';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -715,4 +718,41 @@ test('laneResult rejects a same-build JSON result missing its outcome',()=>{
 test('laneResult preserves an explicit loss verdict even when a child exits zero',()=>{
   const r=laneResult(0,{outcome:'lost-device',ok:true},'',{id:'d1'});
   assert.equal(r.outcome,'lost-device');assert.equal(r.ok,false);assert.equal(r.evicted,true);
+});
+
+// --- a compile that ends at exit 1 is a RESULT at `compile` (issue #158) ----------------------
+
+/** Synthetic: one token is one dollar, so spend reads as a count of tokens. */
+const DOLLAR_A_TOKEN = { input: 1_000_000, output: 1_000_000 };
+
+test('compileFailure: a failed compile is a FAIL at compile that carries what it cost, and is retried', () => {
+  const cost = new CostTracker(DOLLAR_A_TOKEN, 100);
+  cost.add({ input_tokens: 2 }, 'compile'); // two billed calls, both rejected
+  const r = compileFailure(new CliError("ai: the model's plan for 't.md' was rejected twice", 1), cost);
+  assert.equal(r.ok, false);
+  assert.equal(r.outcome, 'fail');
+  assert.deepEqual(r.failure, { where: 'compile', reason: "ai: the model's plan for 't.md' was rejected twice" });
+  assert.equal(r.costUsd, 2, 'a throw used to drop this, so a suite under-counted');
+  assert.equal(r.runDir, '', 'nothing ran, so there is no run to point at');
+  assert.equal(r.planSteps, undefined);
+  assert.equal(toSuiteResult('t.md', r, 0).failure, "FAIL at compile: ai: the model's plan for 't.md' was rejected twice");
+  assert.equal(outcomeAction(r.outcome), 'retry', 'a fresh compile can succeed, and nothing was cached');
+});
+
+test('compileFailure: one that stopped at the cost ceiling is a budget abort, which is never retried', () => {
+  const cost = new CostTracker(DOLLAR_A_TOKEN, 1);
+  cost.add({ input_tokens: 2 }, 'compile');
+  const r = compileFailure(new CliError('ai: cost ceiling $1 reached — not recompiling x', 1), cost);
+  assert.equal(r.outcome, 'budget');
+  assert.equal(r.abortedForBudget, true);
+  assert.equal(outcomeAction(r.outcome), 'stop');
+});
+
+test('laneResult: a lane child\'s compile failure keeps its `compile` location across the wire', () => {
+  // What `vk ai --json` prints for a compile failure — a result document, not an error one.
+  const doc = { outcome: 'fail', ok: false, costUsd: 2, cost: 'est $2', runDir: '', failure: { where: 'compile', reason: 'rejected twice' } };
+  const r = laneResult(1, doc, '', { id: 'd1' });
+  assert.deepEqual(r.failure, { where: 'compile', reason: 'rejected twice' });
+  assert.equal(r.costUsd, 2);
+  assert.equal(outcomeAction(r.outcome), 'retry');
 });

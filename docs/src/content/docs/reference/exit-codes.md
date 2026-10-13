@@ -57,7 +57,7 @@ as a failure by every `set -e` script.
 | Element has no reachable on-screen pixel | `1` |
 | `text`'s value not in the field after one retype (Android) | `1` |
 | `run archive` where the run contained failures | `1` |
-| A `vk ai` compile that does not cover its test | `1` |
+| A `vk ai` compile that does not cover its test, or that the plan validator rejects twice | `1` |
 | Tool missing, no usable device, dump/screencap failed | `3` |
 | `devices start`/`restart` where the device did not finish booting in time | `1` |
 | `devices start`/`stop`/`restart` naming a device that does not exist | `1` |
@@ -93,7 +93,7 @@ line that exits non-zero and **propagates that line's exit code**. It therefore 
 |---|---|
 | Plan ran green | `0` |
 | A step failed, a control node gave up, the model gave up | `1` |
-| The compile [did not cover the test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) | `1` |
+| The compile [did not cover the test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test), or was rejected twice | `1` |
 | Environment aborted (`abortedForEnv`) | `3` |
 
 An environment abort is `3` so it is never read as a regression. A rejected compile is `1`,

@@ -19,6 +19,7 @@
 
 import { CliError } from '../errors';
 import { isSettingKey, parseDeviceAssignments } from '../device/settings';
+import type { Usage } from './cost';
 
 export interface FlagSpec {
   name: string;
@@ -67,7 +68,9 @@ export interface IfPresentNode {
  *  deliberately so. A silently-skipped dispatch inside a loop would spin to the cap
  *  doing nothing and report green, which is the false-green class parsePlan already
  *  rejects at the plan level. `else: []` is the explicit "match nothing, do nothing"
- *  opt-in and is the one body allowed to be empty. */
+ *  opt-in. A BRANCH may be empty too — its selector is a screen the test expects, with nothing
+ *  to do there (issue #158) — but a `when` whose branches and `else` are all empty can neither
+ *  act nor fail, and is rejected. */
 export interface WhenNode {
   type: 'when';
   branches: { selector: string; body: PlanNode[] }[];
@@ -324,6 +327,12 @@ export class InvalidPlanError extends Error {
    *  zero steps. That is a false green for a whole test, but the honest answer for one
    *  SEGMENT of a test (a title, a paragraph of rationale) — see agent/include.ts. */
   readonly code?: 'no-steps';
+  /** The node the rejection is about — the innermost one, so an empty body names the control
+   *  node that owns it. Shown back to the model and to the user (issue #158). */
+  node?: unknown;
+  /** What the rejected compile cost. Set by the provider that made the call (provider.ts's
+   *  `compileResult`): the tokens were spent whether or not the plan was any good. */
+  usage?: Usage;
   constructor(message: string, code?: 'no-steps') {
     super(message);
     this.name = 'InvalidPlanError';
@@ -385,24 +394,81 @@ function validateDeviceStep(positionals: string[], where: string): void {
   }
 }
 
+/** The control-node types a model also spells as a COMMAND. Not `when`, which has no selector
+ *  to show the leaf names the same node, and not `command`, which is no control word at all. */
+const ECHOED_TYPES: ReadonlySet<string> = new Set(['repeat', 'if-present', 'while-present', 'read']);
+
+/**
+ * Is `node` a command leaf that only restates the node after it? The model wrote the loop
+ * twice, once as a command and once as the node it meant — 11 of 20 rejected compiles in
+ * issue #158. Dropping it loses nothing, because the node it names runs.
+ *
+ * Anything short of that exact shape stays an error. Above all a stray leaf that ENDS a list,
+ * which is how 8 of those 20 looked: the loop and every step after it are missing, and only a
+ * recompile can supply them.
+ */
+function echoesNext(node: unknown, next: unknown): boolean {
+  if (!node || typeof node !== 'object' || !next || typeof next !== 'object') return false;
+  const leaf = node as Record<string, unknown>;
+  const after = next as Record<string, unknown>;
+  if (leaf.type !== 'command' || typeof leaf.command !== 'string') return false;
+  const word = leaf.command.trim().toLowerCase();
+  return (
+    ECHOED_TYPES.has(word) &&
+    after.type === word &&
+    typeof after.selector === 'string' &&
+    after.selector !== '' &&
+    Array.isArray(leaf.positionals) &&
+    leaf.positionals[0] === after.selector
+  );
+}
+
+/** Validate a list of sibling nodes — the plan's steps, or a control body. An echo (see
+ *  `echoesNext`) is dropped and noted; every path keeps the RAW index, so an error still points
+ *  at what the model actually wrote. */
+function validateList(raw: unknown[], label: string, depth: number, notes?: string[]): PlanNode[] {
+  const out: PlanNode[] = [];
+  raw.forEach((item, i) => {
+    if (echoesNext(item, raw[i + 1])) {
+      notes?.push(`dropped ${label}[${i}], a command leaf restating the node after it: ${JSON.stringify(item)}`);
+      return;
+    }
+    out.push(validateNode(item, `${label}[${i}]`, depth, notes));
+  });
+  return out;
+}
+
 /** Validate a single node (used for both compile output and a spliced repair).
  *
  *  `depth` is how many control nodes enclose this one. It is the ONLY thing bounding
  *  nesting at runtime, and it must agree with PLAN_JSON_SCHEMA's hand-unrolled levels
  *  — the schema stops a compliant model, this stops everything else (a repair, a
- *  hand-edited plan, a poisoned cache entry). */
-export function validateNode(node: unknown, where: string, depth = 0): PlanNode {
+ *  hand-edited plan, a poisoned cache entry).
+ *
+ *  A rejection carries the node it is about (`InvalidPlanError.node`): the innermost one, since
+ *  a nested call names its own node before this one sees the error. `notes` collects what was
+ *  dropped as an echo. */
+export function validateNode(node: unknown, where: string, depth = 0, notes?: string[]): PlanNode {
+  try {
+    return checkNode(node, where, depth, notes);
+  } catch (e) {
+    if (e instanceof InvalidPlanError) e.node ??= node;
+    throw e;
+  }
+}
+
+function checkNode(node: unknown, where: string, depth: number, notes?: string[]): PlanNode {
   if (!node || typeof node !== 'object') throw new InvalidPlanError(`${where}: not an object`);
   const n = node as Record<string, unknown>;
 
-  /** Validate one control body. `allowEmpty` is true only for `when`'s `else`. */
+  /** Validate one control body. `allowEmpty` is true only for `when`'s branches and `else`. */
   const validateBody = (raw: unknown, label: string, allowEmpty = false): PlanNode[] => {
     if (!Array.isArray(raw)) throw new InvalidPlanError(`${label}: body must be an array`);
     if (raw.length === 0 && !allowEmpty) {
       // Silence must never read as success — same rule parsePlan applies to the plan.
-      throw new InvalidPlanError(`${label}: body is empty (a control body must do something; use when's "else": [] to mean "do nothing")`);
+      throw new InvalidPlanError(`${label}: ${String(n.type)} body is empty (it must do something; only a when branch or its else may be empty)`);
     }
-    return raw.map((b, i) => validateNode(b, `${label}[${i}]`, depth + 1));
+    return validateList(raw, label, depth + 1, notes);
   };
   /** `if-present` and `while-present` are allowed one level deeper than the branching
    *  nodes: they are the conditional and the index-walk an innermost branch body needs,
@@ -464,9 +530,14 @@ export function validateNode(node: unknown, where: string, depth = 0): PlanNode 
         if (!br || typeof br !== 'object' || typeof br.selector !== 'string' || !br.selector) {
           throw new InvalidPlanError(`${where}.branches[${i}]: needs a selector`);
         }
-        return { selector: br.selector, body: validateBody(br.body, `${where}.branches[${i}].body`) };
+        return { selector: br.selector, body: validateBody(br.body, `${where}.branches[${i}].body`, true) };
       });
       const els = optional(n.else, (v) => validateBody(v, `${where}.else`, true));
+      // Empty branches still ASSERT the screen is one of them; with an empty else as well,
+      // no screen makes this node act and none makes it fail.
+      if (els?.length === 0 && branches.every((b) => b.body.length === 0)) {
+        throw new InvalidPlanError(`${where}: when does nothing — every branch and its else are empty`);
+      }
       return { type: 'when', branches, ...(els ? { else: els } : {}) };
     }
     case 'repeat':
@@ -490,13 +561,14 @@ export function validateNode(node: unknown, where: string, depth = 0): PlanNode 
 }
 
 /** Validate + normalize a parsed plan object (belt-and-suspenders even with
- *  structured output, and the parse path when structured output is unavailable). */
-export function parsePlan(raw: unknown): Plan {
+ *  structured output, and the parse path when structured output is unavailable).
+ *  `notes` collects anything dropped on the way (see `echoesNext`). */
+export function parsePlan(raw: unknown, notes?: string[]): Plan {
   if (!raw || typeof raw !== 'object') throw new InvalidPlanError('plan: not an object');
   const p = raw as Record<string, unknown>;
   if (p.version !== 1) throw new InvalidPlanError(`plan: unsupported version ${JSON.stringify(p.version)} (expected 1)`);
   if (!Array.isArray(p.steps)) throw new InvalidPlanError('plan: steps must be an array');
-  const steps = p.steps.map((s, i) => validateNode(s, `steps[${i}]`));
+  const steps = validateList(p.steps, 'steps', 0, notes);
   // A plan with zero steps would "pass" green having done nothing — reject it so a
   // compiler misfire, prompt injection, or truncated cache entry can't be a false green.
   if (steps.length === 0) throw new InvalidPlanError('plan: has no steps (a test must have at least one step)', 'no-steps');

@@ -1,6 +1,6 @@
 import { Element } from '../types';
 import { formatCompact } from '../ui/format';
-import { Plan, LeafStep } from './ir';
+import { Plan, LeafStep, parsePlan, InvalidPlanError } from './ir';
 import { Usage } from './cost';
 import { SECTION_NOTE } from './grammar';
 
@@ -65,6 +65,27 @@ export function compileUserPrompt(input: CompileInput): string {
 export interface CompileResult {
   plan: Plan;
   usage: Usage;
+  /** What `parsePlan` dropped from the model's output on the way (see ir.ts's `echoesNext`) —
+   *  reported on stderr, so a tolerated near-miss is never silent. */
+  notes?: string[];
+}
+
+/**
+ * Read the model's compile output. Shared by every provider, like `repairDecision`.
+ *
+ * A plan the validator rejects still cost a call, so the rejection carries that call's `usage`
+ * for the caller to bill (issue #158). It is the SAME error object rethrown, never a copy: its
+ * `code` is how a section compile tells "nothing to compile here" (`no-steps`) from a broken plan.
+ */
+export function compileResult(json: unknown, usage: Usage): CompileResult {
+  const notes: string[] = [];
+  try {
+    const plan = parsePlan(json, notes);
+    return { plan, usage, ...(notes.length ? { notes } : {}) };
+  } catch (e) {
+    if (e instanceof InvalidPlanError) e.usage = usage;
+    throw e;
+  }
 }
 
 /** Context handed to the model when an action step failed and needs repair. */

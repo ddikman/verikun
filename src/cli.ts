@@ -85,7 +85,7 @@ import { LintFinding, coverageChecksEnabled, instructionUnits, lintPlan, looksTr
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
 import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC } from './agent/cli-provider';
-import { AgentProvider } from './agent/provider';
+import { AgentProvider, CompileInput, CompileResult } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheEntry, CacheKeyInput } from './agent/cache';
 import { takePlanLock, planLockWaitMs } from './agent/plan-lock';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
@@ -1947,6 +1947,95 @@ export function cachedSegment(segKey: CacheKeyInput, opts: AiOptions): CacheEntr
 const SEGMENT_MIN_UNITS = 2;
 
 /**
+ * One compile call, BILLED whatever came back (issue #158).
+ *
+ * The schema the model decodes against is looser than the validator: it cannot carry the
+ * command allowlist, and its bodies have no minimum length. So a plan `parsePlan` rejects
+ * still cost a whole call. That rejection is RETURNED rather than thrown, so the caller can
+ * decide whether it buys a recompile. Anything else propagates: a refused or truncated
+ * response, a dead CLI. What `parsePlan` tolerated on the way is printed, so a near-miss it
+ * forgave is never silent.
+ */
+async function attemptCompile(
+  provider: AgentProvider,
+  input: CompileInput,
+  cost: CostTracker,
+  where: string,
+): Promise<{ result: CompileResult } | { rejected: InvalidPlanError }> {
+  try {
+    const result = await provider.compile(input);
+    cost.add(result.usage, 'compile');
+    for (const note of result.notes ?? []) err(`[ai] ${where}: ${note}`);
+    return { result };
+  } catch (e) {
+    if (!(e instanceof InvalidPlanError)) throw e;
+    cost.add(e.usage ?? {}, 'compile');
+    return { rejected: e };
+  }
+}
+
+/** Node types a model also writes as a `command` — the measured failure of issue #158. */
+const NODE_TYPE_WORDS: ReadonlySet<string> = new Set(['repeat', 'when', 'if-present', 'while-present', 'read']);
+
+/** The node a rejection names, as compact JSON. `steps[N]` alone cannot be located: a section's
+ *  indices are its own, and the rejected plan is never kept. */
+function rejectedNodeText(e: InvalidPlanError): string {
+  if (e.node === undefined) return '';
+  const text = JSON.stringify(e.node) ?? '';
+  return text.length > 300 ? `${text.slice(0, 299)}…` : text;
+}
+
+/**
+ * What a rejected compile is told when it is recompiled. The validator's message is the finding
+ * and the node shows WHICH one.
+ *
+ * A control word written as a command gets the concrete fix. That fix includes "every step after
+ * it", because 8 of the 20 measured plans simply stopped at the stray leaf. It also allows for
+ * the innermost level, where the schema has no slot for the node at all.
+ */
+function rejectionFeedback(e: InvalidPlanError): string {
+  const lines = [`- The plan is invalid and was rejected: ${e.message}`];
+  const node = rejectedNodeText(e);
+  if (node) lines.push(`  The rejected node: ${node}`);
+  const leaf = (e.node ?? {}) as { type?: unknown; command?: unknown };
+  const word = leaf.type === 'command' ? String(leaf.command).trim().toLowerCase() : '';
+  if (NODE_TYPE_WORDS.has(word)) {
+    lines.push(
+      `  "${word}" is a node TYPE, never a command: write it ONCE, as its own {"type":"${word}",…} node (lifted to an ` +
+        'outer level if it is nested deeper than the grammar allows), and emit every step the test states after it.',
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The guided recompile of a plan the validator rejected, for a caller with no plan to fall back
+ * on. A second rejection fails the compile at exit 1, the same as a plan that does not cover its
+ * test (see `assertPlanCoversTest`): it is model-side, so not 3, and not 2, which `vk suite`
+ * would never retry. Nothing is cached, so a rerun compiles again.
+ */
+async function recompileRejected(
+  provider: AgentProvider,
+  input: CompileInput,
+  cost: CostTracker,
+  maxCostUsd: number,
+  where: string,
+  rejected: InvalidPlanError,
+): Promise<CompileResult> {
+  const feedback = rejectionFeedback(rejected);
+  err(`[ai] ${where}: the compiled plan is invalid — recompiling once:\n${feedback}`);
+  assertBudgetForCompile(cost, maxCostUsd, `recompiling ${where} after its plan was rejected`);
+  const retry = await attemptCompile(provider, { ...input, retryFeedback: feedback }, cost, where);
+  if (!('rejected' in retry)) return retry.result;
+  const node = rejectedNodeText(retry.rejected);
+  throw new CliError(
+    `ai: the model's plan for ${where} was rejected twice — ${retry.rejected.message}${node ? `\n  node: ${node}` : ''}\n` +
+      '  Nothing was cached; rerunning compiles it again.',
+    1,
+  );
+}
+
+/**
  * Compile a test SEGMENT AT A TIME and concatenate the results — the whole point of
  * `@include` doing more than a textual paste.
  *
@@ -2037,10 +2126,25 @@ export async function compileFromSegments(
         seed = null;
       }
       err(`[ai] ${where}: compiling with ${opts.model}…${lock.degraded ? ` (${lock.degraded})` : ''}`);
-      let compiled;
-      try {
-        compiled = await provider.compile({ nl: seg.text, pkg: key.pkg, platform: key.platform, seed: seed?.plan, section: true });
-      } catch (e) {
+      const input: CompileInput = { nl: seg.text, pkg: key.pkg, platform: key.platform, seed: seed?.plan, section: true };
+      let attempt = await attemptCompile(provider, input, cost, where);
+      // A plan the validator rejects buys one guided recompile, as a section, so a shared fragment
+      // still caches once for every test that includes it (issue #158).
+      if ('rejected' in attempt && attempt.rejected.code !== 'no-steps') {
+        const feedback = rejectionFeedback(attempt.rejected);
+        err(`[ai] ${where}: the compiled section is invalid — recompiling once:\n${feedback}`);
+        assertBudgetForCompile(cost, opts.maxCostUsd, `recompiling ${where} — the test is only partly compiled`);
+        attempt = await attemptCompile(provider, { ...input, retryFeedback: feedback }, cost, where);
+        // ANY rejection now, `no-steps` included. The first attempt emitted steps, so this section
+        // states something, and swallowing an empty answer as rationale below would drop it. A
+        // section we cannot trust falls back to the whole test, which also loses SECTION_NOTE —
+        // itself a suspect when the same prose is rejected twice.
+        if ('rejected' in attempt) {
+          err(`[ai] ${where}: the recompiled section is rejected too (${attempt.rejected.message}) — compiling the test as one instead`);
+          return null; // `return` from inside a try runs the finally first — that releases the lock
+        }
+      }
+      if ('rejected' in attempt) {
         // Prose with no instruction in it (a paragraph explaining WHY the next step exists)
         // is not an error at segment granularity — it just adds no steps.
         //
@@ -2048,17 +2152,14 @@ export async function compileFromSegments(
         // widest: the preamble compiles, the BODY of the test is dropped, and the assembled
         // plan passes having exercised nothing. Two units, not one, so a lone verb-initial
         // rationale line ("Wait times vary by device.") stays swallowed as it always was.
-        if (e instanceof InvalidPlanError && e.code === 'no-steps') {
-          if (coverageChecksEnabled() && instructionUnits(seg.text) >= SEGMENT_MIN_UNITS) {
-            err(`[ai] ${where}: compiled to NO steps, but its prose states instructions — the section was dropped; compiling the test as one instead`);
-            return null; // `return` from inside a try runs the finally first — that releases the lock
-          }
-          err(`[ai] ${where}: no steps`);
-          continue;
+        if (coverageChecksEnabled() && instructionUnits(seg.text) >= SEGMENT_MIN_UNITS) {
+          err(`[ai] ${where}: compiled to NO steps, but its prose states instructions — the section was dropped; compiling the test as one instead`);
+          return null; // the finally below releases the lock
         }
-        throw e;
+        err(`[ai] ${where}: no steps`);
+        continue;
       }
-      cost.add(compiled.usage, 'compile');
+      const compiled = attempt.result;
       // A truncated FRAGMENT is the worst version of issue #127: cached under its own key, it
       // is spliced into every test that includes it, so one bad draw of a shared preamble
       // shortens a whole suite. Asked BEFORE the cache write, and answered the same way as a
@@ -2151,8 +2252,16 @@ export async function obtainPlan(
   if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
   err(`[ai] compiling '${file}' with ${opts.model} (effort ${opts.effort ?? 'default'})…`);
 
-  let compiled = await provider.compile({ nl: key.nl, pkg: key.pkg, platform: key.platform, seed: seed?.plan });
-  cost.add(compiled.usage, 'compile');
+  const where = `'${file}'`;
+  const input: CompileInput = { nl: key.nl, pkg: key.pkg, platform: key.platform, seed: seed?.plan };
+  const first = await attemptCompile(provider, input, cost, where);
+  // A plan the validator rejects has nothing to keep, so its recompile is the only way to a plan
+  // at all (issue #158). A whole test compiling to no steps is one of those, not a section's
+  // legitimate "nothing here". It shares the lint's single retry, so a compile is still at most
+  // two calls.
+  let compiled = 'rejected' in first
+    ? await recompileRejected(provider, input, cost, opts.maxCostUsd, where, first.rejected)
+    : first.result;
 
   // Compilation is nondeterministic: the same prose has produced `launch --clear` on one
   // run and plain `launch` on the next, silently dropping something the test stated — and
@@ -2163,30 +2272,39 @@ export async function obtainPlan(
   // The seed goes in too: a green run re-persists the HEALED plan, whose repaired ids came off a
   // live screen, so flagging them would push every new build off a selector the device confirmed.
   let remaining = lintPlan(key.nl, compiled.plan, seed?.plan);
-  if (remaining.length > 0) {
+  if (remaining.length > 0 && 'rejected' in first) {
+    // The retry was spent on the rejection. Its findings stand as they would after a lint retry.
+    const anyway = remaining.some((f) => f.fatal) ? '' : ' — running it anyway';
+    err(`[ai] the recompiled plan does not match the test${anyway}:\n${remaining.map((f) => `- ${f.message}`).join('\n')}`);
+  } else if (remaining.length > 0) {
     const feedback = remaining.map((f) => `- ${f.message}`).join('\n');
     err(`[ai] compiled plan does not match the test — recompiling once:\n${feedback}`);
     if (cost.exceeded()) {
       err('[ai] cost ceiling reached — keeping the first plan rather than paying for a retry');
     } else {
-      const retry = await provider.compile({
-        nl: key.nl,
-        pkg: key.pkg,
-        platform: key.platform,
-        seed: seed?.plan,
-        retryFeedback: feedback,
-      });
-      cost.add(retry.usage, 'compile');
-      const still = lintPlan(key.nl, retry.plan, seed?.plan);
-      // Keep the retry either way: it was compiled with strictly more information. If it
-      // still trips the lint, say so rather than pretending the plan is clean — and for a
-      // coverage finding, do not claim it will run, because the gate below rejects it.
-      if (still.length > 0) {
-        const anyway = still.some((f) => f.fatal) ? '' : ' — running it anyway';
-        err(`[ai] the retry still does not match the test${anyway}:\n${still.map((f) => `- ${f.message}`).join('\n')}`);
-      } else err('[ai] recompile matches the test');
-      compiled = retry;
-      remaining = still;
+      let retry: Awaited<ReturnType<typeof attemptCompile>> | undefined;
+      try {
+        retry = await attemptCompile(provider, { ...input, retryFeedback: feedback }, cost, where);
+      } catch (e) {
+        // A recompile that fails outright (refused, truncated, unparseable) must not cost the plan
+        // already in hand; its findings stand, and a fatal one is still refused below.
+        if (!(e instanceof CliError) || e.exitCode !== 1) throw e;
+        err(`[ai] the recompile failed (${e.message.split('\n')[0]}) — keeping the first plan`);
+      }
+      if (retry && 'rejected' in retry) {
+        err(`[ai] the recompiled plan is invalid (${retry.rejected.message}) — keeping the first plan`);
+      } else if (retry) {
+        const still = lintPlan(key.nl, retry.result.plan, seed?.plan);
+        // Keep the retry either way: it was compiled with strictly more information. If it
+        // still trips the lint, say so rather than pretending the plan is clean — and for a
+        // coverage finding, do not claim it will run, because the gate below rejects it.
+        if (still.length > 0) {
+          const anyway = still.some((f) => f.fatal) ? '' : ' — running it anyway';
+          err(`[ai] the retry still does not match the test${anyway}:\n${still.map((f) => `- ${f.message}`).join('\n')}`);
+        } else err('[ai] recompile matches the test');
+        compiled = retry.result;
+        remaining = still;
+      }
     }
   }
 
@@ -2544,6 +2662,33 @@ export function terminalFailure(
   return { where: r.failure?.where ?? 'run', reason: r.failure?.reason ?? 'failed', kind: 'fail' };
 }
 
+/**
+ * The result of a test whose compile ended at exit 1 (see `runAiTest`). It has the shape of the
+ * compile-time budget abort there, with no run and no report, plus the cost so far, which a
+ * throw would have dropped. A crossed ceiling is reported as the budget abort it is, so
+ * `vk suite` does not retry it.
+ *
+ * Exported solely so the unit suite can reach it.
+ */
+export function compileFailure(e: CliError, cost: CostTracker): AiRunResult {
+  const budget = cost.exceeded();
+  return {
+    outcome: budget ? 'budget' : 'fail',
+    ok: false,
+    cached: false,
+    costUsd: Number(cost.usd().toFixed(4)),
+    costLine: cost.summaryLine(),
+    modelRepairs: 0,
+    improvements: [],
+    runDir: '',
+    reportHtml: '',
+    junitXml: '',
+    state: null,
+    failure: { where: 'compile', reason: e.message },
+    ...(budget ? { abortedForBudget: true } : {}),
+  };
+}
+
 /** The `[ai] …` console verdict for a terminal failure, phrased as it always was. */
 function terminalStatusLine(t: TerminalFailure): string {
   if (t.kind === 'fail') return `FAIL at ${t.where}: ${t.reason}`;
@@ -2603,7 +2748,21 @@ export async function runAiTest(
   const deadline = Date.now() + opts.timeoutMs;
   const provider = makeProvider(opts);
 
-  const { plan, cached } = await obtainPlan(key, file, opts, cost, provider, segments);
+  let obtained: { plan: Plan; cached: boolean };
+  try {
+    obtained = await obtainPlan(key, file, opts, cost, provider, segments);
+  } catch (e) {
+    // A compile that ends at exit 1 is a RESULT at `compile`, not a throw. That covers a plan
+    // rejected twice, one that does not cover its test, a model that refused or truncated, and a
+    // ceiling that stopped the compile. A throw reached `vk suite` as "FAIL at run" with its cost
+    // dropped (issue #158). Nothing ran, so there is no run to archive, and no device was leased.
+    if (!(e instanceof CliError) || e.exitCode !== 1) throw e;
+    const failed = compileFailure(e, cost);
+    err(`[ai] ${failed.abortedForBudget ? 'ABORTED' : 'FAIL at compile'}: ${e.message}`);
+    err(`[ai] estimated total cost: $${cost.usd().toFixed(4)}`);
+    return failed;
+  }
+  const { plan, cached } = obtained;
 
   // Running needs the provider for repair-on-failure; a cache hit with no key can't repair.
   if (!provider) {
