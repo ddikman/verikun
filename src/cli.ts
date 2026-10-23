@@ -1,4 +1,4 @@
-import { errorOutcome, isDeviceLoss, Outcome } from './errors';
+import { errorOutcome, isDeviceDrop, isDeviceLoss, Outcome } from './errors';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep, join } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
@@ -97,7 +97,8 @@ import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, Remo
 import { cmdSuite, AiRunResult, Lane } from './suite';
 import { sleep, DEFAULT_BOOT_TIMEOUT_MS, DEFAULT_STOP_TIMEOUT_MS } from './wait';
 import { VERSION } from './version';
-import { adbHealthProbe } from './adb-health';
+import { AdbServerHealth, adbHealthProbe, adbServerHealth, leakNote } from './adb-health';
+import { describeAdbRestart, hostRestartOps, restartLeakingAdb } from './adb-restart';
 import { updateProbes } from './update-check';
 import type { Ctx } from './commands/context';
 import {
@@ -528,6 +529,7 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
   for (const probe of await updateProbes()) reportProbe(probe);
 
   if (ctx.platform === 'ios') {
+    if (flagBool(ctx.flags, 'restart-adb')) err('adb server: --restart-adb is Android-only — iOS has no adb server');
     // xcrun is the floor: without it there is no device list to reason about.
     if (!reportProbe(probeXcrun())) return 3;
     // idb (+ its companion) powers everything interactive: ui/tap/text/swipe/key/logs.
@@ -541,8 +543,18 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
   // adb being PRESENT is not the same as adb being WELL: a long-lived server leaks USB
   // handles and starts dropping devices mid-run, and no device-level remedy reaches it
   // (see adb-health.ts). Advisory and evidence-only, so a healthy host stays silent.
-  const adbRot = adbHealthProbe();
-  if (adbRot) reportProbe(adbRot);
+  const health = adbServerHealth();
+  const adbRot = adbHealthProbe(health);
+  if (flagBool(ctx.flags, 'restart-adb')) {
+    // Asked to act, so report what was done in place of the hint that would have asked. Before
+    // the device survey, so the survey shows the devices as they came back. Never touches the
+    // verdict: a restart that something else is in the way of is not a broken machine.
+    const done = describeAdbRestart(await restartLeakingAdb(hostRestartOps(health)));
+    // Under the leak line when there is one; on a healthy host the outcome is the line.
+    const [first, ...more] = adbRot ? [adbRot.detail, ...done] : done;
+    err(`adb server: ${first}`);
+    for (const line of more) err(`  ${line}`);
+  } else if (adbRot) reportProbe(adbRot);
 
   const devices = ctx.driver.listDevices();
   const usable = devices.filter((d) => d.state === 'device');
@@ -2850,11 +2862,13 @@ export async function runAiTest(
     // seal the run so it is not left dangling in .verikun/run/ for the next command
     // to roll over. Then let the error map to an exit code as usual.
     Recorder.annotateRun({ ai: { ok: false, cost: cost.summaryLine(), modelRepairs: 0, improvements: [] } });
+    // A phone that dropped off a leaking host adb server names the leak, here and in the report.
+    const leak = deviceDropNote(e, platform, !!backend.lease, adbServerHealth);
     // No evidence capture here: a throw at this level usually IS the device dying, so
     // the capture would fail the same way and only add noise to the error path.
     Recorder.recordTerminalFailure({
       where: 'run',
-      reason: (e as Error).message,
+      reason: leak ? `${(e as Error).message}\n${leak}` : (e as Error).message,
       kind: isEnvError(e as Error) ? 'env' : 'fail',
     });
     let sealed: ReturnType<typeof Recorder.archive> | undefined;
@@ -2874,7 +2888,8 @@ export async function runAiTest(
     // An environment throw on a run the server evicted counts too: a worker that died mid-step
     // answers with an error rather than a result, and the server marks that response.
     {
-      const reason = (e as Error).message.split('\n')[0];
+      const firstLine = (e as Error).message.split('\n')[0];
+      const reason = leak ? `${firstLine} — ${leak}` : firstLine;
       err(`[ai] ABORTED — environment: ${reason}`);
       if (sealed) err(`[ai] report: ${sealed.htmlPath}`);
       return {
@@ -3792,12 +3807,15 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
 /** Map a thrown error to an exit code, emitting it as text or JSON per --json. */
 function mapError(e: unknown, flags: Flags): number {
   if (e instanceof CliError) {
+    // isDeviceDrop first: the error mapper must never be what throws.
+    const note = isDeviceDrop(e) ? deviceDropNote(e, platformFromFlags(flags), !!serverFromFlags(flags), adbServerHealth) : undefined;
+    const message = note ? `${e.message}\n  ${note}` : e.message;
     // `errorKind` carries the error's CLASS across the process boundary, the same job
     // rpc.ts's codec does across the HTTP one. A child's stderr is prose, and rebuilding
     // a bare CliError from it flattens `NoWindowError` into an unknown — which is exactly
     // how a healthy phone mid-launch gets retired from a lane pool (see lanePreflight).
-    if (flagBool(flags, 'json')) json({ outcome: errorOutcome(e), error: e.message, exitCode: e.exitCode, errorKind: describeError(e).kind });
-    else err(e.message);
+    if (flagBool(flags, 'json')) json({ outcome: errorOutcome(e), error: message, exitCode: e.exitCode, errorKind: describeError(e).kind });
+    else err(message);
     return e.exitCode;
   }
   // `--json` everywhere, including errors — an UNEXPECTED throw most of all. A caller that
@@ -3808,6 +3826,23 @@ function mapError(e: unknown, flags: Flags): number {
   else err('Unexpected error: ' + (e as Error).message);
   if (process.env.VERIKUN_DEBUG) err((e as Error).stack ?? '');
   return 3;
+}
+
+/**
+ * The line naming a leaking host adb server, for a failure where a device dropped off it.
+ * Local Android only: a device behind `vk server` sits behind ANOTHER host's adb, which this
+ * host's health says nothing about. `measure` runs only on that path, because it costs ~1.5s
+ * and only a dropped device needs it.
+ *
+ * Exported solely so the unit suite can reach it.
+ */
+export function deviceDropNote(
+  e: unknown,
+  platform: Platform,
+  remote: boolean,
+  measure: () => AdbServerHealth,
+): string | undefined {
+  return isDeviceDrop(e) && platform === 'android' && !remote ? leakNote(measure()) : undefined;
 }
 
 /** The driver's serial, or undefined when it cannot be resolved — the command handler is
@@ -4171,10 +4206,13 @@ ENVIRONMENT
         [--timeout dur] [--no-wait]   running = a no-op. --wipe erases its data first
   devices stop <name|serial>          Shut a running emulator/simulator down
   devices restart <name> [--wipe]     Stop then boot (use for a wedged/flaky device)
-  doctor [--fix]                      Diagnose adb/device, and warn if this CLI or the
+  doctor [--fix] [--restart-adb]      Diagnose adb/device, and warn if this CLI or the
                                       Claude Code plugin is out of date (a warning only —
                                       it never changes the exit code). --fix disables
-                                      animations. VERIKUN_NO_UPDATE_CHECK skips the check
+                                      animations. --restart-adb restarts a leaking adb
+                                      server (measured on macOS) unless another job or
+                                      process is using adb, and names what is.
+                                      VERIKUN_NO_UPDATE_CHECK skips the check
   companion <status|stop> [--json]    On-device hierarchy reader (Android, on by default;
                                       VERIKUN_COMPANION=0 opts out)
   Note: \`devices stop\` powers a DEVICE off; \`stop <appId>\` force-stops an APP, and

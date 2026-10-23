@@ -512,7 +512,7 @@ export function buildServer(config: ServerConfig): Server {
     recycling = true;
     void (async () => {
       if (!(await hostAdbRotting())) return;
-      await recycleHostAdb(claimOpts, () => leaseTable.drainAndHold('(adb-host)', async () => {
+      const recycled = await recycleHostAdb(claimOpts, () => leaseTable.drainAndHold('(adb-host)', async () => {
         const members = table.all().filter(r => r.state === 'ready' || r.state === 'leased');
         for (const r of members) table.transition(r.serial, 'joining', 'host transport event');
         const adb = process.env.ADB || 'adb';
@@ -524,6 +524,7 @@ export function buildServer(config: ServerConfig): Server {
         }
         return r.code === 0;
       }));
+      if (recycled === 'unwritable') err('[server] adb recycle: cannot write its lock under ~/.verikun/devices');
     })().catch(e => err(`[server] adb recycle: ${(e as Error).message}`)).finally(() => { recycling = false; });
   }, ADB_RECYCLE_CHECK_MS) : undefined;
   recycleTimer?.unref();

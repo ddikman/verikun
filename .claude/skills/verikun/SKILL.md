@@ -45,12 +45,17 @@ them as information:
   `claude plugin update verikun@verikun` and restart Claude Code.
 - **`verikun: … npm has <newer>`** → tell the user `npm install -g verikun@latest`.
 - **`adb server: … leaking USB handles`** → **the host's adb server has rotted.** Devices
-  will drop mid-flow for reasons that look like your selectors failing. Tell the user to run
-  `adb kill-server && adb start-server` — safe, and devices reconnect in seconds.
+  will drop mid-flow for reasons that look like your selectors failing. **Run
+  `vk doctor --restart-adb` yourself.** It restarts adb only when no other verikun job and no
+  other process (Android Studio, scrcpy, an `adb logcat`) is using it, and waits for the
+  devices to come back. If it names something still using adb instead, or says a restart does
+  not clear it (it then suggests `ADB_LIBUSB=1`), tell the user once and carry on. Never run
+  `adb kill-server` yourself: it cuts off every other job on the machine.
+  A device-drop error that says `likely cause: this host's adb server is leaking` gets the
+  same treatment.
 
-**Tell the user, don't run it.** Upgrading changes their machine, and the plugin path needs
-a Claude Code restart to take effect; restarting adb is host-wide and drops every device on
-the machine, not just yours. Mention it once and move on.
+**Tell the user about upgrades, don't run them.** Upgrading changes their machine, and the
+plugin path needs a Claude Code restart to take effect. Mention it once and move on.
 
 ## The loop: act → inspect → assert
 

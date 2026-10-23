@@ -223,6 +223,35 @@ through a 15-second grace. Correlated loss from at least two serials and half th
 handled as a host event. `VERIKUN_NO_ADB_RECYCLE` disables restart for any nonempty value.
 Health and listing remain responsive while executors or lifecycle probes are busy.
 
+`vk doctor --restart-adb` is the on-request restart, and the one an agent runs when doctor
+reports the leak. Same evidence rule — counted for the running server's pid only, since the
+window outlives a restart — and the same host lock, but a different idle test: the asker is a
+job, not the pool owner.
+
+- **Claims:** a live Android claim blocks unless it is one of the asker's finished commands,
+  matched by working directory (session ids are shared across tmux panes). iOS claims never
+  block. With claims off nothing can be seen, so nothing restarts.
+- **Connections:** any process holding a TCP connection to or from the server blocks. A socket
+  accepted on one of the server's listeners is a client from any address. A dialled one is a
+  device when its far end is non-loopback or an emulator's adb port; the server dialling itself
+  is a device-side client through `adb reverse`. Unseen means in use: the measured pid must be the
+  one listening on the adb port, and a server on another host is never restarted.
+- **Order:** the gate is asked before the lock and again under it. The lock expires after 10
+  minutes, whichever host wrote it.
+- **Restore:** the server restarts from the binary it ran from (`adb server-status`, trusted only
+  if this user or root owns it and nobody else can write it), with its USB backend and `-a`.
+  Forward/reverse rules are re-applied and `adb connect` devices redialled, then attached or
+  offline devices are awaited for 20 seconds.
+
+- **Verdict:** five seconds after the restart, the new server's own violations decide whether it
+  cleared them. Measured: a Samsung SM-A415F on the native USB backend makes a fresh server throw
+  about one a second, which no restart clears. A not-cleared verdict is recorded against the new
+  server's pid (`~/.verikun/adb-restart.json`), and that server is never restarted again, so an
+  agent following the skill does not cut every device at every session.
+
+A device-drop failure on a leaking host names the leak; it is measured only on that failure
+path.
+
 ## The plan cache fingerprint
 
 Each cache entry records a **compiler fingerprint** = verikun's version + `GRAMMAR` +

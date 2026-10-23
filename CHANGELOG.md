@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-24
+
+### Added
+- **`vk doctor --restart-adb`** restarts a leaking adb server (macOS) unless another job or process
+  uses adb, which it names instead. `VERIKUN_NO_ADB_RECYCLE` opts out. ([#161])
+- **`vk doctor --restart-adb`** restarts a given server once at most if the violations come straight
+  back, and suggests `ADB_LIBUSB=1`. ([#161])
+
+### Changed
+- **Skill**: an agent runs `vk doctor --restart-adb` itself when doctor reports the adb leak, instead
+  of asking the user to run `adb kill-server`. ([#161])
+- **Device-drop errors** (transport lost, no device attached) on a leaking macOS host name the leak
+  and the restart command. ([#161])
+
+[#161]: https://github.com/ddikman/verikun/issues/161
+
 ## [0.33.0] - 2026-10-13
 
 ### Fixed

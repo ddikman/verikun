@@ -7,7 +7,7 @@ import {
 } from '../types';
 import type { RawImage } from '../image';
 import { Companion, barrierRecycleDue, companionEnabled, releaseCompanionOn } from '../companion/manager';
-import { DeviceUnresponsiveError, CliError, DumpKilledError, NoWindowError, dumpKilledMessage, probeFailure } from '../errors';
+import { DeviceUnresponsiveError, CliError, DumpKilledError, NoUsableDeviceError, NoWindowError, dumpKilledMessage, probeFailure } from '../errors';
 import { runText, sleepSync, commandExists, spawnDetached, TextResult } from '../exec';
 import { isInteresting, parseHierarchy, parseRotation } from '../ui/android-parse';
 import { describeBarrier, modalBarrierOnly } from '../ui/barrier';
@@ -754,9 +754,9 @@ export class AdbDriver implements Driver {
     if (usable.length === 0) {
       if (all.length) {
         const states = all.map((d) => `${d.serial}=${d.state}`).join(', ');
-        throw new CliError(`No usable Android device (states: ${states}). Authorize/reconnect it.`, 3);
+        throw new NoUsableDeviceError(`No usable Android device (states: ${states}). Authorize/reconnect it.`);
       }
-      throw new CliError('No Android devices/emulators connected. Start one, then `verikun devices`.', 3);
+      throw new NoUsableDeviceError('No Android devices/emulators connected. Start one, then `verikun devices`.');
     }
     return usable;
   }

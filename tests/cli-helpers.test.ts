@@ -16,6 +16,7 @@ import {
   laneResult,
   grantLanes,
   compileFailure,
+  deviceDropNote,
 } from '../src/cli';
 import { CostTracker } from '../src/agent/cost';
 import { outcomeAction, toSuiteResult } from '../src/suite';
@@ -27,7 +28,7 @@ import { join, resolve } from 'node:path';
 import { claimDevice, type ClaimOpts } from '../src/device/claims';
 import type { DeviceGrant } from '../src/device/grant';
 import { parseSelector } from '../src/ui/selector';
-import { CliError } from '../src/errors';
+import { CliError, DeviceGoneError, NoUsableDeviceError, SelectorNotFoundError } from '../src/errors';
 import { makeEl } from './helpers';
 
 // `lanesFromFlags` consults VERIKUN_SERVER (a `--devices` + server combination is an
@@ -755,4 +756,27 @@ test('laneResult: a lane child\'s compile failure keeps its `compile` location a
   assert.deepEqual(r.failure, { where: 'compile', reason: 'rejected twice' });
   assert.equal(r.costUsd, 2);
   assert.equal(outcomeAction(r.outcome), 'retry');
+});
+
+// --- deviceDropNote: naming a leaking host adb server on a device-drop failure --------------
+
+const LEAKING_ADB = { pid: 15109, violations: 120, windowMs: 120_000, ageMs: 152 * 3_600_000 };
+
+test('deviceDropNote: a phone that dropped off THIS host\'s leaking adb names the leak', () => {
+  const note = deviceDropNote(new NoUsableDeviceError('No Android devices/emulators connected.'), 'android', false, () => LEAKING_ADB);
+  assert.match(note ?? '', /leaking USB handles.*vk doctor --restart-adb/);
+  assert.ok(deviceDropNote(new DeviceGoneError('device R58 transport lost'), 'android', false, () => LEAKING_ADB));
+});
+
+test('deviceDropNote: nothing to say — and nothing measured — where this host\'s adb is not the story', () => {
+  let measured = 0;
+  const measure = () => { measured++; return LEAKING_ADB; };
+  // Over --server the device sits behind ANOTHER host's adb; iOS has none; a selector miss is
+  // the app's. The ~1.5s measurement must not even run for these.
+  assert.equal(deviceDropNote(new DeviceGoneError('lost'), 'android', true, measure), undefined);
+  assert.equal(deviceDropNote(new DeviceGoneError('lost'), 'ios', false, measure), undefined);
+  assert.equal(deviceDropNote(new SelectorNotFoundError('miss'), 'android', false, measure), undefined);
+  assert.equal(measured, 0);
+  // A healthy host: measured, and silent.
+  assert.equal(deviceDropNote(new DeviceGoneError('lost'), 'android', false, () => ({ pid: 1, violations: 0, windowMs: 120_000 })), undefined);
 });
