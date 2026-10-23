@@ -79,7 +79,7 @@ What varies on Android is the **device**, and three differences bite in practice
 <tr><td><code>devices</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>devices start</code> / <code>stop</code> / <code>restart</code></td><td>❌ <code>2</code> — never power-cycled</td><td>✅ via <code>emulator</code> / <code>adb emu kill</code></td><td>✅ via <code>simctl</code></td><td>❌ <code>2</code> — never power-cycled</td></tr>
 <tr><td><code>devices start|restart --wipe</code></td><td>❌ <code>2</code></td><td>✅ <code>-wipe-data</code></td><td>✅ <code>simctl erase</code></td><td>❌ <code>2</code></td></tr>
-<tr><td><code>doctor</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--fix</code> is Android-only</td><td>⚠️ <code>--fix</code> is Android-only</td></tr>
+<tr><td><code>doctor</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--fix</code> and <code>--restart-adb</code> are Android-only</td><td>⚠️ <code>--fix</code> and <code>--restart-adb</code> are Android-only</td></tr>
 <tr><td><code>companion</code></td><td>✅</td><td>✅</td><td>❌ Android-only</td><td>❌ Android-only</td></tr>
 <tr><td><code>server</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>help</code> / <code>version</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
@@ -119,6 +119,7 @@ Notes on the rows that carry a caveat:
   [Suites](/verikun/guides/suites/#running-across-several-devices).
 - **`doctor --fix` is Android-only** and an alias for `device prep`, so on a physical device it
   needs the serial named with `--device`. `vk doctor --ios` still checks the toolchain.
+  `--restart-adb` is Android-only too: iOS has no adb server.
 - **`device prep` needs an explicit `--device` on a physical phone.** Naming the serial is the
   opt-in. An emulator is auto-selected, as it is for `devices start|stop|restart`, which
   likewise never power-cycles a physical device. On Android 9 the `dnd` knob is not scriptable
@@ -212,15 +213,17 @@ first tap rather than half-way through a half-modified device.
 <tr><td><code>vk server</code> partial install and catch-up</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>vk server</code> device health supervision</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>vk server</code> adb-server recycle</td><td>✅ macOS host only</td><td>✅ macOS host only</td><td>⊘ no adb</td><td>⊘ no adb</td></tr>
+<tr><td><code>vk doctor --restart-adb</code></td><td>✅ macOS host only</td><td>✅ macOS host only</td><td>⊘ no adb</td><td>⊘ no adb</td></tr>
 <tr><td><code>vk server --log-file</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 </tbody>
 </table>
 
 - **The adb-server recycle needs a macOS host.** A long-running adb server leaks USB handles
   until devices drop mid-run, and the server restarts it while idle. Detecting it reads the
-  macOS kernel's guard-violation log, so on a Linux host the server never recycles and
-  `vk doctor` stays quiet. iOS has no adb to recycle. See
-  [Remote devices & CI](/verikun/guides/remote-devices-and-ci/#it-keeps-the-hosts-adb-server-healthy).
+  macOS kernel's guard-violation log, so on a Linux host the server never recycles,
+  `vk doctor` stays quiet and `vk doctor --restart-adb` restarts nothing. iOS has no adb to
+  recycle. See [Remote devices & CI](/verikun/guides/remote-devices-and-ci/#it-keeps-the-hosts-adb-server-healthy)
+  and [Troubleshooting](/verikun/guides/troubleshooting/#devices-keep-dropping-off-adb).
 - **iOS device loss requires corroboration.** An idb connection failure convicts a
   simulator only when `simctl` reports it absent or no longer Booted. A companion
   failure remains a toolchain error. Failed installs keep that device out until catch-up.

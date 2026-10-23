@@ -55,13 +55,14 @@ function describeError(cmd: string, args: string[], err: NodeJS.ErrnoException):
 export function runText(
   cmd: string,
   args: string[],
-  opts: { input?: string; timeout?: number; cwd?: string } = {},
+  opts: { input?: string; timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): TextResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     timeout: boundedTimeout(opts.timeout),
     input: opts.input,
     cwd: opts.cwd,
+    env: opts.env,
     maxBuffer: MAX_BUFFER,
   });
   if (r.error) {

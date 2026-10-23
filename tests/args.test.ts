@@ -102,6 +102,14 @@ test('parseArgs: --no-logs is a boolean (does not swallow the archive name)', ()
   assert.equal(r.flags['no-logs'], true);
 });
 
+test('parseArgs: --restart-adb is a boolean (does not swallow a following token)', () => {
+  // `vk doctor --restart-adb emulator-5554` must not bind the serial as the flag's value.
+  const r = parseArgs(['doctor', '--restart-adb', 'emulator-5554']);
+  assert.equal(r.command, 'doctor');
+  assert.deepEqual(r.positionals, ['emulator-5554']);
+  assert.equal(r.flags['restart-adb'], true);
+});
+
 test('parseArgs: a leading state modifier does not swallow the selector', () => {
   // Regression: `enabled` was absent from BOOLEAN, and a non-BOOLEAN flag consumes the
   // next token — so `vk tap --enabled @submit` bound the SELECTOR as the flag value and
