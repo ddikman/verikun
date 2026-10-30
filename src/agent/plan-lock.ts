@@ -54,7 +54,7 @@ const POLL_MS = 250;
  * The longest a waiter will EVER block, before the run-timeout derivation narrows it.
  *
  * Sized against `CliProvider`'s 180s hard per-call ceiling, so the common worst case — a
- * codex/cursor compile timing out — is fully covered and the waiter learns the outcome
+ * CLI-provider compile timing out — is fully covered and the waiter learns the outcome
  * instead of duplicating work it is about to repeat anyway.
  */
 const MAX_WAIT_MS = 240_000;
