@@ -2,7 +2,7 @@ import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CliError } from '../errors';
-import { parsePlan, PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
+import { PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
 import { Usage, ProviderId } from './cost';
 import {
   AgentProvider,
@@ -10,6 +10,7 @@ import {
   CompileResult,
   RepairContext,
   RepairResult,
+  compileResult,
   compileUserPrompt,
   repairDecision,
   repairUserPrompt,
@@ -276,7 +277,7 @@ export class CliProvider implements AgentProvider {
     const json = this.call(GRAMMAR, compileUserPrompt(input), PLAN_JSON_SCHEMA);
     // usage:{} — a CLI is billed to the user's subscription, not per token, so cost is $0
     // (documented no-op for --max-cost-usd). The run is still bounded by maxRepairs + --timeout.
-    return { plan: parsePlan(json), usage: {} };
+    return compileResult(json, {});
   }
 
   async repair(ctx: RepairContext): Promise<RepairResult> {

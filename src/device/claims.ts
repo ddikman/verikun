@@ -579,8 +579,9 @@ export function describeClaim(c: DeviceClaim, o: ClaimOpts = {}): string {
  *  claim being cleared and retaken faster than it can be observed. Rare, and honest. */
 const CONTENDED = 'another job (claim contended)';
 
-/** Sentence form, for a refusal that reads as prose rather than as a cell. */
-function describeHolder(c: DeviceClaim, o: ClaimOpts): string {
+/** Sentence form, for a refusal that reads as prose rather than as a cell. Never says "this
+ *  job": a refusal only ever lists claims that are somebody else's to the asker. */
+export function describeHolder(c: DeviceClaim, o: ClaimOpts): string {
   return `${holderLabel(c)} (last seen ${fmtAge(ageMs(c, o.now ?? Date.now()))} ago)`;
 }
 

@@ -6,20 +6,71 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.32.0] - 2026-10-02
-
 ### Added
 - **`vk ai --model claude-cli`** compiles and repairs through your logged-in Claude Code CLI
   (`claude auth login`), ignoring any exported `ANTHROPIC_API_KEY`; reported cost `$0`.
+
+## [0.34.0] - 2026-10-24
+
+### Added
+- **`vk doctor --restart-adb`** restarts a leaking adb server (macOS) unless another job or process
+  uses adb, which it names instead. `VERIKUN_NO_ADB_RECYCLE` opts out. ([#161])
+- **`vk doctor --restart-adb`** restarts a given server once at most if the violations come straight
+  back, and suggests `ADB_LIBUSB=1`. ([#161])
+
+### Changed
+- **Skill**: an agent runs `vk doctor --restart-adb` itself when doctor reports the adb leak, instead
+  of asking the user to run `adb kill-server`. ([#161])
+- **Device-drop errors** (transport lost, no device attached) on a leaking macOS host name the leak
+  and the restart command. ([#161])
+
+[#161]: https://github.com/ddikman/verikun/issues/161
+
+## [0.33.0] - 2026-10-13
+
+### Fixed
+- **`vk ai`**: a compiled plan the validator rejects gets one guided recompile; a second rejection
+  fails at compile with exit `1`, not `Unexpected error` exit `3`. ([#158])
+- **`vk ai` cost** now counts compiles the validator rejected; a refused or truncated response
+  still counts as zero. ([#158])
+
+### Changed
+- **`vk ai` plans**: a `when` branch may have an empty body ("expected, nothing to do"), and a
+  command leaf restating the loop after it is dropped. ([#158])
+- **`vk suite`** reports a failed compile as `FAIL at compile`, not `FAIL at run`; `--retries`
+  still retries it, unless it hit the cost ceiling. ([#158])
+- **`vk ai --json`** returns a result document for a failed compile (`failure.where: "compile"`,
+  `costUsd`), not an error document. ([#158])
+
+[#158]: https://github.com/ddikman/verikun/issues/158
+
+## [0.32.0] - 2026-10-03
+
+### Added
 - **Docs site** links unfurl with a social card image built from the illustration.
 
 ### Changed
+- **Docs site** publishes a single `sitemap.xml`.
+- **Server recovery diagrams**: keep the overview in the pull request instead of unused docs files.
+- **`vk server`**: fork one executor per device; confirmed failures kill its process group, including blocked adb/idb children.
+- **`vk server`**: supervise device health and readmit every pool; typed loss reruns free. Disable supervision with `VERIKUN_NO_DEVICE_WATCH`.
+- **Remote leases**: acquire after compilation; heartbeat holds, FIFO admission, and lease-end setting restoration release abandoned clients.
+- **Remote installs**: gate dealing by build SHA; return after first-success grace while failed targets catch up.
+- **`vk suite`**: use lanes at every remote capacity, bench local failures, and preserve archives with explicit JSON outcomes.
 - **Docs site and README** show the new verikun logo and an animated illustration, with light and
   dark variants.
 - **Docs site** primary color is now black, off-white in dark mode.
 
 ### Fixed
 - **Docs site** favicon no longer 404s; it shows the logo.
+- **Android actions**: surface device-shell failures and retry safe transport loss once; failed liveness confirmation opens a circuit breaker.
+- **Remote deadlines**: use native HTTP timers and keep draining executors out of dealing; any nonempty `VERIKUN_NO_ADB_RECYCLE` disables restart.
+
+### Removed
+- **Remote clients and servers**: upgrade both to versions supporting held leases and server-owned device health.
+- **Remote leases**: remove no-hold acquisition, implicit execution leases, five-minute takeover, and support for peers without holds and supervision.
+- **Remote RPC**: remove `evicted` and `deviceChanged` response fields; typed errors identify device loss.
+- **Suite children**: remove verdict inference for JSON without `outcome`; same-build results must supply it.
 
 ## [0.31.0] - 2026-09-27
 

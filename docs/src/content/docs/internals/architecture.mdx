@@ -163,8 +163,8 @@ so a platform gap can never be documented in one place and forgotten in another.
 | `server.ts` | `vk server`: HTTP+JSON with mandatory bearer auth, the `validateNode` gate, leases and failover — every piece of policy stays on the main thread |
 | `server-http.ts` | The transport helpers every handler shares: an error that knows its HTTP status and client exit code, capped body reads, JSON replies, wire-flag and artifact encoding |
 | `server-lifecycle.ts` | The start / restart / stop / list seam `buildServer` is injected with, and its production implementation over `drivers/lifecycle.ts` |
-| `server-pool.ts` | One worker thread per device, replies correlated, one command at a time per device. Mechanism only. |
-| `server-worker.ts` | The device call at the end of that pipeline, on its own thread |
+| `server-pool.ts` | One detached process per device, replies correlated, one command at a time per device. Mechanism only. |
+| `server-worker.ts` | The device call at the end of that pipeline, in its own process |
 | `rpc.ts` | The pure wire contract, including the error codec that preserves thrown-error subclass identity |
 
 ### Devices
@@ -175,7 +175,9 @@ so a platform gap can never be documented in one place and forgotten in another.
 | `device/claims.ts` | The host-global claim store — which attached device another job is already driving |
 | `device/grant.ts` | `DeviceGrant`: the one run-scoped acquire / touch / release contract, over a host claim or a `vk server` lease |
 | `device/pool.ts` | `--devices` parsing and resolution, shared by `vk server` and `vk suite` |
-| `device/failover.ts` | Pure classifiers deciding whether a failure is the artifact's or the device's |
+| `server-devices.ts` | Device health states, liveness strikes, backoff and build identity |
+| `server-leases.ts` | Affinity, held leases, FIFO admission, tombstones and original settings |
+| `server-host.ts` | Async adb health detection and host-wide recycle locking |
 | `device/prep.ts` | `vk device prep`: explicit, undoable test-device setup |
 
 ### Agent (`vk ai`)

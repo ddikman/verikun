@@ -365,6 +365,17 @@ test('runPlan: when falls through to else when given one', async () => {
   assert.deepEqual(calls.map((c) => c.positionals[0]), ['@fallback']);
 });
 
+test('runPlan: an EMPTY branch that matches passes and does nothing — "expected, nothing to do" (#158)', async () => {
+  // It must not fall through to the next branch either: matching is what makes it a branch.
+  const { fn, calls } = execFrom([{ code: 0 }]);
+  const r = await runPlan(
+    plan({ type: 'when', branches: [{ selector: '@calm', body: [] }, { selector: '@calm', body: [leaf('tap', ['@b'])] }] }),
+    deps({ exec: fn, getElements: () => [makeEl({ idShort: 'calm' })] }),
+  );
+  assert.equal(r.ok, true);
+  assert.equal(calls.length, 0);
+});
+
 test('runPlan: a repeat containing a when dispatches per iteration (the #33 shape)', async () => {
   // Two different "question types" in sequence, then the target appears. A flat unioned
   // body — what the compiler emitted before `when` existed — would tap both every round.

@@ -1,26 +1,25 @@
-// The `vk server` device pool: N devices, one worker thread each, addressed by serial.
-//
-// This module owns MECHANISM only — spawning a worker per device, correlating replies,
-// and keeping one command at a time per device. Who may use which device (leases, the
-// run token, idle takeover) is POLICY and lives in server.ts, next to auth and the
-// command grammar.
-//
-// `DevicePool` is a seam in the same spirit as `ServerLifecycle`: the unit suite injects
-// an in-memory pool and never starts a thread, while production always takes the worker
-// path — including a single-device server, so there is one code path rather than two that
-// can drift. A fake standing in here must mirror the WORKER's semantics, not the
-// convenient ones: notably that structured clone hands a `Buffer` back as a plain
-// `Uint8Array`, and that `adopt` probes before it inserts.
+import { spawnCollect } from './exec';
+import { claimDevice, claimsEnabled, releaseClaim } from './device/claims';
+// Per-device process ownership, correlated IPC replies and serialized calls.
+// Health and lease policy live in the parent server. Claims and companion cleanup
+// remain owned until actual executor exit, preventing overlapping successors.
 
-import { Worker } from 'node:worker_threads';
+import { fork, ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { CliError } from './errors';
+import { DeviceGoneError, DeviceUnresponsiveError, CliError } from './errors';
 import { serialQueue } from './wait';
 import { err } from './output';
 import { rebuildError, ErrorDescriptor, ExecRequest } from './rpc';
 import type { Element, HierarchySource, Platform } from './types';
 import type { LogFetchOpts } from './run';
 import type { WorkerCall, WorkerExecResult, WorkerReply, WorkerRequest } from './server-worker';
+
+/** Kill the detached executor and every device-tool child in its process group. */
+function killWorkerGroup(worker: ChildProcess): void {
+  if (!worker.pid) return;
+  try { process.kill(process.platform === 'win32' ? worker.pid : -worker.pid, 'SIGKILL'); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') err(`[server] cannot kill worker ${worker.pid}: ${(e as Error).message}`); }
+}
 
 /** One device, as the request handlers see it. */
 export interface DeviceHandle {
@@ -29,12 +28,12 @@ export interface DeviceHandle {
   elements(): Promise<Element[]>;
   logs(opts: LogFetchOpts): Promise<string>;
   install(path: string): Promise<void>;
-  /** The device's read path. Cached; `{fresh: true}` waits for a live measurement — see
-   *  `WorkerHandle.reads`. */
-  reads(opts?: { fresh?: boolean }): Promise<HierarchySource | null>;
-  /** Re-probe this device, throwing when it cannot be driven. What failover asks before
-   *  quarantining a device on an unrecognised error. */
+  /** Cached read path, seeded at startup and piggybacked on exec replies. */
+  reads(): Promise<HierarchySource | null>;
+  /** Probe outside the executor, so a blocked device call cannot hide failed liveness. */
   preflight(): Promise<void>;
+  /** Confirm recovery on the executor itself, clearing any driver breaker. */
+  recover?(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -45,12 +44,8 @@ export interface DevicePool {
   /**
    * Bring a device INTO the pool, resolving false when its worker will not start.
    *
-   * Paired with `retire` rather than offered as one `replace(failed, next)` call, because
-   * the caller has to do something BETWEEN the two — re-point the leases held on the
-   * outgoing device — and it must do it while that device is still listed. A combined
-   * call would delete the device first and hand back control at an `await`, letting a
-   * racing `leaseFor` reap the holder's lease before it could be remapped, which loses
-   * exactly the affinity the lease exists to provide.
+   * The server admits it after confirming liveness and installing its current build.
+   * Retirement removes advertisement immediately; actual exit releases resources.
    */
   adopt(serial: string): Promise<boolean>;
   /**
@@ -62,46 +57,25 @@ export interface DevicePool {
   /** Point a SINGLE-device pool at another serial (`/v1/devices/*`), or at nothing. */
   rebind(serial: string | null): Promise<void>;
   /**
-   * Register what to do when a device leaves WITHOUT being retired — its worker died.
-   *
-   * The pool cannot clean up after it: a claim file and a companion connection are both
-   * things it knows nothing about, and both are held on the HOST until something hands
-   * them back. Failover tidies up after a device it SHED, but a death can happen with
-   * failover off entirely, or on the last device (where shedding is deliberately refused),
-   * so the pool has to say so out loud. At most one listener.
+   * Release the companion and claim after actual worker exit, including retirement
+   * and failed startup. At most one listener; cleanup finishes before readoption.
    */
-  onLoss(cb: (serial: string, why: string) => void): void;
+  onLoss(cb: (serial: string, why: string) => void | Promise<void>): void;
   disposeAll(): Promise<void>;
 }
+
+/** Executor seams used to exercise a genuinely blocked process without waiting 30 minutes. */
+export interface WorkerPoolOptions { workerFile?: string; callTimeoutMs?: number }
 
 /** How long to wait for a worker to report that its device is drivable. Generous: the
  *  probe shells out to adb/idb, which on a cold box is not instant. */
 const WORKER_READY_TIMEOUT_MS = 60_000;
 
-/** How stale the cached read path may get before a background refresh is worth its cost.
- *  A companion that stands down mid-suite is what this field exists to expose (issue #77),
- *  and half a minute is far inside that. */
-const READS_TTL_MS = 30_000;
-
-/**
- * How long one worker call may go unanswered before its device is presumed wedged.
- *
- * There was no bound at all: only the 60s startup handshake was timed, so a worker whose
- * event loop stopped (a blocking spawnSync that outlived its own timeout, a companion socket
- * read that never returned) left its request pending forever. Nothing recovered from that —
- * the lease's `inFlight` count never dropped, so the lease never went idle, was never reaped
- * and was never taken over, while `/v1/health` kept advertising the device as capacity. The
- * client saw 409 for the rest of the server's life.
- *
- * Matched to `server.requestTimeout`, deliberately: this is a BACKSTOP for a wedged thread,
- * not a policy on how long work may take. A 512 MB install over a slow link and a long
- * `wait` are both legitimate, and cutting one short would be a new failure rather than a
- * recovery from one.
- */
+/** Last-resort executor bound; ordinary request deadlines are server policy. */
 const WORKER_CALL_TIMEOUT_MS = 30 * 60_000;
 
 /**
- * One device's worker thread, with replies correlated by id and commands serialized.
+ * One device's worker process, with replies correlated by id and commands serialized.
  *
  * The serialization is per DEVICE, which is the whole point of the pool: a phone can
  * serve one interaction at a time, but two phones need not wait for each other. (The
@@ -109,19 +83,20 @@ const WORKER_CALL_TIMEOUT_MS = 30 * 60_000;
  */
 class WorkerHandle implements DeviceHandle {
   private seq = 0;
-  /** Last known read path, refreshed in the background. See `reads()`. */
+  private platform: Platform = 'android';
+  /** Last known read path, piggybacked on successful exec replies. */
   private cachedReads: HierarchySource | null = null;
-  private readsAt = Date.now(); // seeded by the ready handshake
-  private refreshingReads = false;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private dead: Error | null = null;
 
   private constructor(
     readonly serial: string,
-    private readonly worker: Worker,
+    private readonly worker: ChildProcess,
     ready: HierarchySource | null,
     /** Told when this device dies unprompted, so the pool can stop advertising it. */
     private readonly onDeath?: (serial: string, why: string) => void,
+    private readonly onExit?: (serial: string, why: string) => void,
+    private readonly callTimeoutMs = WORKER_CALL_TIMEOUT_MS,
   ) {
     this.cachedReads = ready;
     worker.on('message', (msg: WorkerReply) => {
@@ -136,7 +111,7 @@ class WorkerHandle implements DeviceHandle {
     // than leaving a caller hanging on a reply that can never arrive.
     const die = (why: string): void => {
       const first = this.dead === null;
-      this.dead ??= new CliError(`device ${serial} is no longer available (${why})`, 3);
+      this.dead ??= new DeviceGoneError(`device ${serial} is no longer available (${why})`);
       for (const [, slot] of this.pending) slot.reject(this.dead);
       this.pending.clear();
       // `DevicePool.serials()` promises that a device whose worker died is no longer
@@ -146,7 +121,11 @@ class WorkerHandle implements DeviceHandle {
       if (first) this.onDeath?.(serial, why);
     };
     worker.on('error', (e) => die(e.message));
-    worker.on('exit', (code) => die(`worker exited with code ${code}`));
+    worker.on('close', (code, signal) => {
+      killWorkerGroup(worker);
+      die(`worker exited (${signal ?? code})`);
+      this.onExit?.(serial, `worker exited (${signal ?? code})`);
+    });
   }
 
   /**
@@ -160,18 +139,24 @@ class WorkerHandle implements DeviceHandle {
     platform: Platform,
     serial: string,
     onDeath?: (serial: string, why: string) => void,
+    onExit?: (serial: string, why: string) => void,
+    options: WorkerPoolOptions = {},
   ): Promise<WorkerHandle> {
     return new Promise((resolve, reject) => {
-      const worker = new Worker(join(__dirname, 'server-worker.js'), {
-        workerData: { platform, serial },
+      let ready = false;
+      const worker = fork(options.workerFile ?? join(__dirname, 'server-worker.js'), [platform, serial], {
+        detached: true, serialization: 'advanced',
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+        env: { ...process.env, VERIKUN_NO_CLAIM: '1' },
       });
+      worker.stderr?.on('data', chunk => err(chunk.toString().trimEnd()));
       let settled = false;
       const timer = setTimeout(() => {
         // Through `settle`, like every other exit: leaving `settled` false lets a late
         // `ready` build a full handle around an already-terminated worker, which the pool
         // would then admit as a device whose every request rejects.
         settle(() => {
-          void worker.terminate();
+          killWorkerGroup(worker);
           reject(new CliError(`device ${serial} did not become ready within ${WORKER_READY_TIMEOUT_MS / 1000}s`, 3));
         });
       }, WORKER_READY_TIMEOUT_MS);
@@ -182,16 +167,22 @@ class WorkerHandle implements DeviceHandle {
         fn();
       };
       worker.once('message', (msg: WorkerReply) => {
-        if (msg.kind === 'ready') settle(() => resolve(new WorkerHandle(serial, worker, msg.reads ?? null, onDeath)));
+        if (msg.kind === 'ready') settle(() => {
+          ready = true;
+          resolve(Object.assign(new WorkerHandle(serial, worker, msg.reads ?? null, onDeath, onExit, options.callTimeoutMs), { platform }));
+        });
         else if (msg.kind === 'failed') {
           settle(() => {
-            void worker.terminate();
+            killWorkerGroup(worker);
             reject(rebuildError(msg.error as ErrorDescriptor));
           });
         }
       });
-      worker.on('error', (e) => settle(() => reject(new CliError(`device ${serial}: ${e.message}`, 3))));
-      worker.on('exit', (code) => settle(() => reject(new CliError(`device ${serial}: worker exited with code ${code}`, 3))));
+      worker.on('error', (e) => settle(() => { killWorkerGroup(worker); reject(new CliError(`device ${serial}: ${e.message}`, 3)); }));
+      worker.on('close', (code) => {
+        if (!ready) { killWorkerGroup(worker); onExit?.(serial, `startup worker exited with code ${code}`); }
+        settle(() => reject(new CliError(`device ${serial}: worker exited with code ${code}`, 3)));
+      });
     });
   }
 
@@ -206,17 +197,13 @@ class WorkerHandle implements DeviceHandle {
     const id = ++this.seq;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        // Only if it is still outstanding — a reply that landed first already cleared it.
-        if (!this.pending.delete(id)) return;
-        err(`[server] pool: ${this.serial} did not answer '${req.kind}' in ${WORKER_CALL_TIMEOUT_MS / 60_000}m — terminating its worker`);
-        // Terminating is what makes this a RECOVERY rather than just a rejection: the
-        // 'exit' handler runs `die`, which fails everything else in flight and calls
-        // `forget`, so the device leaves the pool honestly and the reconciler can bring it
-        // back. Leaving the thread alive would keep its device's UiAutomation connection
-        // held with nothing on the host able to say why.
-        void this.worker.terminate();
-        reject(new CliError(`device ${this.serial} stopped responding (no reply to '${req.kind}')`, 3));
-      }, WORKER_CALL_TIMEOUT_MS);
+        if (!this.pending.has(id)) return;
+        this.dead ??= new DeviceUnresponsiveError(`device ${this.serial} stopped responding (no reply to '${req.kind}')`);
+        for (const slot of this.pending.values()) slot.reject(this.dead);
+        this.pending.clear();
+        this.onDeath?.(this.serial, this.dead.message);
+        killWorkerGroup(this.worker);
+      }, this.callTimeoutMs);
       // A pending call must not by itself keep the process alive at shutdown.
       timer.unref?.();
       const settle = <A>(fn: (a: A) => void) => (a: A): void => {
@@ -224,21 +211,25 @@ class WorkerHandle implements DeviceHandle {
         fn(a);
       };
       this.pending.set(id, { resolve: settle(resolve) as (v: unknown) => void, reject: settle(reject) });
-      this.worker.postMessage({ ...req, id } as WorkerRequest);
+      this.worker.send({ ...req, id } as WorkerRequest, error => {
+        if (!error) return;
+        this.pending.get(id)?.reject(new DeviceGoneError(`device ${this.serial}: ${error.message}`));
+        this.pending.delete(id);
+      });
     });
   }
 
   async exec(req: ExecRequest): Promise<WorkerExecResult> {
     const r = await this.send<WorkerExecResult>({ kind: 'exec', ...req });
-    // Structured clone hands a `Buffer` back as a plain `Uint8Array`, whose `toString`
+    if (r.reads) this.cachedReads = r.reads;
+    // Normalize IPC binary views at the boundary. A plain `Uint8Array`'s `toString`
     // IGNORES its encoding argument — so `.toString('base64')` downstream yields
     // "137,80,78,71,…" and every screenshot and piece of failure evidence archives as an
     // unopenable file, with a 200 and no error anywhere. TypeScript cannot see it: the
     // declared type is still Buffer. Restore it at the boundary that broke it.
     if (r.artifacts) {
       for (const [rel, bytes] of Object.entries(r.artifacts)) {
-        // A VIEW over the clone's memory, not a third copy of it: `postMessage` already
-        // copied these bytes once, and a failure screenshot is deliberately kept
+        // A view over the received memory without another copy. Failure evidence stays
         // full-resolution (run.ts) — megabytes per failed step, per device.
         const u8 = bytes as unknown as Uint8Array;
         r.artifacts[rel] = Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength);
@@ -255,82 +246,53 @@ class WorkerHandle implements DeviceHandle {
   async install(path: string): Promise<void> {
     await this.send<null>({ kind: 'install', path });
   }
-  /**
-   * The read path, answered WITHOUT touching the worker.
-   *
-   * `/v1/health` must stay answerable mid-step, and skipping the parent's queue is not
-   * enough to achieve that: the worker thread itself is blocked inside `spawnSync` for
-   * the whole of an exec, so a `reads` message would simply sit unread until the step
-   * finished. Health would then hang for as long as the device was busy — which on a
-   * single-device server is exactly when someone is most likely to be asking.
-   *
-   * So the value is cached (seeded from the worker's ready handshake) and refreshed in
-   * the background, landing whenever the worker next comes free. One step of staleness
-   * costs nothing: this field exists so a companion that quietly stood down is visible
-   * at all (issue #77), and it is answered from the previous step rather than never.
-   */
-  async reads(opts: { fresh?: boolean } = {}): Promise<HierarchySource | null> {
-    // `fresh` is for the once-per-run caller (`/v1/lease`), which on a POOLED server is
-    // the only chance to measure this at all — `/v1/health` deliberately skips reads
-    // there, so without it a client is told the read path from its PREVIOUS lease and a
-    // companion that stood down in between goes unreported for a whole run (issue #77).
-    // `/v1/health` still takes the cached value: staying answerable mid-step is its job.
-    const refresh = this.refreshReads();
-    if (opts.fresh) await refresh;
-    return this.cachedReads;
-  }
-
-  private async refreshReads(): Promise<void> {
-    // Throttled, because the refresh is NOT free: on Android `hierarchySource()` asks the
-    // companion for its state, which spawns a helper process on the device thread — the
-    // one resource the pool exists to protect. `/v1/health` is unauthenticated and polled
-    // by CI, so an unthrottled refresh would spend device time on every probe.
-    if (Date.now() - this.readsAt < READS_TTL_MS) return;
-    if (this.refreshingReads || this.dead) return;
-    this.refreshingReads = true;
-    try {
-      // QUEUED, not dispatched: the worker handles each message as an independent async
-      // task and an exec yields at every auto-wait `sleep`, so an unqueued probe really
-      // does run *during* a step — spending device time the pool exists to serialize and
-      // stalling that step's next poll behind a blocking companion query.
-      this.cachedReads = await this.send<HierarchySource | null>({ kind: 'reads' });
-    } catch {
-      /* the device may be gone; the last known value is still the best answer we have */
-    } finally {
-      // Stamped whether it worked or not. Throttling on SUCCESS would defeat itself for
-      // exactly the device whose read path is failing: every unauthenticated /v1/health
-      // would enqueue another probe onto the one worker least able to spare it.
-      this.readsAt = Date.now();
-      this.refreshingReads = false;
-    }
-  }
+  /** Seeded at startup and piggybacked on exec replies; health never queues device work. */
+  async reads(): Promise<HierarchySource | null> { return this.cachedReads; }
+  async recover(): Promise<void> { await this.send({ kind: 'recover' }); }
   async preflight(): Promise<void> {
-    // Unqueued, unlike `reads`: the probe asks about a device that
-    // may be mid-command, and the parent's queue would hold it behind exactly the work it
-    // is trying to classify. What it does NOT get is a guarantee of promptness — the
-    // worker still handles messages one at a time and is unreachable while blocked inside
-    // a `spawnSync` — so treat it as "ask as early as the device allows", never as a
-    // liveness check that can outrun a wedged phone.
-    await this.dispatch<null>({ kind: 'preflight' });
+    const args = this.platform === 'android'
+      ? ['-s', this.serial, 'shell', 'echo', 'ok'] : ['describe', '--udid', this.serial];
+    const r = await spawnCollect(this.platform === 'android' ? (process.env.ADB || 'adb') : (process.env.IDB || 'idb'), args, { timeout: 5000 });
+    if (r.code !== 0 || (this.platform === 'android' && r.stdout.trim() !== 'ok'))
+      throw new DeviceUnresponsiveError(`device ${this.serial} failed its liveness probe: ${r.stderr.trim()}`);
   }
   async dispose(): Promise<void> {
     this.dead ??= new CliError(`device ${this.serial} is shutting down`, 3);
-    await this.worker.terminate();
+    if (this.worker.exitCode !== null || this.worker.signalCode !== null) return;
+    await new Promise<void>(resolve => { this.worker.once('close', () => resolve()); killWorkerGroup(this.worker); });
   }
 }
 
-/** The production pool: one worker thread per device. */
+/** The production pool: one worker process per device. */
 export class WorkerDevicePool implements DevicePool {
   private readonly handles = new Map<string, DeviceHandle>();
-  private lossListener?: (serial: string, why: string) => void;
+  private readonly busy = new Set<string>();
+  private readonly exitTasks = new Map<string, Promise<void>>();
+  private readonly exitComplete = new Map<string, Promise<void>>();
+  private readonly exitResolve = new Map<string, () => void>();
+  private lossListener?: (serial: string, why: string) => void | Promise<void>;
 
-  private constructor(private readonly platform: Platform) {}
+  private constructor(private readonly platform: Platform, private readonly options: WorkerPoolOptions = {}) {}
 
   /** An arrow property, not a method: it is handed to every worker as a callback. */
   private readonly forget = (serial: string, why: string): void => {
     if (!this.handles.delete(serial)) return;
     err(`[server] pool: ${serial} left the pool — ${why}`);
-    this.lossListener?.(serial, why);
+    // Resource release belongs to the actual exit callback.
+  };
+
+  private readonly exited = (serial: string, why: string): void => {
+    const cleanup = Promise.resolve().then(() => this.lossListener?.(serial, why)).catch(e => {
+      err(`[server] cleanup ${serial}: ${(e as Error).message}`);
+    }).finally(() => {
+      if (!this.lossListener && claimsEnabled()) releaseClaim(serial, { mineOnly: true });
+      this.busy.delete(serial);
+      this.exitTasks.delete(serial);
+      this.exitResolve.get(serial)?.();
+      this.exitResolve.delete(serial);
+      this.exitComplete.delete(serial);
+    });
+    this.exitTasks.set(serial, cleanup);
   };
 
   /**
@@ -342,13 +304,13 @@ export class WorkerDevicePool implements DevicePool {
    * Joining goes through `adopt`, the same call failover uses, so a pool behaves the same
    * way whether a device arrived at boot or replaced a casualty an hour later.
    */
-  static async start(platform: Platform, serials: string[]): Promise<WorkerDevicePool> {
-    const pool = new WorkerDevicePool(platform);
+  static async start(platform: Platform, serials: string[], options: WorkerPoolOptions = {}): Promise<WorkerDevicePool> {
+    const pool = new WorkerDevicePool(platform, options);
     await Promise.all(serials.map((serial) => pool.adopt(serial)));
     return pool;
   }
 
-  onLoss(cb: (serial: string, why: string) => void): void {
+  onLoss(cb: (serial: string, why: string) => void | Promise<void>): void {
     this.lossListener = cb;
   }
 
@@ -364,18 +326,22 @@ export class WorkerDevicePool implements DevicePool {
   async adopt(serial: string): Promise<boolean> {
     if (this.handles.has(serial)) {
       // Already serving. Never start a SECOND worker for one serial: the map would keep
-      // only the newer handle and the older thread would run on unreferenced, holding
+      // only the newer handle and the older process would run on unreferenced, holding
       // that device's single UiAutomation connection with nothing able to release it.
       // server.ts serializes failover so this should be unreachable; it is here because
       // the failure it prevents is silent.
       return true;
     }
+    if (this.busy.has(serial)) return false;
+    this.busy.add(serial);
+    if (claimsEnabled() && !claimDevice(serial, this.platform).ok) { this.busy.delete(serial); return false; }
+    this.exitComplete.set(serial, new Promise(resolve => this.exitResolve.set(serial, resolve)));
     try {
       // Inserted HERE, inside the await, not by a caller after a `Promise.all`: a worker
       // that dies while a slower device is still starting would otherwise fire `forget`
       // against a map it is not in yet (a silent no-op) and then be inserted DEAD — a
       // poisoned slot that health advertises and every lease is handed.
-      this.handles.set(serial, await WorkerHandle.start(this.platform, serial, this.forget));
+      this.handles.set(serial, await WorkerHandle.start(this.platform, serial, this.forget, this.exited, this.options));
       // Announced, like the departure in `forget`. Capacity has to be legible in BOTH
       // directions or a log shows a pool that only ever shrinks: at boot this confirms each
       // device came up individually rather than as one aggregate banner line, and later it
@@ -402,41 +368,22 @@ export class WorkerDevicePool implements DevicePool {
    * pinned serial without probing, so an AVD that returns on a different port would leave
    * a permanently dead instance behind.
    *
-   * SWAP OR NOTHING, exactly as `adopt`/`retire`: the new worker has to be serving before
-   * the old ones go. A freshly power-cycled device commonly fails its first probe (adb
-   * still reports `offline` for a few seconds), and disposing first would leave the pool
-   * EMPTY on a throw — with the caller's lease bookkeeping skipped, `/v1/devices/*`
-   * unable to name a target any more, and the server answering 503 until it is restarted.
+   * Await old worker exit and cleanup before adopting, even when the serial is unchanged.
+   * Failed adoption remains eligible for the server's normal readmission loop.
    */
   async rebind(serial: string | null): Promise<void> {
     if (serial === null) {
       await this.disposeAll();
       return;
     }
-    // Snapshot BEFORE inserting, and compare by identity rather than serial: an AVD that
-    // comes back on the same port — and every iOS simulator, whose UDID never changes —
-    // rebinds onto its own serial, and a serial-based filter would drop the OLD handle
-    // from the map without disposing it, leaking a worker and its UiAutomation connection
-    // on every restart.
-    const outgoing = [...this.handles.values()];
-    const handle = await WorkerHandle.start(this.platform, serial, this.forget);
-    this.handles.clear();
-    this.handles.set(serial, handle);
-    const leaving = outgoing.filter((h) => h !== handle);
-    // Announce the departure BEFORE disposing. `dispose()` pre-sets the handle's `dead`
-    // latch, so the worker's own exit event takes the not-first path and `onDeath` never
-    // fires — which means the loss listener (the only place a departing device's claim and
-    // companion are handed back) would be skipped for every `/v1/devices/*` rebind, and a
-    // restarted AVD returning on a new port would leave its old claim owned by this
-    // still-live server pid forever. Only for serials we are NOT re-adopting: the new
-    // worker has already claimed `serial`, and releasing it here would give it away.
-    for (const h of leaving) if (h.serial !== serial) this.lossListener?.(h.serial, `replaced by ${serial}`);
-    await Promise.all(leaving.map((h) => h.dispose().catch(() => undefined)));
+    await this.disposeAll();
+    if (!(await this.adopt(serial))) throw new CliError(`device ${serial} could not be readmitted`, 3);
   }
 
   async disposeAll(): Promise<void> {
     const live = [...this.handles.values()];
     this.handles.clear();
     await Promise.all(live.map((h) => h.dispose().catch(() => undefined)));
+    await Promise.all([...this.exitComplete.values()]);
   }
 }

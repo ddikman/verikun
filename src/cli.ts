@@ -1,8 +1,9 @@
+import { errorOutcome, isDeviceDrop, isDeviceLoss, Outcome } from './errors';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep, join } from 'node:path';
 import { parseArgs, flagStr, flagBool, flagNum, Flags } from './args';
-import { CliError, RunEvictedError, SelectorNotFoundError, isEnvError } from './errors';
-import { runText, commandExists, spawnCollect } from './exec';
+import { TransientReadError, ServerUnreachableError, CliError, RunEvictedError, SelectorNotFoundError, isEnvError } from './errors';
+import { withExecDeadline, runText, commandExists, spawnCollect } from './exec';
 import { getDriver, probeAdb, probeXcrun, probeIdb, probeIdbCompanion } from './drivers';
 import { adbTransport, severanceRisk, lockKindOf } from './drivers/adb';
 import {
@@ -84,20 +85,20 @@ import { LintFinding, coverageChecksEnabled, instructionUnits, lintPlan, looksTr
 import { ClaudeProvider } from './agent/claude';
 import { OpenAiProvider } from './agent/openai';
 import { CliProvider, CliAgentSpec, CODEX_SPEC, CURSOR_SPEC, CLAUDE_SPEC } from './agent/cli-provider';
-import { AgentProvider } from './agent/provider';
+import { AgentProvider, CompileInput, CompileResult } from './agent/provider';
 import { readPlan, writePlan, findSeed, CacheEntry, CacheKeyInput } from './agent/cache';
 import { takePlanLock, planLockWaitMs } from './agent/plan-lock';
 import { resolveModel, parseCostOverride, priceFor, providerFor, CostTracker, DEFAULT_MAX_COST_USD, Price, ProviderId } from './agent/cost';
 import { InvalidPlanError, Plan } from './agent/ir';
 import { ResolvedTest, Segment, resolveIncludes, segmentLabel } from './agent/include';
-import { DeviceChange, ErrorDescriptor, ExecBackend, HealthResponse, InstallSkip, describeError, rebuildError } from './rpc';
+import { ErrorDescriptor, ExecBackend, HealthResponse, InstallSkip, describeError, rebuildError } from './rpc';
 import { DevicePoolSpec, csvList, parseDevicePool, poolSerials, resolvePoolPlatform } from './device/pool';
-import { createRemoteBackend, pingServer, poolNote, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
+import { createRemoteBackend, pingServer, remoteDeviceList, remoteDeviceOp, RemoteOpts } from './agent/remote';
 import { cmdSuite, AiRunResult, Lane } from './suite';
-import { classifyFailure } from './device/failover';
 import { sleep, DEFAULT_BOOT_TIMEOUT_MS, DEFAULT_STOP_TIMEOUT_MS } from './wait';
 import { VERSION } from './version';
-import { adbHealthProbe } from './adb-health';
+import { AdbServerHealth, adbHealthProbe, adbServerHealth, leakNote } from './adb-health';
+import { describeAdbRestart, hostRestartOps, restartLeakingAdb } from './adb-restart';
 import { updateProbes } from './update-check';
 import type { Ctx } from './commands/context';
 import {
@@ -528,6 +529,7 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
   for (const probe of await updateProbes()) reportProbe(probe);
 
   if (ctx.platform === 'ios') {
+    if (flagBool(ctx.flags, 'restart-adb')) err('adb server: --restart-adb is Android-only — iOS has no adb server');
     // xcrun is the floor: without it there is no device list to reason about.
     if (!reportProbe(probeXcrun())) return 3;
     // idb (+ its companion) powers everything interactive: ui/tap/text/swipe/key/logs.
@@ -541,8 +543,18 @@ async function cmdDoctor(ctx: Ctx): Promise<number> {
   // adb being PRESENT is not the same as adb being WELL: a long-lived server leaks USB
   // handles and starts dropping devices mid-run, and no device-level remedy reaches it
   // (see adb-health.ts). Advisory and evidence-only, so a healthy host stays silent.
-  const adbRot = adbHealthProbe();
-  if (adbRot) reportProbe(adbRot);
+  const health = adbServerHealth();
+  const adbRot = adbHealthProbe(health);
+  if (flagBool(ctx.flags, 'restart-adb')) {
+    // Asked to act, so report what was done in place of the hint that would have asked. Before
+    // the device survey, so the survey shows the devices as they came back. Never touches the
+    // verdict: a restart that something else is in the way of is not a broken machine.
+    const done = describeAdbRestart(await restartLeakingAdb(hostRestartOps(health)));
+    // Under the leak line when there is one; on a healthy host the outcome is the line.
+    const [first, ...more] = adbRot ? [adbRot.detail, ...done] : done;
+    err(`adb server: ${first}`);
+    for (const line of more) err(`  ${line}`);
+  } else if (adbRot) reportProbe(adbRot);
 
   const devices = ctx.driver.listDevices();
   const usable = devices.filter((d) => d.state === 'device');
@@ -995,7 +1007,7 @@ async function cmdWait(ctx: Ctx): Promise<number> {
   const timeout = flagNum(ctx.flags, 'timeout') ?? 10000;
   const interval = flagNum(ctx.flags, 'interval') ?? 400;
   const deadline = Date.now() + timeout;
-  const barrier = new ReadTally(ctx);
+  const barrier = new ReadTally(ctx, deadline);
 
   while (Date.now() < deadline) {
     const { matches, tier } = matchElements(readForPoll(ctx, barrier), sel);
@@ -1069,7 +1081,7 @@ async function cmdAssert(ctx: Ctx): Promise<number> {
   // Auto-wait subsumes the common "wait then assert": poll until the assertion
   // passes or the window elapses. `--gone` therefore waits for disappearance.
   const deadline = Date.now() + waitWindowMs(ctx.flags);
-  const barrier = new ReadTally(ctx);
+  const barrier = new ReadTally(ctx, deadline);
   // A verdict is only worth banking if the read behind it happened. `--gone` (and `--count 0`)
   // pass on an EMPTY tree, which is exactly what an absorbed transient hands back — so a single
   // killed dump mid-window could otherwise bank a green the screen never showed. Poll again
@@ -1517,9 +1529,8 @@ function requireSettingKey(v: string): SettingKey {
  * "nothing to do", because it runs from a `finally` — the flow may well be unwinding
  * from the very failure that left the device in a modified state.
  *
- * Runs through the backend rather than a Driver so the local and remote paths are the
- * same code. (Remote is a known gap: the overrides live in the *server's* run file, so
- * a locally-empty snapshot means this correctly skips — see the issue's Out of scope.)
+ * Local runs restore through their backend. Remote settings belong to the held lease
+ * and are restored by the server when that lease ends.
  */
 async function restoreDeviceOverrides(backend: ExecBackend): Promise<void> {
   if (!Recorder.hasDeviceOverrides()) return;
@@ -1952,6 +1963,95 @@ export function cachedSegment(segKey: CacheKeyInput, opts: AiOptions): CacheEntr
 const SEGMENT_MIN_UNITS = 2;
 
 /**
+ * One compile call, BILLED whatever came back (issue #158).
+ *
+ * The schema the model decodes against is looser than the validator: it cannot carry the
+ * command allowlist, and its bodies have no minimum length. So a plan `parsePlan` rejects
+ * still cost a whole call. That rejection is RETURNED rather than thrown, so the caller can
+ * decide whether it buys a recompile. Anything else propagates: a refused or truncated
+ * response, a dead CLI. What `parsePlan` tolerated on the way is printed, so a near-miss it
+ * forgave is never silent.
+ */
+async function attemptCompile(
+  provider: AgentProvider,
+  input: CompileInput,
+  cost: CostTracker,
+  where: string,
+): Promise<{ result: CompileResult } | { rejected: InvalidPlanError }> {
+  try {
+    const result = await provider.compile(input);
+    cost.add(result.usage, 'compile');
+    for (const note of result.notes ?? []) err(`[ai] ${where}: ${note}`);
+    return { result };
+  } catch (e) {
+    if (!(e instanceof InvalidPlanError)) throw e;
+    cost.add(e.usage ?? {}, 'compile');
+    return { rejected: e };
+  }
+}
+
+/** Node types a model also writes as a `command` — the measured failure of issue #158. */
+const NODE_TYPE_WORDS: ReadonlySet<string> = new Set(['repeat', 'when', 'if-present', 'while-present', 'read']);
+
+/** The node a rejection names, as compact JSON. `steps[N]` alone cannot be located: a section's
+ *  indices are its own, and the rejected plan is never kept. */
+function rejectedNodeText(e: InvalidPlanError): string {
+  if (e.node === undefined) return '';
+  const text = JSON.stringify(e.node) ?? '';
+  return text.length > 300 ? `${text.slice(0, 299)}…` : text;
+}
+
+/**
+ * What a rejected compile is told when it is recompiled. The validator's message is the finding
+ * and the node shows WHICH one.
+ *
+ * A control word written as a command gets the concrete fix. That fix includes "every step after
+ * it", because 8 of the 20 measured plans simply stopped at the stray leaf. It also allows for
+ * the innermost level, where the schema has no slot for the node at all.
+ */
+function rejectionFeedback(e: InvalidPlanError): string {
+  const lines = [`- The plan is invalid and was rejected: ${e.message}`];
+  const node = rejectedNodeText(e);
+  if (node) lines.push(`  The rejected node: ${node}`);
+  const leaf = (e.node ?? {}) as { type?: unknown; command?: unknown };
+  const word = leaf.type === 'command' ? String(leaf.command).trim().toLowerCase() : '';
+  if (NODE_TYPE_WORDS.has(word)) {
+    lines.push(
+      `  "${word}" is a node TYPE, never a command: write it ONCE, as its own {"type":"${word}",…} node (lifted to an ` +
+        'outer level if it is nested deeper than the grammar allows), and emit every step the test states after it.',
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The guided recompile of a plan the validator rejected, for a caller with no plan to fall back
+ * on. A second rejection fails the compile at exit 1, the same as a plan that does not cover its
+ * test (see `assertPlanCoversTest`): it is model-side, so not 3, and not 2, which `vk suite`
+ * would never retry. Nothing is cached, so a rerun compiles again.
+ */
+async function recompileRejected(
+  provider: AgentProvider,
+  input: CompileInput,
+  cost: CostTracker,
+  maxCostUsd: number,
+  where: string,
+  rejected: InvalidPlanError,
+): Promise<CompileResult> {
+  const feedback = rejectionFeedback(rejected);
+  err(`[ai] ${where}: the compiled plan is invalid — recompiling once:\n${feedback}`);
+  assertBudgetForCompile(cost, maxCostUsd, `recompiling ${where} after its plan was rejected`);
+  const retry = await attemptCompile(provider, { ...input, retryFeedback: feedback }, cost, where);
+  if (!('rejected' in retry)) return retry.result;
+  const node = rejectedNodeText(retry.rejected);
+  throw new CliError(
+    `ai: the model's plan for ${where} was rejected twice — ${retry.rejected.message}${node ? `\n  node: ${node}` : ''}\n` +
+      '  Nothing was cached; rerunning compiles it again.',
+    1,
+  );
+}
+
+/**
  * Compile a test SEGMENT AT A TIME and concatenate the results — the whole point of
  * `@include` doing more than a textual paste.
  *
@@ -2042,10 +2142,25 @@ export async function compileFromSegments(
         seed = null;
       }
       err(`[ai] ${where}: compiling with ${opts.model}…${lock.degraded ? ` (${lock.degraded})` : ''}`);
-      let compiled;
-      try {
-        compiled = await provider.compile({ nl: seg.text, pkg: key.pkg, platform: key.platform, seed: seed?.plan, section: true });
-      } catch (e) {
+      const input: CompileInput = { nl: seg.text, pkg: key.pkg, platform: key.platform, seed: seed?.plan, section: true };
+      let attempt = await attemptCompile(provider, input, cost, where);
+      // A plan the validator rejects buys one guided recompile, as a section, so a shared fragment
+      // still caches once for every test that includes it (issue #158).
+      if ('rejected' in attempt && attempt.rejected.code !== 'no-steps') {
+        const feedback = rejectionFeedback(attempt.rejected);
+        err(`[ai] ${where}: the compiled section is invalid — recompiling once:\n${feedback}`);
+        assertBudgetForCompile(cost, opts.maxCostUsd, `recompiling ${where} — the test is only partly compiled`);
+        attempt = await attemptCompile(provider, { ...input, retryFeedback: feedback }, cost, where);
+        // ANY rejection now, `no-steps` included. The first attempt emitted steps, so this section
+        // states something, and swallowing an empty answer as rationale below would drop it. A
+        // section we cannot trust falls back to the whole test, which also loses SECTION_NOTE —
+        // itself a suspect when the same prose is rejected twice.
+        if ('rejected' in attempt) {
+          err(`[ai] ${where}: the recompiled section is rejected too (${attempt.rejected.message}) — compiling the test as one instead`);
+          return null; // `return` from inside a try runs the finally first — that releases the lock
+        }
+      }
+      if ('rejected' in attempt) {
         // Prose with no instruction in it (a paragraph explaining WHY the next step exists)
         // is not an error at segment granularity — it just adds no steps.
         //
@@ -2053,17 +2168,14 @@ export async function compileFromSegments(
         // widest: the preamble compiles, the BODY of the test is dropped, and the assembled
         // plan passes having exercised nothing. Two units, not one, so a lone verb-initial
         // rationale line ("Wait times vary by device.") stays swallowed as it always was.
-        if (e instanceof InvalidPlanError && e.code === 'no-steps') {
-          if (coverageChecksEnabled() && instructionUnits(seg.text) >= SEGMENT_MIN_UNITS) {
-            err(`[ai] ${where}: compiled to NO steps, but its prose states instructions — the section was dropped; compiling the test as one instead`);
-            return null; // `return` from inside a try runs the finally first — that releases the lock
-          }
-          err(`[ai] ${where}: no steps`);
-          continue;
+        if (coverageChecksEnabled() && instructionUnits(seg.text) >= SEGMENT_MIN_UNITS) {
+          err(`[ai] ${where}: compiled to NO steps, but its prose states instructions — the section was dropped; compiling the test as one instead`);
+          return null; // the finally below releases the lock
         }
-        throw e;
+        err(`[ai] ${where}: no steps`);
+        continue;
       }
-      cost.add(compiled.usage, 'compile');
+      const compiled = attempt.result;
       // A truncated FRAGMENT is the worst version of issue #127: cached under its own key, it
       // is spliced into every test that includes it, so one bad draw of a shared preamble
       // shortens a whole suite. Asked BEFORE the cache write, and answered the same way as a
@@ -2156,8 +2268,16 @@ export async function obtainPlan(
   if (seed) err(`[ai] no exact cache; seeding from a prior plan (build ${seed.build ?? 'unknown'})`);
   err(`[ai] compiling '${file}' with ${opts.model} (effort ${opts.effort ?? 'default'})…`);
 
-  let compiled = await provider.compile({ nl: key.nl, pkg: key.pkg, platform: key.platform, seed: seed?.plan });
-  cost.add(compiled.usage, 'compile');
+  const where = `'${file}'`;
+  const input: CompileInput = { nl: key.nl, pkg: key.pkg, platform: key.platform, seed: seed?.plan };
+  const first = await attemptCompile(provider, input, cost, where);
+  // A plan the validator rejects has nothing to keep, so its recompile is the only way to a plan
+  // at all (issue #158). A whole test compiling to no steps is one of those, not a section's
+  // legitimate "nothing here". It shares the lint's single retry, so a compile is still at most
+  // two calls.
+  let compiled = 'rejected' in first
+    ? await recompileRejected(provider, input, cost, opts.maxCostUsd, where, first.rejected)
+    : first.result;
 
   // Compilation is nondeterministic: the same prose has produced `launch --clear` on one
   // run and plain `launch` on the next, silently dropping something the test stated — and
@@ -2168,30 +2288,39 @@ export async function obtainPlan(
   // The seed goes in too: a green run re-persists the HEALED plan, whose repaired ids came off a
   // live screen, so flagging them would push every new build off a selector the device confirmed.
   let remaining = lintPlan(key.nl, compiled.plan, seed?.plan);
-  if (remaining.length > 0) {
+  if (remaining.length > 0 && 'rejected' in first) {
+    // The retry was spent on the rejection. Its findings stand as they would after a lint retry.
+    const anyway = remaining.some((f) => f.fatal) ? '' : ' — running it anyway';
+    err(`[ai] the recompiled plan does not match the test${anyway}:\n${remaining.map((f) => `- ${f.message}`).join('\n')}`);
+  } else if (remaining.length > 0) {
     const feedback = remaining.map((f) => `- ${f.message}`).join('\n');
     err(`[ai] compiled plan does not match the test — recompiling once:\n${feedback}`);
     if (cost.exceeded()) {
       err('[ai] cost ceiling reached — keeping the first plan rather than paying for a retry');
     } else {
-      const retry = await provider.compile({
-        nl: key.nl,
-        pkg: key.pkg,
-        platform: key.platform,
-        seed: seed?.plan,
-        retryFeedback: feedback,
-      });
-      cost.add(retry.usage, 'compile');
-      const still = lintPlan(key.nl, retry.plan, seed?.plan);
-      // Keep the retry either way: it was compiled with strictly more information. If it
-      // still trips the lint, say so rather than pretending the plan is clean — and for a
-      // coverage finding, do not claim it will run, because the gate below rejects it.
-      if (still.length > 0) {
-        const anyway = still.some((f) => f.fatal) ? '' : ' — running it anyway';
-        err(`[ai] the retry still does not match the test${anyway}:\n${still.map((f) => `- ${f.message}`).join('\n')}`);
-      } else err('[ai] recompile matches the test');
-      compiled = retry;
-      remaining = still;
+      let retry: Awaited<ReturnType<typeof attemptCompile>> | undefined;
+      try {
+        retry = await attemptCompile(provider, { ...input, retryFeedback: feedback }, cost, where);
+      } catch (e) {
+        // A recompile that fails outright (refused, truncated, unparseable) must not cost the plan
+        // already in hand; its findings stand, and a fatal one is still refused below.
+        if (!(e instanceof CliError) || e.exitCode !== 1) throw e;
+        err(`[ai] the recompile failed (${e.message.split('\n')[0]}) — keeping the first plan`);
+      }
+      if (retry && 'rejected' in retry) {
+        err(`[ai] the recompiled plan is invalid (${retry.rejected.message}) — keeping the first plan`);
+      } else if (retry) {
+        const still = lintPlan(key.nl, retry.result.plan, seed?.plan);
+        // Keep the retry either way: it was compiled with strictly more information. If it
+        // still trips the lint, say so rather than pretending the plan is clean — and for a
+        // coverage finding, do not claim it will run, because the gate below rejects it.
+        if (still.length > 0) {
+          const anyway = still.some((f) => f.fatal) ? '' : ' — running it anyway';
+          err(`[ai] the retry still does not match the test${anyway}:\n${still.map((f) => `- ${f.message}`).join('\n')}`);
+        } else err('[ai] recompile matches the test');
+        compiled = retry.result;
+        remaining = still;
+      }
     }
   }
 
@@ -2214,29 +2343,6 @@ export async function obtainPlan(
 // owns the device: its /v1/health platform+serial supersede the client's
 // --platform/--device, and no local driver is ever built.
 
-/**
- * Run a remote read; if it failed AND the server reported it moved device, ask once more.
- *
- * This is the ONE place a failed remote read is re-asked, and the narrowness is the point.
- * It is only ever wired to `preflight` — the connect probe at `vk ai`/`vk suite` startup and
- * the suite's between-tests health check — where nothing has run yet on either device. A
- * mid-flow read is never retried: the new device has none of the state the flow built up, so
- * its screen would answer a different question than the one being asked.
- *
- * Gating on the move (rather than retrying every failure) also keeps the connect probe's
- * fail-fast property: a device that is simply broken still fails on the first try.
- *
- * Exported solely so the unit suite can reach it.
- */
-export async function retryAfterDeviceMove<T>(read: () => T | Promise<T>, moved: () => boolean): Promise<T> {
-  try {
-    return await read();
-  } catch (e) {
-    if (!moved()) throw e;
-    return read();
-  }
-}
-
 interface ResolvedBackend {
   backend: ExecBackend;
   platform: Platform;
@@ -2250,12 +2356,8 @@ interface ResolvedBackend {
   /** Set when the backend is a remote `vk server`. `reads` is absent against a pre-0.21.1
    *  server, which did not report its hierarchy read path. */
   remote?: { url: string; version: string; reads?: HierarchySource };
-  /** Devices the SERVER moved itself onto during this command, oldest first. Live — the
-   *  transport pushes as it goes — so a caller reads it AFTER the work, not before.
-   *  Always empty for a local backend, which has one device by construction. */
-  moves: DeviceChange[];
   /** Devices a pooled server could not install this build onto, and which therefore left its
-   *  pool. Live, like `moves`, and for the same reason: the transport learns it mid-call.
+   *  pool. Live: the transport learns it mid-call.
    *  Always empty for a local backend and for any command that does not install. */
   skipped: InstallSkip[];
 }
@@ -2434,7 +2536,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
           else driver.clearApp(appId);
         },
         preflight: () => driver.preflight(),
-        captureFailure: async () => {
+        captureFailure: async () => withExecDeadline(Date.now() + 20_000, () => {
           // Two independent tries: a screencap can succeed where a dump doesn't (and
           // vice versa), and neither is allowed to derail recording the failure.
           const out: { png?: Buffer; hierarchy?: Element[] } = {};
@@ -2449,7 +2551,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
             /* ditto */
           }
           return out;
-        },
+        }),
       },
       platform,
       device,
@@ -2459,17 +2561,12 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       // have. `touch` is a no-op because `executeOutcome` already stamps the claim on
       // every recorded command, which beats a timer: it fires when work happens.
       grant: processClaimGrant(device, releaseOwnClaims),
-      moves: [],
       skipped: [],
     };
   }
 
   let runCtx: { platform: string; device?: string } = { platform, device };
-  const moves: DeviceChange[] = [];
   const skipped: InstallSkip[] = [];
-  /** Set by the last move; the preflight below reads it to decide whether re-asking is
-   *  warranted, then clears it. */
-  let movedDuringCall: DeviceChange | undefined;
   const opts: RemoteOpts = {
     url: server,
     authKey: flagStr(flags, 'auth-key') || process.env.VERIKUN_SERVER_AUTH_KEY || undefined,
@@ -2479,21 +2576,7 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     onStep: (step, artifacts, logStart) =>
       Recorder.appendForeignStep(step, artifacts, { ...runCtx, logStart }),
     onInstallSkipped: (s) => skipped.push(...s),
-    onDeviceChange: (c) => {
-      moves.push(c);
-      movedDuringCall = c;
-      // Re-point the run context, so steps after the move are attributed to the device
-      // that actually ran them. This makes `rolloverReason` seal the device-A run and
-      // open a fresh one for B — intended: since a step is never replayed, no single run
-      // can contain steps from two devices, and a report that claimed otherwise would lie.
-      runCtx = { ...runCtx, device: c.to };
-      err(
-        `[verikun] server moved device: ${c.from} → ${c.to} (${c.reason})` +
-          (c.retried
-            ? ' — retried there'
-            : ' — this step failed on the old device; the next runs on the new one'),
-      );
-    },
+
   };
   let health = await pingServer(opts); // fails fast (exit 3) on a bad URL or key
   // `--ensure-device` boots BEFORE runCtx is fixed: resolveBackend bakes the serial
@@ -2501,13 +2584,9 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   // attribute every spliced step to a device that didn't exist yet.
   health = await ensureRemoteDevice(health, opts, server, flags);
   const remote = createRemoteBackend(opts, health);
-  // Take this run's device BEFORE runCtx is fixed. Against a pool the client asked for a
-  // URL, so the lease is the ONLY thing that knows which phone it got — and a step
-  // attributed to the wrong device is worse than one attributed to none. Idempotent, and
-  // null against a server that predates pooling (health.serial is the answer there).
-  const lease = await remote.lease();
-  const serial = lease?.serial ?? health.serial ?? undefined;
-  const reads = lease?.reads ?? health.reads;
+  // Compilation precedes leasing. The leased serial is fixed in runCtx below.
+  const serial = health.serial ?? undefined;
+  const reads = health.reads;
   runCtx = { platform: health.platform, device: serial };
   err(
     `[verikun] server ${server}: ${health.platform} · device ${serial ?? '(none)'} · verikun ${health.version}` +
@@ -2528,6 +2607,16 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
   return {
     backend: {
       ...remote,
+      lease: async () => {
+        const acquired = await remote.lease();
+        if (acquired) {
+          const expected = process.env.VERIKUN_EXPECTED_BUILD_SHA;
+          if (expected && (acquired.installedSha ?? '(none)') !== expected) throw new CliError('build changed mid-suite', 3);
+          runCtx = { platform: health.platform, device: acquired.serial };
+          err(`[verikun] leased device ${acquired.serial}${acquired.reads ? ` · reads: ${acquired.reads.path}` : ''}`);
+        }
+        return acquired;
+      },
       // Ping first (URL, key, version), then fetch the hierarchy once. The ping alone
       // is NOT enough as a health probe: /v1/health answers from config captured at
       // server startup and never touches the device, so it cannot see a phone that was
@@ -2535,22 +2624,9 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
       // healthy and keep grinding. One dump is the cheap call that actually proves it.
       preflight: async () => {
         await pingServer(opts);
-        movedDuringCall = undefined;
-        await retryAfterDeviceMove(
-          () => remote.getElements(),
-          () => movedDuringCall !== undefined,
-        );
+        await remote.getElements();
       },
-      // Hierarchy only: the server exposes no screenshot route, so a remote run's
-      // engine failure archives without a picture. Honest degrade over a protocol
-      // change here — tracked in #48.
-      captureFailure: async () => {
-        try {
-          return { hierarchy: await remote.getElements() };
-        } catch {
-          return {};
-        }
-      },
+      captureFailure: remote.captureFailure,
     },
     platform: health.platform,
     device: serial,
@@ -2560,7 +2636,6 @@ async function resolveBackend(platform: Platform, device: string | undefined, fl
     // two teardowns for one lease is how one of them stops being called.
     grant: leaseGrant(remote, serial),
     remote: { url: server, version: health.version, reads },
-    moves,
     skipped,
   };
 }
@@ -2601,6 +2676,33 @@ export function terminalFailure(
     return { where: 'run', reason: `run timeout (${Math.round(opts.timeoutMs / 1000)}s) reached`, kind: 'timeout' };
   }
   return { where: r.failure?.where ?? 'run', reason: r.failure?.reason ?? 'failed', kind: 'fail' };
+}
+
+/**
+ * The result of a test whose compile ended at exit 1 (see `runAiTest`). It has the shape of the
+ * compile-time budget abort there, with no run and no report, plus the cost so far, which a
+ * throw would have dropped. A crossed ceiling is reported as the budget abort it is, so
+ * `vk suite` does not retry it.
+ *
+ * Exported solely so the unit suite can reach it.
+ */
+export function compileFailure(e: CliError, cost: CostTracker): AiRunResult {
+  const budget = cost.exceeded();
+  return {
+    outcome: budget ? 'budget' : 'fail',
+    ok: false,
+    cached: false,
+    costUsd: Number(cost.usd().toFixed(4)),
+    costLine: cost.summaryLine(),
+    modelRepairs: 0,
+    improvements: [],
+    runDir: '',
+    reportHtml: '',
+    junitXml: '',
+    state: null,
+    failure: { where: 'compile', reason: e.message },
+    ...(budget ? { abortedForBudget: true } : {}),
+  };
 }
 
 /** The `[ai] …` console verdict for a terminal failure, phrased as it always was. */
@@ -2662,7 +2764,21 @@ export async function runAiTest(
   const deadline = Date.now() + opts.timeoutMs;
   const provider = makeProvider(opts);
 
-  const { plan, cached } = await obtainPlan(key, file, opts, cost, provider, segments);
+  let obtained: { plan: Plan; cached: boolean };
+  try {
+    obtained = await obtainPlan(key, file, opts, cost, provider, segments);
+  } catch (e) {
+    // A compile that ends at exit 1 is a RESULT at `compile`, not a throw. That covers a plan
+    // rejected twice, one that does not cover its test, a model that refused or truncated, and a
+    // ceiling that stopped the compile. A throw reached `vk suite` as "FAIL at run" with its cost
+    // dropped (issue #158). Nothing ran, so there is no run to archive, and no device was leased.
+    if (!(e instanceof CliError) || e.exitCode !== 1) throw e;
+    const failed = compileFailure(e, cost);
+    err(`[ai] ${failed.abortedForBudget ? 'ABORTED' : 'FAIL at compile'}: ${e.message}`);
+    err(`[ai] estimated total cost: $${cost.usd().toFixed(4)}`);
+    return failed;
+  }
+  const { plan, cached } = obtained;
 
   // Running needs the provider for repair-on-failure; a cache hit with no key can't repair.
   if (!provider) {
@@ -2686,9 +2802,14 @@ export async function runAiTest(
       junitXml: '',
       state: null,
       abortedForBudget: true,
+      outcome: 'budget',
       failure: { where: 'compile', reason: `cost ceiling $${opts.maxCostUsd} reached during compile` },
     };
   }
+
+  // Compilation consumes the run deadline, but no remote device lease.
+  const acquired = await backend.lease?.();
+  device = acquired?.serial ?? device;
 
   // Re-isolate the app BEFORE the run, on the device this process already holds.
   // Deliberately after the compile: it costs no device time to wait, and a test that
@@ -2703,9 +2824,6 @@ export async function runAiTest(
       // request to find out — the one the server marks. That is the server's eviction, not a
       // broken box: a suite re-runs it as a fresh run (#147). Thrown, because no run exists yet
       // to carry a result.
-      if (isEnvError(e) && !(e instanceof RunEvictedError) && backend.wasEvicted?.()) {
-        throw new RunEvictedError(`the device this run was dealt had left the pool: ${(e as Error).message.split('\n')[0]}`);
-      }
       throw e;
     }
     err(`[ai] app state reset (${opts.resetApp})`);
@@ -2748,16 +2866,18 @@ export async function runAiTest(
     // seal the run so it is not left dangling in .verikun/run/ for the next command
     // to roll over. Then let the error map to an exit code as usual.
     Recorder.annotateRun({ ai: { ok: false, cost: cost.summaryLine(), modelRepairs: 0, improvements: [] } });
+    // A phone that dropped off a leaking host adb server names the leak, here and in the report.
+    const leak = deviceDropNote(e, platform, !!backend.lease, adbServerHealth);
     // No evidence capture here: a throw at this level usually IS the device dying, so
     // the capture would fail the same way and only add noise to the error path.
     Recorder.recordTerminalFailure({
       where: 'run',
-      reason: (e as Error).message,
+      reason: leak ? `${(e as Error).message}\n${leak}` : (e as Error).message,
       kind: isEnvError(e as Error) ? 'env' : 'fail',
     });
     let sealed: ReturnType<typeof Recorder.archive> | undefined;
     try {
-      await prefetchArchiveLogs(backend);
+      if (!isDeviceLoss(e) && !(e instanceof RunEvictedError)) await prefetchArchiveLogs(backend);
       sealed = Recorder.archive();
     } catch (sealErr) {
       // Best-effort seal in an error path; surface a failure (the run state may itself be
@@ -2771,8 +2891,9 @@ export async function runAiTest(
     // it reached the suite as a bare error with no report and no device. Still exit 3.
     // An environment throw on a run the server evicted counts too: a worker that died mid-step
     // answers with an error rather than a result, and the server marks that response.
-    if (e instanceof RunEvictedError || (isEnvError(e) && backend.wasEvicted?.())) {
-      const reason = (e as Error).message.split('\n')[0];
+    {
+      const firstLine = (e as Error).message.split('\n')[0];
+      const reason = leak ? `${firstLine} — ${leak}` : firstLine;
       err(`[ai] ABORTED — environment: ${reason}`);
       if (sealed) err(`[ai] report: ${sealed.htmlPath}`);
       return {
@@ -2788,11 +2909,12 @@ export async function runAiTest(
         junitXml: sealed?.xmlPath ?? '',
         state: sealed?.state ?? null,
         failure: { where: 'run', reason },
-        abortedForEnv: true,
-        evicted: true,
+        abortedForEnv: isEnvError(e),
+        outcome: errorOutcome(e),
+        device,
+        ...(isDeviceLoss(e) || e instanceof RunEvictedError ? { evicted: true } : {}),
       };
     }
-    throw e;
   } finally {
     setOutputQuiet(prevQuiet);
   }
@@ -2812,12 +2934,13 @@ export async function runAiTest(
   // never ran through a command, so nothing recorded it — without this the archive
   // declares the failed test green. Must come BEFORE the archive that renders it.
   const terminal = terminalFailure(result, opts);
-  if (terminal) Recorder.recordTerminalFailure(terminal, await backend.captureFailure?.());
+  const lost = result.lostDevice;
+  if (terminal) Recorder.recordTerminalFailure(terminal, lost ? undefined : await backend.captureFailure?.());
 
   Recorder.annotateRun({
     ai: { ok: result.ok, cost: costLine, modelRepairs: result.modelRepairs, improvements: result.improvements },
   });
-  await prefetchArchiveLogs(backend);
+  if (!lost) await prefetchArchiveLogs(backend);
   const { dir, xmlPath, htmlPath, state } = Recorder.archive();
 
   err(`[ai] ${terminal ? terminalStatusLine(terminal) : 'PASS'} · ${costLine}`);
@@ -2829,6 +2952,8 @@ export async function runAiTest(
   err(`[ai] estimated total cost: $${cost.usd().toFixed(4)}`);
 
   return {
+    outcome: result.ok ? 'pass' : lost ? 'lost-device' : result.abortedForBudget ? 'budget' : result.abortedForTimeout ? 'timeout' : result.abortedForEnv ? 'env' : 'fail',
+    device,
     ok: result.ok,
     cached,
     costUsd: Number(cost.usd().toFixed(4)),
@@ -2844,11 +2969,8 @@ export async function runAiTest(
     ...(result.abortedForBudget ? { abortedForBudget: true } : {}),
     ...(result.abortedForTimeout ? { abortedForTimeout: true } : {}),
     ...(result.abortedForEnv ? { abortedForEnv: true } : {}),
-    // The step that was running when the phone vanished failed with the phone's own error, and
-    // the server shed the phone while answering it: the eviction is heard only by the requests
-    // after it (the failure evidence and the log fetch above). Asked now, and only of an
-    // environment abort — an assertion that failed first is a regression whatever happened next.
-    ...(result.abortedForEnv && backend.wasEvicted?.() ? { evicted: true } : {}),
+    // Retain loss evidence for the suite archive; scheduling reads the explicit outcome.
+    ...(lost ? { evicted: true } : {}),
   };
 }
 
@@ -2871,32 +2993,33 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   }
 
   const reqPlatform = platformFromFlags(flags);
-  const { backend, platform, device, grant, moves } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  const { backend, platform, device, grant } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  const removeSignals = releaseOnSignals(() => grant.release());
   let result: AiRunResult;
   try {
     result = await runAiTest(file, opts, backend, platform, device);
   } finally {
     // Undo any device setting the test changed, INCLUDING when it failed part-way —
     // otherwise an unattended run leaves the phone offline or in dark mode.
-    await restoreDeviceOverrides(backend);
+    if (!backend.lease) await restoreDeviceOverrides(backend);
     // Hand the device back — the host claim locally, the server's lease remotely. One
     // call for both, so a teardown cannot get one half right and forget the other.
     await grant.release();
+    removeSignals();
   }
 
   if (flagBool(flags, 'json')) {
     json({
+      outcome: result.outcome,
       ok: result.ok,
       cached: result.cached,
       model: opts.model,
       // Which device actually ran this. Against a POOLED `vk server` the client asks
       // for a url, not a serial, and only the lease answers — so without this a
-      // parallel suite could not attribute a row to the phone that produced it. Where it
-      // ENDED, not where it started: after a mid-run failover the suite's Device column
-      // would otherwise name the phone the test did NOT finish on — wrong in precisely
-      // the case ("is the device bad, or the test?") the column exists to answer.
+      // parallel suite could not attribute a row to the phone that produced it. The lease
+      // fixes that serial for the whole run; device loss ends the run.
       platform,
-      ...(moves.length ? { device: moves[moves.length - 1].to } : device ? { device } : {}),
+      ...(result.device || device ? { device: result.device || device } : {}),
       cost: result.costLine,
       costUsd: result.costUsd,
       modelRepairs: result.modelRepairs,
@@ -2917,6 +3040,9 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
   }
   // An environment failure is exit 3, not 1: the box is broken, not the app. Exit 1
   // here would be indistinguishable from a real regression and page the wrong person.
+  const outcome = result.outcome;
+  if (outcome === 'usage') return 2;
+  if (outcome && ['env', 'lost-device', 'no-device', 'server-unreachable', 'internal'].includes(outcome)) return 3;
   return result.abortedForEnv ? 3 : result.ok ? 0 : 1;
 }
 
@@ -2930,7 +3056,7 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
   const path = resolve(process.cwd(), appPath);
   if (!existsSync(path)) throw new CliError(`install: '${appPath}' does not exist`, 2);
   const platform = platformFromFlags(flags);
-  const { backend, remote, moves, skipped } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
+  const { backend, remote, skipped } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
   err(`[verikun] installing ${appPath}${remote ? ` via ${remote.url}` : ''}…`);
   try {
     await backend.install(path);
@@ -2945,7 +3071,6 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
   // Where it LANDED, not just that it landed: after a failover that is a different
   // device than the one the run started against, and a caller acting on the old serial
   // (`adb -s … shell am start`) would be driving a phone without the build.
-  const moved = moves.length ? moves[moves.length - 1] : undefined;
   // A pooled server may have installed on some devices and dropped the rest. That is a
   // SUCCESS — the ones that missed the build are no longer leasable, so no later lane can
   // run the previous build and report green — but it is not a silent one: capacity changed.
@@ -2953,11 +3078,10 @@ async function cmdInstall(positionals: string[], flags: Flags): Promise<number> 
     json({
       installed: appPath,
       ...(remote ? { server: remote.url } : {}),
-      ...(moved ? { deviceChanged: moved } : {}),
       ...(skipped.length ? { skipped } : {}),
     });
   } else {
-    out(`installed ${appPath}${moved ? ` on ${moved.to}` : ''}`);
+    out(`installed ${appPath}`);
     if (skipped.length) {
       out(`skipped ${skipped.length} device(s), now out of the pool: ${skipped.map((s) => s.serial).join(', ')}`);
     }
@@ -3212,18 +3336,7 @@ function lastLine(stderr: string): string {
   return lines[lines.length - 1] ?? '';
 }
 
-/**
- * Turn a finished `vk ai` child into the `AiRunResult` the suite consumes.
- *
- * THE EXIT CODE IS THE VERDICT, not the JSON: `ok` is `code === 0` and nothing else, so
- * a child that somehow printed a stale success document cannot report a pass. The JSON
- * only supplies detail. `state` is left null here and filled from `<runDir>/run.json` by
- * the caller — keeping this function pure enough to unit-test.
- *
- * Exit 3 is verikun's environment code, and 127 means the child never started at all,
- * which is the same class of problem; both mark the result environment-flavoured so the
- * suite probes the lane instead of blaming the app. Exported for the unit suite.
- */
+/** Read this build's explicit child outcome, preserving report and device attribution. */
 export function laneResult(
   code: number,
   parsed: Record<string, unknown> | null,
@@ -3233,12 +3346,15 @@ export function laneResult(
   const str = (k: string): string | undefined => (typeof parsed?.[k] === 'string' ? (parsed[k] as string) : undefined);
   const num = (k: string): number | undefined => (typeof parsed?.[k] === 'number' ? (parsed[k] as number) : undefined);
   const yes = (k: string): boolean => parsed?.[k] === true;
-  // The two lease outcomes a parallel suite must NOT read as a broken box (#147), both exit 3.
-  // Gated on the code too: the exit code is the verdict, and a kind never overrides it.
-  //  - refused at /v1/lease: the child never started a run, so it is no attempt at all;
-  //  - evicted part-way: usually a result document (the run archived), or a thrown one.
-  const noDevice = code === 3 && str('errorKind') === 'NoFreeDeviceError';
-  const evicted = code === 3 && (yes('evicted') || str('errorKind') === 'RunEvictedError');
+  const supplied = str('outcome');
+  const known = ['pass','fail','env','lost-device','no-device','server-unreachable','usage','budget','timeout','internal'];
+  // Lane children are this same build. A result without its outcome is a protocol
+  // failure; only a child that never produced JSON gets a process-level verdict.
+  const outcome: Outcome = supplied && known.includes(supplied)
+    ? (supplied === 'pass' && code !== 0 ? 'internal' : supplied as Outcome)
+    : parsed ? 'internal' : code === 127 ? 'env' : code === 2 ? 'usage' : 'internal';
+  const noDevice = outcome === 'no-device' || outcome === 'server-unreachable';
+  const evicted = outcome === 'lost-device';
   const raw = parsed?.failure;
   // A budget / timeout / environment abort comes back as a bare FLAG with no `failure`
   // object — the engine returns it that way, and `toSuiteResult` composes its own wording
@@ -3246,17 +3362,19 @@ export function laneResult(
   // stderr line would win that branch and label the row with an unrelated log line
   // (`[ai] estimated total cost: $0.51`), making all three wordings unreachable on a pool
   // while they stayed correct serially.
-  const aborted = yes('abortedForBudget') || yes('abortedForTimeout') || yes('abortedForEnv');
+  const aborted = ['budget','timeout','env','lost-device','no-device','server-unreachable'].includes(outcome);
   const failure =
+    parsed && (!supplied || !known.includes(supplied)) ? {where:'run',reason:'lane result is missing a required outcome'} :
     raw && typeof raw === 'object' && typeof (raw as { reason?: unknown }).reason === 'string'
       ? (raw as { where: string; reason: string })
       : str('error')
         ? { where: 'run', reason: str('error')! }
-        : code !== 0 && !aborted
+        : code !== 0 && (!aborted || !parsed)
           ? { where: 'run', reason: detail || `the test process exited ${code}` }
           : undefined;
   return {
-    ok: code === 0,
+    outcome,
+    ok: code === 0 && outcome === 'pass',
     cached: yes('cached'),
     costUsd: num('costUsd') ?? 0,
     costLine: str('cost') ?? '',
@@ -3277,24 +3395,16 @@ export function laneResult(
     // own serial rather than blanking the column it was added to fill.
     ...(str('device') || lane.device ? { device: str('device') || lane.device } : {}),
     ...(failure ? { failure } : {}),
-    ...(yes('abortedForBudget') ? { abortedForBudget: true } : {}),
-    ...(yes('abortedForTimeout') ? { abortedForTimeout: true } : {}),
-    // `errorKind: 'Error'` means the child threw something that was NOT a CliError — an
-    // internal bug, not a broken box. `mapError` flattens those to exit 3, so without this
-    // check a TypeError in a new code path reads as an environment failure: the suite
-    // probes the lane, finds it healthy, retries, and two in a row retire a perfectly good
-    // device via ENV_STREAK_LIMIT.
-    ...((yes('abortedForEnv') || code === 3 || code === 127) && str('errorKind') !== 'Error' && !noDevice
+    ...(outcome === 'budget' ? { abortedForBudget: true } : {}),
+    ...(outcome === 'timeout' ? { abortedForTimeout: true } : {}),
+    // Internal bugs stay separate from environment failures, regardless of exit code.
+    ...(['env','lost-device'].includes(outcome)
       ? { abortedForEnv: true }
       : {}),
     ...(noDevice ? { noDevice: true } : {}),
     ...(evicted ? { evicted: true } : {}),
-    // Exit 2 is verikun's USAGE code — a flag the child rejected, an unreadable test, a
-    // payload the server refused. The serial path reaches this verdict from the thrown
-    // CliError (`isRetryableThrow`); across a process boundary the throw is only an exit
-    // code, so without this a pooled `--retries 3` spends three more devices re-running a
-    // failure that provably cannot change.
-    ...(code === 2 ? { usageError: true } : {}),
+    // Usage errors stop scheduling; retries cannot fix the same invalid input.
+    ...(outcome === 'usage' ? { usageError: true } : {}),
   };
 }
 
@@ -3309,7 +3419,8 @@ function vkEntry(): string {
 async function runLaneTest(file: string, lane: Lane, flags: Flags, platform: Platform, resetApp?: string): Promise<AiRunResult> {
   const argv = laneArgv(file, lane, flags, { platform, ...(resetApp ? { resetApp } : {}) });
   const { code, stdout, stderr } = await spawnCollect(process.execPath, [vkEntry(), ...argv], {
-    env: laneEnv(lane),
+    env: { ...laneEnv(lane), ...(lane.avoid ? { VERIKUN_AVOID_DEVICE: lane.avoid } : {}), ...(lane.installedSha ? { VERIKUN_EXPECTED_BUILD_SHA: lane.installedSha } : {}) },
+    timeout: parseAiOptions(flags).timeoutMs + 600_000 + 120_000,
     // Prefix, or N tests' progress arrives interleaved and unattributable.
     onStderrLine: (line) => err(`[${lane.label}] ${line}`),
   });
@@ -3336,16 +3447,16 @@ const PREFLIGHT_TIMEOUT_MS = 45_000;
  * device behind a live server is covered instead by the suite's consecutive-failure
  * retirement (ENV_STREAK_LIMIT in suite.ts).
  */
+export function laneProbeHealthy(error: Error): boolean {
+  return error instanceof TransientReadError || (error instanceof CliError && error.exitCode === 1);
+}
+
 async function lanePreflight(lane: Lane, flags: Flags, platform: Platform): Promise<void> {
-  if (lane.server) {
-    await pingServer(remoteOptsFrom(lane.server, flags));
-    return;
-  }
+  if (lane.server) return;
   // `--json`, because under it `mapError` writes the failure to STDOUT as a document
   // carrying `errorKind` — the error's CLASS. That is what the classifier below needs:
   // rebuilding a bare CliError out of a stderr line flattens `NoWindowError` into an
-  // `unknown` verdict, and device/failover.ts's first rule is "identity first, never
-  // message text" precisely because getting this one wrong retires a healthy phone.
+  // `unknown` verdict, and transient hierarchy failures must remain distinct from typed device loss.
   //
   // A short timeout, unlike a lane's test: this is a liveness probe, and a device wedged
   // badly enough not to answer one at all is the very thing it is asking about.
@@ -3360,13 +3471,9 @@ async function lanePreflight(lane: Lane, flags: Flags, platform: Platform): Prom
   const body = lastJsonObject(stdout);
   const message = (typeof body?.error === 'string' && body.error) || lastLine(stderr) || `vk ui exited ${code}`;
   const kind = typeof body?.errorKind === 'string' ? (body.errorKind as ErrorDescriptor['kind']) : 'CliError';
-  // A hierarchy read is the cheapest DEVICE probe available from the CLI, but it asks a
-  // slightly different question than "is this device alive": an app that has not drawn
-  // yet answers with NoWindowError and exit 3, and retiring a lane for that would take a
-  // healthy phone out of the pool for a state that clears in a second. So classify the
-  // failure with the same pure table failover uses rather than trusting the exit code.
-  const verdict = classifyFailure(rebuildError({ kind, name: kind, message, exitCode: code }));
-  if (verdict.kind === 'transient' || verdict.kind === 'app') return;
+  const failure = rebuildError({ kind, name: kind, message, exitCode: code });
+  if (laneProbeHealthy(failure)) return;
+  if (isDeviceLoss(failure)) throw failure;
   throw new CliError(`device ${lane.label} is not answering (${message})`, 3);
 }
 
@@ -3387,7 +3494,7 @@ interface LanePool {
    */
   elastic: boolean;
   /** Only when the whole pool is ONE server, since the manifest field describes one. */
-  server?: { url: string; verikun: string; reads?: string };
+  server?: { url: string; verikun: string; reads?: string; installedSha?: string };
 }
 
 /**
@@ -3410,21 +3517,23 @@ async function buildLanePool(flags: Flags, platform: Platform): Promise<LanePool
     // server, which omits the field) stays exactly today's serial suite.
     const url = serverFromFlags(flags);
     if (!url) return undefined;
-    const health = await pingServer(remoteOptsFrom(url, flags));
+    const remoteOpts = remoteOptsFrom(url, flags);
+    const health = await ensureRemoteDevice(await pingServer(remoteOpts), remoteOpts, url, flags);
     const capacity = health.capacity ?? 1;
-    if (capacity <= 1) return undefined;
+
     err(`[verikun] server ${url} pools ${capacity} devices — running the suite across all of them`);
     return {
-      lanes: Array.from({ length: capacity }, (_, i) => ({
+      lanes: Array.from({ length: Math.max(1, health.deviceStates?.length ?? capacity) }, (_, i) => ({
         id: `d${i + 1}`,
         // The DEVICE is unknown until each lane leases one, so the lane is numbered and
         // every row records the serial the child came back with.
         label: `${serverLabel(url)}#${i + 1}`,
         server: url,
+        installedSha: health.installedSha ?? '(none)',
       })),
       platform: health.platform,
       elastic: false,
-      server: { url, verikun: health.version, ...(health.reads?.path ? { reads: health.reads.path } : {}) },
+      server: { url, verikun: health.version, installedSha: health.installedSha, ...(health.reads?.path ? { reads: health.reads.path } : {}) },
     };
   }
   const urls = [...new Set(lanes.map((l) => l.server).filter((u): u is string => !!u))];
@@ -3432,7 +3541,13 @@ async function buildLanePool(flags: Flags, platform: Platform): Promise<LanePool
 
   // Ping each server once, up front: it fixes the platform, proves reachability before
   // any model spend, and is where a mixed-platform pool is refused.
-  const health = await Promise.all(urls.map(async (url) => ({ url, health: await pingServer(remoteOptsFrom(url, flags)) })));
+  const health: Array<{url: string; health: HealthResponse}> = [];
+  for (const result of await Promise.allSettled(urls.map(async url => ({ url, health: await pingServer(remoteOptsFrom(url, flags)) })))) {
+    if (result.status === 'fulfilled') health.push(result.value);
+    else if (!(result.reason instanceof ServerUnreachableError)) throw result.reason;
+    else err(`[verikun] unavailable server: ${result.reason.message}`);
+  }
+  if (!health.length) throw new ServerUnreachableError('no server in --servers is reachable');
   const platforms = [...new Set(health.map((h) => h.health.platform))];
   if (platforms.length > 1) {
     throw new CliError(
@@ -3453,11 +3568,13 @@ async function buildLanePool(flags: Flags, platform: Platform): Promise<LanePool
   // A POOLED server contributes as many lanes as it has devices. Without this, naming a
   // second pooled host with `--servers a,b` gave 2 lanes across 6 phones — fewer than
   // `--server a` alone, which is the opposite of what adding a host should do.
-  const expanded = lanes.flatMap((l) => {
+  const expanded = lanes.filter(l => !l.server || health.some(h => h.url === l.server)).flatMap((l) => {
     if (!l.server) return [l];
-    const capacity = health.find((h) => h.url === l.server)?.health.capacity ?? 1;
+    const h = health.find(h => h.url === l.server)?.health;
+    const capacity = h?.deviceStates?.length ?? h?.capacity ?? 1;
     return Array.from({ length: Math.max(1, capacity) }, (_, i) => ({
       ...l,
+      installedSha: h?.installedSha ?? '(none)',
       label: capacity > 1 ? `${l.label}#${i + 1}` : l.label,
     }));
   }).map((l, i) => ({ ...l, id: `d${i + 1}` }));
@@ -3466,7 +3583,7 @@ async function buildLanePool(flags: Flags, platform: Platform): Promise<LanePool
     lanes: expanded,
     platform: platforms[0],
     elastic,
-    ...(only ? { server: { url: only.url, verikun: only.health.version, reads: only.health.reads?.path } } : {}),
+    ...(only ? { server: { url: only.url, verikun: only.health.version, installedSha: only.health.installedSha, reads: only.health.reads?.path } } : {}),
   };
 }
 
@@ -3482,8 +3599,8 @@ async function buildLanePool(flags: Flags, platform: Platform): Promise<LanePool
  */
 async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): Promise<number> {
   const { platform } = pool;
-  if (ensureDeviceTarget(flags) !== null) {
-    // Refused on EVERY pool path, not just `--devices`. The parallel suite builds no
+  if (ensureDeviceTarget(flags) !== null && !serverFromFlags(flags)) {
+    // Refused for explicit pools, not just `--devices`. The parallel suite builds no
     // backend of its own, so nothing would consume the flag: `resolveBackend` — the only
     // place `ensureLocalDevice`/`ensureRemoteDevice` are called — is never reached, and
     // `SUITE_ONLY_FLAGS` strips it from the children. Accepting it would boot nothing
@@ -3517,6 +3634,7 @@ async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): P
    * exist to prevent.
    */
   const grants: DeviceGrant[] = [];
+  const removeSignals = releaseOnSignals(() => releaseGrants(grants));
   try {
     return await cmdSuite(dirArg, flags, {
       platform,
@@ -3532,19 +3650,6 @@ async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): P
       claimLanes: (used) => grantLanes(used, platform, pool.elastic, grants),
       runTest: (file, lane) => runLaneTest(file, lane, flags, platform, app),
       preflight: (lane) => lanePreflight(lane, flags, platform),
-      // Is a phone free for this server lane? Asked of /v1/health, which leases nothing: a
-      // lease request that finds nothing free lets the server take over a sibling lane's
-      // quiet lease (see SuiteDeps.serverSlots). A server that does not answer is left for
-      // the lane's own child to report, exactly as before.
-      serverSlots: async (lane) => {
-        if (!lane.server) return undefined;
-        try {
-          const health = await pingServer(remoteOptsFrom(lane.server, flags));
-          return { capacity: health.capacity ?? 1, note: poolNote(health) };
-        } catch {
-          return undefined;
-        }
-      },
       // `reset` is deliberately NOT wired: against a pooled server a reset issued from
       // here would take its own lease and could land on a different device than the test
       // that follows. `vk ai --reset-app` does it inside the test's own lease instead.
@@ -3555,6 +3660,7 @@ async function cmdSuiteParallel(dirArg: string, flags: Flags, pool: LanePool): P
     // VERIKUN_NO_CLAIM=1 and have none. A prepped device needs nothing further — prep
     // leaves it a short display timeout, so it sleeps by itself once the lanes stop.
     await releaseGrants(grants);
+    removeSignals();
   }
 }
 
@@ -3579,7 +3685,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
   const pool = await buildLanePool(flags, reqPlatform);
   if (pool) return cmdSuiteParallel(dirArg, flags, pool);
 
-  const { backend, platform, device, grant, remote, moves } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
+  const { backend, platform, device, grant, remote } = await resolveBackend(reqPlatform, deviceFromFlags(flags, reqPlatform), flags);
   const app = flagStr(flags, 'app');
   if (app) assertSafeAppId(app);
   try {
@@ -3587,7 +3693,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
       platform,
       // A thunk: the server may fail over mid-suite, and the manifest should name where
       // the suite ENDED, exactly as `vk ai --json` does for a single test.
-      device: () => (moves.length ? moves[moves.length - 1].to : device),
+      device: () => device,
       ...(remote
         ? { server: { url: remote.url, verikun: remote.version, reads: remote.reads?.path } }
         : {}),
@@ -3598,7 +3704,7 @@ async function cmdSuiteEntry(positionals: string[], flags: Flags): Promise<numbe
       preflight: () => backend.preflight?.(),
     });
   } finally {
-    await restoreDeviceOverrides(backend);
+    if (!backend.lease) await restoreDeviceOverrides(backend);
     await grant.release();
   }
 }
@@ -3705,22 +3811,42 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
 /** Map a thrown error to an exit code, emitting it as text or JSON per --json. */
 function mapError(e: unknown, flags: Flags): number {
   if (e instanceof CliError) {
+    // isDeviceDrop first: the error mapper must never be what throws.
+    const note = isDeviceDrop(e) ? deviceDropNote(e, platformFromFlags(flags), !!serverFromFlags(flags), adbServerHealth) : undefined;
+    const message = note ? `${e.message}\n  ${note}` : e.message;
     // `errorKind` carries the error's CLASS across the process boundary, the same job
     // rpc.ts's codec does across the HTTP one. A child's stderr is prose, and rebuilding
     // a bare CliError from it flattens `NoWindowError` into an unknown — which is exactly
     // how a healthy phone mid-launch gets retired from a lane pool (see lanePreflight).
-    if (flagBool(flags, 'json')) json({ error: e.message, exitCode: e.exitCode, errorKind: describeError(e).kind });
-    else err(e.message);
+    if (flagBool(flags, 'json')) json({ outcome: errorOutcome(e), error: message, exitCode: e.exitCode, errorKind: describeError(e).kind });
+    else err(message);
     return e.exitCode;
   }
   // `--json` everywhere, including errors — an UNEXPECTED throw most of all. A caller that
   // set --json once and parses stdout would otherwise get a document for every failure
   // except the one it least expects. This is also the only way `errorKind: 'Error'` is
   // produced: every other kind subclasses CliError and is answered above.
-  if (flagBool(flags, 'json')) json({ error: (e as Error).message, exitCode: 3, errorKind: describeError(e as Error).kind });
+  if (flagBool(flags, 'json')) json({ outcome: errorOutcome(e), error: (e as Error).message, exitCode: 3, errorKind: describeError(e as Error).kind });
   else err('Unexpected error: ' + (e as Error).message);
   if (process.env.VERIKUN_DEBUG) err((e as Error).stack ?? '');
   return 3;
+}
+
+/**
+ * The line naming a leaking host adb server, for a failure where a device dropped off it.
+ * Local Android only: a device behind `vk server` sits behind ANOTHER host's adb, which this
+ * host's health says nothing about. `measure` runs only on that path, because it costs ~1.5s
+ * and only a dropped device needs it.
+ *
+ * Exported solely so the unit suite can reach it.
+ */
+export function deviceDropNote(
+  e: unknown,
+  platform: Platform,
+  remote: boolean,
+  measure: () => AdbServerHealth,
+): string | undefined {
+  return isDeviceDrop(e) && platform === 'android' && !remote ? leakNote(measure()) : undefined;
 }
 
 /** The driver's serial, or undefined when it cannot be resolved — the command handler is
@@ -3815,7 +3941,8 @@ export async function executeForServer(
   flags: Flags,
   driver: Driver,
   platform: Platform,
-): Promise<{ code: number; error?: Error; step?: RunStep; artifacts?: Record<string, Buffer>; logStart?: string }> {
+  sampleDeviceTime = true,
+): Promise<{ code: number; error?: Error; step?: RunStep; artifacts?: Record<string, Buffer>; logStart?: string; originals?: Record<string, string> }> {
   const serial = tryResolvedSerial(driver);
   // A server holds one device for its whole life, but its claim still has to look alive
   // to everyone else on the host — refresh it per request, the same as a local step.
@@ -3825,7 +3952,7 @@ export async function executeForServer(
   // just means archive / vk log fall back to last-N.
   let logStart: string | undefined;
   try {
-    const t = driver.deviceTime();
+    const t = sampleDeviceTime ? driver.deviceTime() : undefined;
     if (t) logStart = t;
   } catch {
     /* device clock unavailable */
@@ -3834,7 +3961,8 @@ export async function executeForServer(
   const ctx: Ctx = { driver, platform, device: serial, positionals, flags, record: recorder };
   const outcome = await runRecorded(command, ctx, recorder, driver);
   const { step, artifacts } = recorder.takeEphemeral();
-  return { ...outcome, step, artifacts, ...(logStart ? { logStart } : {}) };
+  const originals = recorder.deviceOverrides();
+  return { ...outcome, step, artifacts, ...(logStart ? { logStart } : {}), ...(Object.keys(originals).length ? { originals } : {}) };
 }
 
 /**
@@ -4068,12 +4196,12 @@ SERVER (expose a locally-connected device to remote verikun clients)
   the flag the server also starts even when no device is attached, so a client can
   boot one: \`vk devices start|stop|restart [name] --server <url>\`, or add
   --ensure-device[=name] to ai/suite/install to boot once before the first step.
-  Failover is ON by default: if the bound device cannot serve a request, the server
-  moves to another attached, healthy, unclaimed one and rules the bad one out until it
-  is power-cycled. An install is retried there; a mid-run step is NOT — it fails on the
-  device it ran on, and the next request lands on the healthy one. Passing --device
-  pins the binding and turns this off; --allow-failover[=serials] turns it back on (and
-  bounds where it may go), --no-failover / VERIKUN_NO_FAILOVER disables it outright.
+  Spare recruitment is ON by default for an unpinned single-device server. A failed
+  device loses its lease and readmits after recovery; a suite reruns the whole test
+  on a healthy device without spending a retry. Passing --device pins the binding.
+  --allow-failover[=serials] bounds spare recruitment; --no-failover or
+  VERIKUN_NO_FAILOVER disables recruitment. Health checks and readmission continue.
+  Remote clients and servers must support held leases and server-owned device health.
 
 ENVIRONMENT
   devices [--all] [--json]            List attached devices/simulators, and which job is
@@ -4083,10 +4211,13 @@ ENVIRONMENT
         [--timeout dur] [--no-wait]   running = a no-op. --wipe erases its data first
   devices stop <name|serial>          Shut a running emulator/simulator down
   devices restart <name> [--wipe]     Stop then boot (use for a wedged/flaky device)
-  doctor [--fix]                      Diagnose adb/device, and warn if this CLI or the
+  doctor [--fix] [--restart-adb]      Diagnose adb/device, and warn if this CLI or the
                                       Claude Code plugin is out of date (a warning only —
                                       it never changes the exit code). --fix disables
-                                      animations. VERIKUN_NO_UPDATE_CHECK skips the check
+                                      animations. --restart-adb restarts a leaking adb
+                                      server (measured on macOS) unless another job or
+                                      process is using adb, and names what is.
+                                      VERIKUN_NO_UPDATE_CHECK skips the check
   companion <status|stop> [--json]    On-device hierarchy reader (Android, on by default;
                                       VERIKUN_COMPANION=0 opts out)
   Note: \`devices stop\` powers a DEVICE off; \`stop <appId>\` force-stops an APP, and
@@ -4157,4 +4288,18 @@ iOS (--ios): full parity via idb — ui/tap/text/swipe/key + screenshot/launch/s
   Caveats: no \`clear\` (no per-app reset), \`current\` is (unknown), device logs are simulator-only.
   \`device set\`: dark + font-scale work on a SIMULATOR (font-scale maps to the nearest
   Dynamic Type category); airplane and rotation are unsupported — run \`vk device caps --ios\`.`;
+}
+
+/** Graceful cancel releases grants even when the caller leaves between requests. */
+function releaseOnSignals(release: () => Promise<unknown> | unknown): () => void {
+  const handlers = (['SIGINT', 'SIGTERM'] as const).map(signal => {
+    const handler = (): void => {
+      const code = signal === 'SIGINT' ? 130 : 143;
+      const timer = setTimeout(() => process.exit(code), 2000); timer.unref();
+      void Promise.resolve(release()).finally(() => { clearTimeout(timer); process.exit(code); });
+    };
+    process.once(signal, handler);
+    return {signal, handler};
+  });
+  return () => { for (const {signal, handler} of handlers) process.removeListener(signal, handler); };
 }

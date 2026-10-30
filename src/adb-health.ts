@@ -7,12 +7,8 @@
  * of CPU on the error loop. `adb kill-server && adb start-server` took it to zero and every
  * device came back in ~5s.
  *
- * WHY VERIKUN CARES, rather than leaving this to the operator: adb rot DEFEATS DEVICE
- * FAILOVER. `device/failover.ts` moves the server off a device that fails, but every
- * candidate sits behind the same host adb — so when the transport is what broke, failover
- * walks the pool retiring healthy phones for a host-side fault. That is the same polarity
- * error `ARTIFACT_RULES` exists to prevent on the install path: enumerate the thing you can
- * actually attribute, and never blame the open-ended side.
+ * A host transport failure affects every device behind adb. The server supervises
+ * correlated losses together and recycles under a host lock, excluding foreign claims.
  *
  * THE RATE IS A LEAKED-HANDLE COUNTER, which is what makes this measurable rather than
  * guessed. adb scans USB at ~1Hz and each STALE device handle throws one violation per
@@ -29,7 +25,9 @@
  * and every caller degrades to doing nothing — never to a blind restart.
  */
 
+import { statSync } from 'node:fs';
 import { platform } from 'node:os';
+import { basename } from 'node:path';
 import type { ToolProbe } from './types';
 import { runText } from './exec';
 
@@ -95,9 +93,14 @@ export function parseEtime(raw: string): number | undefined {
  * It ALWAYS prints a `Timestamp Ty Process[PID:TID]` header, so a naive line count reports
  * 1 on a perfectly healthy host — which would make every caller cry rot forever. Counting
  * only lines that name adb is both the fix and a second guard on the predicate.
+ *
+ * With `pid`, only THAT server's lines count. The window outlives a restart by two minutes, and
+ * the predecessor's violations would otherwise read the fresh server as leaking — evidence about
+ * a process that no longer exists, which `vk doctor --restart-adb` would act on.
  */
-export function countViolations(stdout: string): number {
-  return stdout.split('\n').filter((l) => l.includes('[adb:')).length;
+export function countViolations(stdout: string, pid?: number): number {
+  const mark = pid === undefined ? '[adb:' : `[adb:${pid}]`;
+  return stdout.split('\n').filter((l) => l.includes(mark)).length;
 }
 
 /**
@@ -112,12 +115,33 @@ export function adbServerRotting(health: AdbServerHealth): boolean {
   return (health.violations ?? 0) > 0;
 }
 
+/** `~60 kernel guard violations/min, up 152h` — the evidence, in the units a reader compares. */
+function rotFigures(health: AdbServerHealth): string {
+  const perMin = Math.round((health.violations! / (health.windowMs ?? VIOLATION_WINDOW_MS)) * 60_000);
+  const age = health.ageMs !== undefined ? `, up ${Math.floor(health.ageMs / 3_600_000)}h` : '';
+  return `~${perMin} kernel guard violations/min${age}`;
+}
+
 /** One line a human can act on, or undefined when there is nothing worth saying. */
 export function describeRot(health: AdbServerHealth): string | undefined {
   if (!adbServerRotting(health)) return undefined;
-  const perMin = Math.round((health.violations! / (health.windowMs ?? VIOLATION_WINDOW_MS)) * 60_000);
-  const age = health.ageMs !== undefined ? `, up ${Math.floor(health.ageMs / 3_600_000)}h` : '';
-  return `adb server is leaking USB handles (~${perMin} kernel guard violations/min${age}) — devices will drop`;
+  return `adb server is leaking USB handles (${rotFigures(health)}) — devices will drop`;
+}
+
+/**
+ * The line a device-drop failure gains on a leaking host, or undefined.
+ *
+ * A phone that left adb mid-flow reads as a broken phone or a broken test, and the reader goes
+ * looking at both. When the host's adb server is leaking, it is the likelier cause, and the
+ * remedy is the guarded restart — never a bare `kill-server`, which would cut off every other
+ * job on the host.
+ */
+export function leakNote(health: AdbServerHealth): string | undefined {
+  if (!adbServerRotting(health)) return undefined;
+  return (
+    `likely cause: this host's adb server is leaking USB handles (${rotFigures(health)}), which drops devices — ` +
+    '`vk doctor --restart-adb` restarts it once nothing else is using adb'
+  );
 }
 
 /**
@@ -131,11 +155,11 @@ export function describeRot(health: AdbServerHealth): string | undefined {
  * exactly, for the rare host running other adb work alongside the server.
  */
 export function adbRecycleEnabled(platform: string): boolean {
-  return platform === 'android' && process.env.VERIKUN_NO_ADB_RECYCLE !== '1';
+  return platform === 'android' && !process.env.VERIKUN_NO_ADB_RECYCLE;
 }
 
 /** The running adb server's pid. Undefined when there is none, or when `pgrep` is absent. */
-function adbServerPid(): number | undefined {
+export function adbServerPid(): number | undefined {
   try {
     // `adb -L tcp:5037 fork-server server` is the canonical argv; match loosely so a
     // non-default port or an ADB_SERVER_SOCKET still resolves.
@@ -157,6 +181,21 @@ function processAgeMs(pid: number): number | undefined {
   }
 }
 
+/** Guard violations `pid` threw in the last `windowMs`; undefined where that cannot be measured
+ *  (not macOS, or the query failed) — no opinion, not a failure. */
+export function serverViolations(pid: number, windowMs: number): number | undefined {
+  if (platform() !== 'darwin') return undefined;
+  try {
+    const secs = Math.max(1, Math.round(windowMs / 1000));
+    const r = runText(LOG_BIN, ['show', '--last', `${secs}s`, '--style', 'compact', '--predicate', VIOLATION_PREDICATE], {
+      timeout: 20000,
+    });
+    return r.code === 0 ? countViolations(r.stdout, pid) : undefined;
+  } catch {
+    return undefined; // log(1) missing, sandboxed, or slow
+  }
+}
+
 /**
  * Survey the host's adb server. Never throws: every probe is wrapped, and an unavailable
  * signal comes back `undefined` so callers do nothing rather than something wrong.
@@ -164,17 +203,9 @@ function processAgeMs(pid: number): number | undefined {
 export function adbServerHealth(windowMs = VIOLATION_WINDOW_MS): AdbServerHealth {
   const pid = adbServerPid();
   const health: AdbServerHealth = { pid, ageMs: pid ? processAgeMs(pid) : undefined };
-  if (platform() !== 'darwin' || !pid) return health;
-  try {
-    const secs = Math.max(1, Math.round(windowMs / 1000));
-    const r = runText(LOG_BIN, ['show', '--last', `${secs}s`, '--style', 'compact', '--predicate', VIOLATION_PREDICATE], {
-      timeout: 20000,
-    });
-    if (r.code !== 0) return health;
-    return { ...health, violations: countViolations(r.stdout), windowMs };
-  } catch {
-    return health; // log(1) missing, sandboxed, or slow — no opinion, not a failure
-  }
+  if (!pid) return health;
+  const violations = serverViolations(pid, windowMs);
+  return violations === undefined ? health : { ...health, violations, windowMs };
 }
 
 /**
@@ -190,7 +221,7 @@ export function adbHealthProbe(health = adbServerHealth()): ToolProbe | null {
     ok: true,
     advisory: true,
     detail,
-    hint: 'restart it: `adb kill-server && adb start-server` (safe; devices reconnect in a few seconds)',
+    hint: 'restart it: `vk doctor --restart-adb` (only while nothing else is using adb; devices reconnect in a few seconds)',
   };
 }
 
@@ -199,14 +230,259 @@ export function adbHealthProbe(health = adbServerHealth()): ToolProbe | null {
  *
  * HOST-GLOBAL and therefore never called speculatively — `kill-server` drops every
  * transport on the machine, including devices this process does not own. Callers must have
- * evidence (`adbServerRotting`) and, on the server, an idle pool.
+ * evidence (`adbServerRotting`) and nothing else using adb (`adbServerPeers` + the claims).
  */
-export function recycleAdbServer(adb: string): boolean {
+export function recycleAdbServer(adb: string, like: { allInterfaces?: boolean; usbBackend?: string } = {}): boolean {
   try {
     runText(adb, ['kill-server'], { timeout: 20000 });
-    const r = runText(adb, ['start-server'], { timeout: 30000 });
+    // Started as the old one was: `-a` keeps remote clients able to reach it, and the backend is
+    // carried explicitly so the asker's environment cannot swap it.
+    const backend = like.usbBackend === 'LIBUSB' ? '1' : like.usbBackend === 'NATIVE' ? '0' : undefined;
+    const r = runText(adb, [...(like.allInterfaces ? ['-a'] : []), 'start-server'], {
+      timeout: 30000,
+      ...(backend ? { env: { ...process.env, ADB_LIBUSB: backend } } : {}),
+    });
     return r.code === 0;
   } catch {
     return false; // never a new way to fail: the caller logs and carries on
   }
+}
+
+// --- who else is using adb? -------------------------------------------------
+//
+// A restart cuts every connection the server holds, and claims only cover verikun's own jobs.
+// Android Studio, scrcpy, an `adb logcat` in a terminal, a tool tunnelled through `adb reverse`
+// — each holds a TCP connection to (or from) the adb server for as long as it is working, so
+// the server's own socket table is the one list that names all of them.
+
+/** One TCP socket as `lsof -F pcnT` lists it. `remote` is absent on a listener. */
+export interface TcpSocket {
+  pid: number;
+  command: string;
+  local: string;
+  remote?: string;
+  state?: string;
+}
+
+/** Something other than a device holding a live connection to the adb server. No `pid` means
+ *  a local process lsof could not see into (another user's) — still somebody, so it counts. */
+export interface AdbPeer {
+  pid?: number;
+  command?: string;
+  /** The far end of the server's socket — what to look for if the pid is unknown. */
+  endpoint: string;
+}
+
+/**
+ * Parse `lsof -nP -iTCP -F pcnT`. Field output is one field per line, keyed by its first letter:
+ * `p` opens a process, `c` names it, `f` opens one of its files, `n` is that file's address
+ * (`local->remote`, or just `local` for a listener) and `T` carries TCP detail, of which only
+ * `ST=` (the state) matters here.
+ */
+export function parseLsofSockets(stdout: string): TcpSocket[] {
+  const sockets: TcpSocket[] = [];
+  let pid = 0;
+  let command = '';
+  let current: TcpSocket | undefined;
+  for (const line of stdout.split('\n')) {
+    const value = line.slice(1);
+    switch (line[0]) {
+      case 'p':
+        pid = Number(value);
+        command = '';
+        current = undefined;
+        break;
+      case 'c':
+        command = value;
+        break;
+      case 'f':
+        current = undefined;
+        break;
+      case 'n': {
+        if (!(pid > 0)) break;
+        const [local, remote] = value.split('->');
+        current = { pid, command, local, ...(remote ? { remote } : {}) };
+        sockets.push(current);
+        break;
+      }
+      case 'T':
+        if (current && value.startsWith('ST=')) current.state = value.slice(3);
+        break;
+    }
+  }
+  return sockets;
+}
+
+function splitEndpoint(endpoint: string): { host: string; port: number } {
+  const i = endpoint.lastIndexOf(':');
+  return { host: endpoint.slice(0, i).replace(/^\[|\]$/g, ''), port: Number(endpoint.slice(i + 1)) };
+}
+
+const isLoopback = (host: string): boolean =>
+  host === 'localhost' || host === '::1' || host.startsWith('127.') || host.startsWith('::ffff:127.');
+
+/**
+ * The local TCP port of the adb server this environment talks to — or undefined when that server
+ * is not a local TCP one: a unix socket (`ADB_SERVER_SOCKET=localfilesystem:…`), whose clients
+ * lsof cannot see, or ANOTHER host (`ADB_SERVER_SOCKET=tcp:box:5037`, `ANDROID_ADB_SERVER_ADDRESS`).
+ * The evidence and the connection check read this host, while `kill-server` follows the
+ * environment, so a remote server would be judged by one machine and killed on another.
+ */
+export function adbServerPort(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const local = (host: string | undefined): boolean => !host || isLoopback(host.replace(/^\[|\]$/g, ''));
+  if (env.ADB_SERVER_SOCKET) {
+    const m = /^tcp:(?:(.*):)?(\d+)$/.exec(env.ADB_SERVER_SOCKET);
+    return m && local(m[1]) ? Number(m[2]) : undefined;
+  }
+  if (!local(env.ANDROID_ADB_SERVER_ADDRESS)) return undefined;
+  const port = Number(env.ANDROID_ADB_SERVER_PORT || 5037);
+  return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+/**
+ * Every process with a live connection to the adb server except this one and the devices.
+ *
+ * A socket is classified by the SERVER's side of it, never by process name:
+ *
+ * - ACCEPTED on one of the server's own listeners (the adb port, or a forward) — a client, from
+ *   whatever address: an `adb -a` server takes clients from other hosts, and a dual-stack
+ *   client can arrive IPv4-mapped.
+ * - DIALLED by the server — a device, unless it is a local process: a non-loopback far end is a
+ *   wireless device, and a loopback one on `devicePorts` is an emulator's adb port
+ *   (`emulator-5554` answers on 5555). Anything else local is a tool behind `adb reverse`.
+ *
+ * The far end's owner is found by its mirrored address pair. One we cannot attribute still
+ * counts while the connection is ESTABLISHED (an unseen user is still a user), but not in
+ * teardown, where an unowned end means the client is already gone. The server dialling ITSELF
+ * happens only through `adb reverse tcp:<adb port> …` — something on the phone is using the
+ * host's adb — so it counts too, once, on its accepted side.
+ *
+ * Returns undefined unless `serverPid` is the process listening on `adbPort`: with none (a unix
+ * socket, another user's server) "nothing listed" would read as "nobody connected", and with two
+ * servers the gate would inspect one process while `kill-server` hits the other.
+ */
+export function adbServerPeers(
+  sockets: TcpSocket[],
+  serverPid: number,
+  opts: { selfPid: number; devicePorts: number[]; adbPort: number | undefined },
+): AdbPeer[] | undefined {
+  const server = sockets.filter((s) => s.pid === serverPid);
+  const listening = new Set(server.filter((s) => !s.remote).map((s) => splitEndpoint(s.local).port));
+  if (opts.adbPort === undefined || !listening.has(opts.adbPort)) return undefined;
+  const peers: AdbPeer[] = [];
+  const seen = new Set<number>();
+  for (const s of server) {
+    if (!s.remote) continue;
+    const owner = sockets.find((o) => o.local === s.remote && o.remote === s.local);
+    const far = splitEndpoint(s.remote);
+    const accepted = listening.has(splitEndpoint(s.local).port);
+    if (owner?.pid === serverPid) {
+      if (accepted) peers.push({ command: 'a device-side client through adb reverse', endpoint: s.remote });
+      continue;
+    }
+    if (owner?.pid === opts.selfPid) continue;
+    if (!accepted && (!isLoopback(far.host) || opts.devicePorts.includes(far.port))) continue;
+    if (!owner) {
+      if (!s.state || s.state === 'ESTABLISHED') peers.push({ endpoint: s.remote });
+      continue;
+    }
+    if (seen.has(owner.pid)) continue;
+    seen.add(owner.pid);
+    peers.push({ pid: owner.pid, command: owner.command, endpoint: s.remote });
+  }
+  return peers;
+}
+
+/** Whether the server listens beyond loopback — it was started with `adb -a`, and a restart
+ *  must keep that or every remote client loses it. */
+export function listensBeyondLoopback(sockets: TcpSocket[], serverPid: number, adbPort: number): boolean {
+  return sockets.some((s) => {
+    if (s.pid !== serverPid || s.remote) return false;
+    const { host, port } = splitEndpoint(s.local);
+    return port === adbPort && !isLoopback(host);
+  });
+}
+
+/** What `adb server-status` (adb 36+) says the running server was started as. Both fields are
+ *  absent on an older adb, which has no such command. */
+export function parseServerStatus(stdout: string): { executable?: string; usbBackend?: string } {
+  const executable = /^executable_absolute_path:\s*"([^"]+)"/m.exec(stdout)?.[1];
+  const usbBackend = /^usb_backend:\s*(\S+)/m.exec(stdout)?.[1];
+  return { ...(executable ? { executable } : {}), ...(usbBackend ? { usbBackend } : {}) };
+}
+
+/**
+ * Is `path` an adb this user may run on the running server's say-so?
+ *
+ * The path comes from whatever answers on the adb port, so it is checked before it is executed:
+ * an `adb` that exists, is executable, belongs to this user or root and nobody else can rewrite.
+ * It also fails safe on the common case — `brew upgrade` deletes the Caskroom directory a
+ * days-old server was started from, and running a missing path would fail the restart after
+ * the old server was already asked to quit.
+ */
+export function trustedAdbBinary(
+  path: string,
+  stat: (p: string) => { isFile: boolean; mode: number; uid: number } | undefined,
+  uid: number,
+): boolean {
+  if (basename(path) !== 'adb') return false;
+  const st = stat(path);
+  return !!st && st.isFile && (st.mode & 0o111) !== 0 && (st.mode & 0o022) === 0 && (st.uid === uid || st.uid === 0);
+}
+
+/**
+ * Who else is connected to the adb server right now, via `lsof` (~50ms). Undefined when that
+ * cannot be seen — lsof missing, or the server's sockets invisible to this user — which a caller
+ * must treat as "maybe somebody", never as "nobody".
+ */
+export function adbServerConnections(
+  serverPid: number,
+  devicePorts: number[],
+): { peers: AdbPeer[]; allInterfaces: boolean } | undefined {
+  const adbPort = adbServerPort();
+  let stdout: string;
+  try {
+    // `+c 0` gives full process names rather than 9 characters, and process NAMES only: a
+    // refusal is read into agent transcripts, and other processes' argv can carry tokens.
+    // Exit 1 means "nothing matched" as well as "failed", so the parsed sockets decide.
+    stdout = runText('lsof', ['+c', '0', '-nP', '-iTCP', '-F', 'pcnT'], { timeout: 10_000 }).stdout;
+  } catch {
+    return undefined;
+  }
+  const sockets = parseLsofSockets(stdout);
+  const peers = adbServerPeers(sockets, serverPid, { selfPid: process.pid, devicePorts, adbPort });
+  return peers && { peers, allInterfaces: listensBeyondLoopback(sockets, serverPid, adbPort!) };
+}
+
+/**
+ * The binary and USB backend the running adb server was started with, so a restart brings back
+ * the same adb rather than whichever one is first on PATH. A host can carry two — an SDK one and
+ * a Homebrew one — and they differ in version and in default USB backend (platform-tools 37.0.1
+ * moved macOS back to the native one). Falls back to `adb`, backend unknown, when the server
+ * cannot say (adb older than 36 has no `server-status`) or names a binary it may not run.
+ */
+export function adbServerStatus(adb: string): { executable: string; usbBackend?: string; refused?: string } {
+  let status: { executable?: string; usbBackend?: string } = {};
+  try {
+    const r = runText(adb, ['server-status'], { timeout: 10_000 });
+    if (r.code === 0) status = parseServerStatus(r.stdout);
+  } catch {
+    /* no opinion: the fallbacks below */
+  }
+  const uid = process.getuid?.() ?? -1;
+  const stat = (p: string) => {
+    try {
+      const st = statSync(p);
+      return { isFile: st.isFile(), mode: st.mode, uid: st.uid };
+    } catch {
+      return undefined;
+    }
+  };
+  const trusted = !!status.executable && trustedAdbBinary(status.executable, stat, uid);
+  return {
+    executable: trusted ? status.executable! : adb,
+    ...(status.usbBackend ? { usbBackend: status.usbBackend } : {}),
+    // Said, not swallowed: the restart is then NOT of the binary the server ran from.
+    ...(status.executable && !trusted ? { refused: status.executable } : {}),
+  };
 }

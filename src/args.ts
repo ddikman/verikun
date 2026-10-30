@@ -44,6 +44,7 @@ const BOOLEAN = new Set([
   'ios',
   'android',
   'fix',
+  'restart-adb',
   'no-wait',
   'no-scroll',
   'full',

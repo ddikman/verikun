@@ -16,7 +16,7 @@ does the work:
 
 | Phase | Model calls | Bounded by |
 |---|---|---|
-| **Compile** — prose → plan IR | 1 on a cache miss, plus 1 if the plan lint asks for a guided retry | `--max-cost-usd` |
+| **Compile** — prose → plan IR | 1 on a cache miss, plus 1 if the plan is invalid or the lint asks for a guided retry | `--max-cost-usd` |
 | **Repair** — a step's selector stopped resolving | up to 3 per failing step | `--max-cost-usd`, `--timeout` |
 | **Replay** — running the plan on the device | **none** — always `$0` | — |
 
@@ -37,9 +37,10 @@ things cause a miss:
 | `--recompile` / `--no-cache` | Skips the read outright. |
 | No cache on disk | A fresh CI runner has no `./.verikun/plans/` — see [the cold cache](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache). |
 
-The **lint retry** can add a second call: after compiling, verikun checks the plan against the
-prose, and one finding triggers exactly one guided recompile. It is skipped if the budget is
-already spent, in which case the first plan is kept rather than paying for a better one.
+The **guided retry** can add a second call: a plan the validator rejects, or one the lint finds
+does not match the prose, triggers exactly one recompile. For a lint finding it is skipped if the
+budget is already spent, and the first plan is kept rather than paying for a better one; an
+invalid plan has nothing to keep, so the test stops at compile instead.
 
 Two spenders that surprise people:
 
@@ -74,8 +75,9 @@ Four things about that formula are not visible from the outside:
 - **Cache read is `0.1 ×` the input rate**, except `gpt-4.1` at `0.25 ×`.
 - **`--effort` raises cost through the *output* rate** (reasoning tokens bill as completion
   tokens); it has no effect on `gpt-4.1` or the CLI backends.
-- **It is an estimate, and it under-counts**: a retried attempt and a response without a usage
-  block both count as zero. The repair cap and `--timeout` keep that bounded.
+- **It is an estimate, and it under-counts**: a retried attempt, a refused or truncated
+  response, and a response without a usage block all count as zero. The repair cap and
+  `--timeout` keep that bounded.
 
 ## Where the rates come from
 
@@ -120,8 +122,8 @@ test's ceiling, because the check happens after a test finishes rather than mid-
 ### When it is checked
 
 The budget is a **pre-spend** gate: it is tested before each further compile of a multi-chunk
-test, before the lint retry (which is skipped rather than failed), after compile but before the
-device run, and before each repair attempt. Because the check happens *before* a call, the actual
+test, before the guided retry (skipped rather than failed after a lint finding), after compile
+but before the device run, and before each repair attempt. Because the check happens *before* a call, the actual
 spend can overshoot the ceiling by up to one call. It is never checked during replay, because
 replay never spends.
 
@@ -150,7 +152,7 @@ compile=$0.0184 · repairs=$0.0000 · replay=$0 · cache_read=12043 tok · est $
 
 | Field | Meaning |
 |---|---|
-| `compile` | Spend on compiling the prose into a plan, including any lint retry |
+| `compile` | Spend on compiling the prose into a plan, including any guided retry and any rejected compile |
 | `repairs` | Spend on model repairs of drifted steps |
 | `replay` | Always `$0` — running the plan calls no model |
 | `cache_read` | Cached input tokens read across the run — the only token count printed |

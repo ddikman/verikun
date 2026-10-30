@@ -12,7 +12,7 @@ import { DEFAULT_MODEL, priceFor } from '../src/agent/cost';
 import { resolveIncludes } from '../src/agent/include';
 import type { LeafStep } from '../src/agent/ir';
 import type { ExecBackend } from '../src/rpc';
-import { CliError, RunEvictedError } from '../src/errors';
+import { DeviceGoneError, CliError, RunEvictedError } from '../src/errors';
 
 // `vk ai` over a pooled `vk server`: the server can END a run part-way, when its phone leaves
 // the pool. That run DID run — it has steps and an archive — so it has to come back as a
@@ -91,30 +91,6 @@ test('runAiTest: an EVICTED run returns as an environment abort, with its archiv
   assert.ok((r.state?.steps.length ?? 0) > 0, 'the attempt keeps what it recorded');
 });
 
-test('runAiTest: a step that died WITH its phone is an eviction when the server says so afterwards', async () => {
-  // The usual shape, measured on hardware: the step running when the phone vanished fails with
-  // the phone's own error (a 200 carrying exit 3 — the server never replays a step), and the
-  // server sheds the phone and evicts the run only while answering it. Only a LATER request
-  // hears the eviction, so the backend remembers it and the run asks afterwards.
-  const file = cachedTest();
-  let n = 0;
-  const backend: ExecBackend = {
-    exec: async () => {
-      n += 1;
-      return n === 2
-        ? { code: 3, error: new CliError("Failed to capture UI hierarchy after 3 attempts. adb: device 'R58N' not found", 3) }
-        : { code: 0 };
-    },
-    getElements: () => [],
-    install: () => undefined,
-    reset: () => undefined,
-    wasEvicted: () => true,
-  };
-  const r = await runAiTest(file, OPTS, backend, 'android', 'R58N');
-  assert.equal(r.abortedForEnv, true);
-  assert.equal(r.evicted, true, 'the suite re-runs it as a fresh run');
-  assert.match(r.failure?.reason ?? '', /device 'R58N' not found/, "the step keeps the phone's own error");
-});
 
 test('runAiTest: an ASSERTION failure is never re-labelled an eviction', async () => {
   // A real regression that happened to be followed by the phone leaving is still a regression:
@@ -126,7 +102,6 @@ test('runAiTest: an ASSERTION failure is never re-labelled an eviction', async (
     getElements: () => [],
     install: () => undefined,
     reset: () => undefined,
-    wasEvicted: () => true,
   };
   const r = await runAiTest(file, OPTS, backend, 'android', 'R58N');
   assert.equal(r.ok, false);
@@ -137,48 +112,28 @@ test('runAiTest: a THROWN environment error on a run the server evicted returns 
   // A worker that died mid-step answers with an error rather than a result; the server marks
   // that response, and the run must still come back with its archive, not as a bare throw.
   const file = cachedTest();
-  const backend = { ...backendThrowingOnStep2(new CliError('device R58N is no longer available (worker exited with code 1)', 3)), wasEvicted: () => true };
+  const backend = backendThrowingOnStep2(new DeviceGoneError('device R58N is no longer available (worker exited with code 1)'));
   const r = await runAiTest(file, OPTS, backend, 'android', 'R58N');
   assert.equal(r.evicted, true);
   assert.equal(r.abortedForEnv, true);
   assert.ok(r.runDir && existsSync(r.runDir));
 });
 
-test('runAiTest: a reset that finds its phone gone is an eviction, not a broken box', async () => {
-  // `--reset-app` runs inside the lane's child before the run starts. When the phone this run
-  // was dealt left the pool while idle, the reset is the first request to fail — and the one
-  // the server marks. No run exists yet to carry a result, so the eviction is thrown.
+test('runAiTest: reset preserves a typed device loss before recording starts', async () => {
   const file = cachedTest();
-  const deviceGone = new CliError("adb: device 'R58N' not found", 3);
-  const withReset = (evicted: boolean): ExecBackend => ({
-    exec: async () => ({ code: 0 }),
-    getElements: () => [],
-    install: () => undefined,
-    reset: () => {
-      throw deviceGone;
-    },
-    wasEvicted: () => evicted,
-  });
-  await assert.rejects(
-    () => runAiTest(file, { ...OPTS, resetApp: 'dev.x' }, withReset(true), 'android', 'R58N'),
-    (e: unknown) => e instanceof RunEvictedError && /device 'R58N' not found/.test(e.message),
-  );
-  await assert.rejects(
-    () => runAiTest(file, { ...OPTS, resetApp: 'dev.x' }, withReset(false), 'android', 'R58N'),
-    (e: unknown) => e === deviceGone,
-    'an ordinary failed reset is unchanged',
-  );
+  const gone = new DeviceGoneError('device is offline');
+  const backend: ExecBackend = { exec:async()=>({code:0}),getElements:()=>[],install:()=>{},reset:()=>{throw gone;} };
+  await assert.rejects(()=>runAiTest(file,{...OPTS,resetApp:'dev.x'},backend,'android','a'),e=>e===gone);
 });
 
-test('runAiTest: any OTHER throw mid-run still propagates, unchanged', async () => {
-  // Only an eviction is known to be "this run, not this box": a server that stopped
-  // answering is still an error the caller maps to an exit code, exactly as before.
+test('runAiTest: any mid-run throw returns its outcome and sealed evidence', async () => {
   const file = cachedTest();
-  const gone = new CliError('cannot reach verikun server at http://h:8391/v1/exec (fetch failed)', 3);
-  await assert.rejects(
-    () => runAiTest(file, OPTS, backendThrowingOnStep2(gone), 'android', 'R58N'),
-    (e: unknown) => e === gone,
-  );
+  const gone = new CliError('cannot reach verikun server', 3);
+  const r = await runAiTest(file, OPTS, backendThrowingOnStep2(gone), 'android', 'R58N');
+  assert.equal(r.outcome, 'env');
+  assert.equal(r.device, 'R58N');
+  assert.ok(r.reportHtml);
+  assert.equal(r.state?.ai?.ok, false);
 });
 
 // --- the lane child → suite parent contract, end to end ------------------------------
@@ -200,6 +155,12 @@ async function fakeServer(mode: 'refuse' | 'evict' | 'die' | 'marked'): Promise<
     errorKind: 'RunEvictedError',
   };
   const server = createServer((req, res) => {
+    if (req.url === '/v1/lease') {
+      req.resume();
+      if (mode === 'refuse') { res.writeHead(503,{'content-type':'application/json'});res.end(JSON.stringify({error:'device is locked by another active run',exitCode:3})); }
+      else { res.writeHead(200,{'content-type':'application/x-ndjson'});res.write(JSON.stringify({platform:'android',serial:'a'})+'\n');req.on('close',()=>res.end()); }
+      return;
+    }
     req.resume();
     req.on('end', () => {
       const send = (status: number, body: unknown): void => {
@@ -210,7 +171,7 @@ async function fakeServer(mode: 'refuse' | 'evict' | 'die' | 'marked'): Promise<
       switch (req.url) {
         case '/v1/health':
           return send(200, {
-            ok: true, version: 'test', platform: 'android', serial: null, installEnabled: false,
+            deviceHealth:1,leaseHold:1,deviceStates:[],ok: true, version: 'test', platform: 'android', serial: null, installEnabled: false,
             ...(mode === 'refuse'
               ? { capacity: 1, devices: ['b'], quarantined: [{ serial: 'a', reason: 'the device is not attached' }] }
               : { capacity: 2, devices: ['a', 'b'] }),
@@ -227,8 +188,7 @@ async function fakeServer(mode: 'refuse' | 'evict' | 'die' | 'marked'): Promise<
           if (mode === 'marked') {
             return send(200, {
               code: 3,
-              error: { kind: 'CliError', name: 'CliError', message: "adb: device 'a' not found", exitCode: 3 },
-              evicted: true,
+              error: { kind: 'DeviceGoneError', name: 'DeviceGoneError', message: "adb: device 'a' not found", exitCode: 3 },
             });
           }
           if (execs === 1) return send(200, { code: 0 });
@@ -236,7 +196,7 @@ async function fakeServer(mode: 'refuse' | 'evict' | 'die' | 'marked'): Promise<
             evicted = true;
             return send(200, {
               code: 3,
-              error: { kind: 'CliError', name: 'CliError', message: "Failed to capture UI hierarchy after 3 attempts. adb: device 'a' not found", exitCode: 3 },
+              error: { kind: 'DeviceGoneError', name: 'DeviceGoneError', message: "Failed to capture UI hierarchy after 3 attempts. adb: device 'a' not found", exitCode: 3 },
             });
           }
           return send(409, eviction);
@@ -254,7 +214,7 @@ async function fakeServer(mode: 'refuse' | 'evict' | 'die' | 'marked'): Promise<
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => new Promise<void>((resolve) => { server.closeAllConnections();server.close(() => resolve()); }),
   };
 }
 
@@ -327,4 +287,31 @@ test('contract: a --reset-app that finds its phone gone reaches the suite as an 
   } finally {
     await server.close();
   }
+});
+
+test('runAiTest acquires after a cached plan and records the device actually leased', async () => {
+  const file = cachedTest();
+  let acquired = false;
+  const backend: ExecBackend = {
+    lease: async () => { acquired = true; return {platform:'android',serial:'actual-phone'}; },
+    exec: async () => { assert.equal(acquired,true); return {code:0}; },
+    getElements: () => [], install: () => undefined, reset: () => undefined,
+  };
+  const result = await runAiTest(file,OPTS,backend,'android','startup-phone');
+  assert.equal(result.device,'actual-phone');
+  assert.equal(result.state?.device,'actual-phone');
+  assert.equal(result.outcome,'pass');
+});
+test('a pre-plan input failure never requests a device lease', async () => {
+  let acquired = false;
+  const backend = backendThrowingOnStep2(new Error('unused'));
+  backend.lease = async () => { acquired = true; return null; };
+  await assert.rejects(runAiTest(join(dir,'missing.md'),OPTS,backend,'android',undefined));
+  assert.equal(acquired,false);
+});
+test('an unexpected mid-run exception returns internal outcome with its archive', async () => {
+  const result = await runAiTest(cachedTest(),OPTS,backendThrowingOnStep2(new Error('unexpected fault')),'android','a');
+  assert.equal(result.outcome,'internal');
+  assert.equal(result.abortedForEnv,false);
+  assert.ok(result.reportHtml);
 });

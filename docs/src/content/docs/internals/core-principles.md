@@ -25,10 +25,12 @@ warnings all go to **stderr**, so a caller parsing stdout never has to strip one
 
 With `--json`, the catch in `run()` emits `{error, exitCode, errorKind}`. `errorKind` is the
 error's **class** — `SelectorNotFoundError`, `AmbiguousSelectorError`, `NoWindowError`,
-`DumpKilledError`, `NoFreeDeviceError`, `RunEvictedError`, `CliError`, `Error` — so a caller can
+`DumpKilledError`, `NoFreeDeviceError`, `RunEvictedError`, `DeviceGoneError`,
+`DeviceUnresponsiveError`, `UnsupportedOnPlatformError`, `ServerUnreachableError`, `CliError`, `Error` — so a caller can
 tell "the app has not drawn yet", "the dump was killed" or "no device was free" from "the device
 is gone" without matching on message text. New commands
-honour `--json` for success output too.
+honour `--json` for success output too. `vk ai --json` also carries a stable `outcome`
+for suite scheduling; it does not require message matching.
 The same field rides `vk server`'s error bodies, so the class survives the wire.
 
 ## No host shell, ever

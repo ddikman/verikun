@@ -57,7 +57,7 @@ as a failure by every `set -e` script.
 | Element has no reachable on-screen pixel | `1` |
 | `text`'s value not in the field after one retype (Android) | `1` |
 | `run archive` where the run contained failures | `1` |
-| A `vk ai` compile that does not cover its test | `1` |
+| A `vk ai` compile that does not cover its test, or that the plan validator rejects twice | `1` |
 | Tool missing, no usable device, dump/screencap failed | `3` |
 | `devices start`/`restart` where the device did not finish booting in time | `1` |
 | `devices start`/`stop`/`restart` naming a device that does not exist | `1` |
@@ -93,12 +93,16 @@ line that exits non-zero and **propagates that line's exit code**. It therefore 
 |---|---|
 | Plan ran green | `0` |
 | A step failed, a control node gave up, the model gave up | `1` |
-| The compile [did not cover the test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test) | `1` |
+| The compile [did not cover the test](/verikun/reference/ai-plans/#the-compile-must-cover-the-test), or was rejected twice | `1` |
 | Environment aborted (`abortedForEnv`) | `3` |
 
 An environment abort is `3` so it is never read as a regression. A rejected compile is `1`,
 not `2`, so `vk suite --retries` retries it. When a `vk server` ended the run because its device
 left the pool, `--json` also carries `evicted: true` — the run did not fail, so run it again.
+
+`vk ai --json` reports `outcome`: `pass`, `fail`, `env`, `lost-device`, `no-device`,
+`server-unreachable`, `budget`, `timeout`, `usage` or `internal`. Transport loss and
+a confirmed unresponsive device exit `3`; evidence capture is skipped for both.
 
 ## `vk suite`
 
@@ -120,9 +124,10 @@ in `--json` is what tells them apart.
 `--max-suite-cost-usd` stops the suite at **`1`**, not `3`: the box is fine, the run just did
 not finish. `index.json`'s `aborted.kind` says which of the two happened.
 
-Across a [pool](/verikun/guides/suites/#running-across-several-devices), a broken device
-retires its lane and its tests move to the others; `3` arrives only once **every** device is
-gone, or no lane could get one for
+Across a [pool](/verikun/guides/suites/#running-across-several-devices), a broken local device
+is benched and probed every 45 seconds. Server lanes follow the server's health state.
+Typed device loss gets up to two free reruns and does not create a flaky row. The suite
+stops with `3` and `notRun` after no device progress for
 [`VERIKUN_SUITE_DEVICE_WAIT_MIN`](/verikun/reference/environment-variables/#tuning-behaviour)
 minutes.
 

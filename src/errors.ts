@@ -195,3 +195,50 @@ export class AmbiguousSelectorError extends CliError {
     this.name = 'AmbiguousSelectorError';
   }
 }
+
+/** Device-addressed transport disappeared; a fresh run may safely use another device. */
+export class DeviceGoneError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'DeviceGoneError'; }
+}
+/** A shell timeout confirmed by a failed real device round trip. */
+export class DeviceUnresponsiveError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'DeviceUnresponsiveError'; }
+}
+export class UnsupportedOnPlatformError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'UnsupportedOnPlatformError'; }
+}
+export class ServerUnreachableError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'ServerUnreachableError'; }
+}
+export function isDeviceLoss(e: unknown): e is DeviceGoneError | DeviceUnresponsiveError {
+  return e instanceof DeviceGoneError || e instanceof DeviceUnresponsiveError;
+}
+/**
+ * No Android device is in a drivable state: nothing attached, or only offline/unauthorized ones.
+ * Exit 3 exactly as before. A class only so the reporting layer can tell "the phone is gone"
+ * from every other environment failure by identity rather than by message text (`isDeviceDrop`).
+ * rpc.ts deliberately has no arm for it, so on the wire it is still a plain `CliError` and the
+ * `errorKind` a parallel suite schedules on does not move.
+ */
+export class NoUsableDeviceError extends CliError {
+  constructor(message: string) { super(message, 3); this.name = 'NoUsableDeviceError'; }
+}
+/**
+ * Did the device leave adb — mid-flow (`isDeviceLoss`), or before the command could find it?
+ * The failures a leaking host adb server produces, and so the only ones that earn the note
+ * naming it. Deliberately not `NoWindowError`/`DumpKilledError`: there the device ANSWERED.
+ */
+export function isDeviceDrop(e: unknown): boolean {
+  return isDeviceLoss(e) || e instanceof NoUsableDeviceError;
+}
+export function rethrowIfLost(e: unknown): void {
+  if (isDeviceLoss(e) || e instanceof RunEvictedError) throw e;
+}
+export type Outcome = 'pass' | 'fail' | 'env' | 'lost-device' | 'no-device' | 'server-unreachable' | 'usage' | 'budget' | 'timeout' | 'internal';
+export function errorOutcome(e: unknown): Outcome {
+  if (isDeviceLoss(e) || e instanceof RunEvictedError) return 'lost-device';
+  if (e instanceof NoFreeDeviceError) return 'no-device';
+  if (e instanceof ServerUnreachableError) return 'server-unreachable';
+  if (!(e instanceof CliError)) return 'internal';
+  return e.exitCode === 2 ? 'usage' : e.exitCode === 1 ? 'fail' : 'env';
+}

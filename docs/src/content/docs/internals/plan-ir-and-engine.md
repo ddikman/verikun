@@ -23,7 +23,10 @@ shape appears in real flows. The shallowness keeps the structured-output JSON sc
 (`PLAN_JSON_SCHEMA`) **non-recursive**, which the model APIs require.
 
 `validateNode` is the grammar gate, applied to **both** compile output and every model
-repair. A hallucinated command is rejected, never run.
+repair. A hallucinated command is rejected, never run. A compile it rejects is billed and gets
+one guided recompile with the rejection and the offending node handed back; a second rejection
+fails the test at compile (exit `1`). Two near-misses are accepted instead: an empty `when`
+branch, and a command leaf that only restates the control node after it, which is dropped.
 
 ## The engine
 
@@ -146,6 +149,7 @@ differ only in how they send it.
 
 All five produce a plan that looks fine while testing something other than what was
 written. Each buys one guided recompile, with the finding handed back as `retryFeedback`.
+It is the same single recompile a validator rejection gets, so a compile is at most two calls.
 
 The two coverage rules are **fatal**: a plan that still trips one after that recompile is
 rejected rather than run, because a truncated plan does not fail — it asserts nothing, so it

@@ -229,23 +229,37 @@ A claim from a crashed job clears on its own. Full detail:
 Intermittent `device not found` / `no device` on a host that has been up for days, with no
 pattern you can pin to one phone, one cable or one test. The usual cause is not the device:
 it is the **host's adb server**, which leaks USB handles the longer it runs until it starts
-losing devices mid-run. `vk doctor` says so when it can measure it:
+losing devices mid-run. `vk doctor` says so when it can measure it, and so does the error when
+a device drops off a leaking server:
 
 ```
 adb server: adb server is leaking USB handles (~120 kernel guard violations/min, up 216h) — devices will drop
-  restart it: `adb kill-server && adb start-server` (safe; devices reconnect in a few seconds)
+  restart it: `vk doctor --restart-adb` (only while nothing else is using adb; devices reconnect in a few seconds)
 ```
 
-The restart is safe — every device reconnects within a few seconds — but it is **host-wide**,
-so it also drops any other tool talking to `adb` on that machine.
+`vk doctor --restart-adb` restarts it **only while nothing else is using adb**: no other
+verikun job holds an Android device, and no other process (Android Studio, scrcpy, an
+`adb logcat`) is connected to the adb server. Otherwise it names what is in the way and leaves
+adb alone — run it again once they are done. It restarts the same adb binary with the same USB
+backend (and says so when that binary is gone), puts back `adb forward`/`adb reverse` rules and
+`adb connect` devices, and waits for the devices to reconnect. An agent using the verikun skill runs it by itself when doctor reports
+the leak. With `VERIKUN_NO_CLAIM=1` it cannot see other verikun jobs, so it does not restart.
+
+If the violations come straight back on the restarted server, a restart cannot clear them: a
+device on adb's native USB backend is causing them, not a leak (seen with a Samsung SM-A415F,
+from the first second of a fresh server). `--restart-adb` then says so and does not restart that
+server again. adb's libusb backend did not show them, before or after a dropped connection: set
+`ADB_LIBUSB=1` wherever adb gets started (your shell profile, and `launchctl setenv ADB_LIBUSB 1`
+for apps such as Android Studio), then restart adb once. `--restart-adb` keeps whichever backend
+the server is running.
 
 [`vk server`](/verikun/guides/remote-devices-and-ci/) does this for itself: when nothing is
-running it re-checks, and restarts a rotted adb server before the next job meets it. Set
-`VERIKUN_NO_ADB_RECYCLE=1` to stop it, if something else on the host uses `adb` too.
+running it re-checks, and restarts a rotted adb server before the next job meets it.
+`VERIKUN_NO_ADB_RECYCLE=1` stops both.
 
 The measurement is macOS-only (it reads the kernel's guard-violation log), so on Linux hosts
-doctor stays quiet and the server never recycles. If a long-lived Linux CI host starts dropping
-devices, restarting `adb` by hand is still worth a try.
+doctor stays quiet, `--restart-adb` restarts nothing and the server never recycles. If a
+long-lived Linux CI host starts dropping devices, restarting `adb` by hand is still worth a try.
 
 ### The display went to sleep
 

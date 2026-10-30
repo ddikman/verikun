@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLinksValidator from 'starlight-links-validator';
+import singleSitemap from './scripts/single-sitemap.mjs';
 
 // Project-pages deployment: https://ddikman.github.io/verikun/
 // `base` must match the repo name, or every asset 404s and the site renders unstyled.
@@ -31,6 +32,7 @@ export default defineConfig({
       // Starlight emits every other social-card tag but no image. Unfurlers need an absolute URL
       // to a raster image; public/og.png is rendered from src/assets/og.svg by `npm run og`.
       head: [
+        { tag: 'link', attrs: { rel: 'sitemap', href: '/verikun/sitemap.xml' } },
         { tag: 'meta', attrs: { property: 'og:image', content: 'https://ddikman.github.io/verikun/og.png' } },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
         { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
@@ -97,5 +99,7 @@ export default defineConfig({
         },
       ],
     }),
+    // Starlight's sitemap integration runs first; publish its URL list without the index.
+    singleSitemap(),
   ],
 });

@@ -13,7 +13,6 @@
 import { CliError } from '../errors';
 import { getDriver } from '../drivers';
 import { err } from '../output';
-import { isUsableState } from './failover';
 import { Flags, flagBool, flagStr } from '../args';
 import type { Platform } from '../types';
 
@@ -92,10 +91,7 @@ export function csvList(raw: string | boolean | undefined): string[] {
  */
 export function poolSerials(platform: Platform, spec: DevicePoolSpec, opts: { quiet?: boolean } = {}): string[] {
   const attached = getDriver(platform, undefined).listDevices();
-  // `isUsableState`, not a hand-rolled `state === 'device'`: iOS never uses that string —
-  // simctl states arrive lowercased as `booted`/`shutdown` — so the naive check made
-  // `--devices all-ios` report "no usable ios device is attached" with simulators running,
-  // while `failoverCandidates` in this same module would happily move ONTO one.
+  // iOS reports booted/connected; Android reports device.
   const usable = attached.filter((d) => isUsableState(d.state));
   if (spec.all) {
     // Virtual devices win when both kinds are attached, exactly as `IdbDriver`'s own
@@ -125,3 +121,9 @@ export function poolSerials(platform: Platform, spec: DevicePoolSpec, opts: { qu
   return spec.serials;
 }
 
+
+/** Only attached, drivable states count; disconnected must not match connected. */
+export function isUsableState(state: string): boolean {
+  if (/\bdis-?connected\b|\bnot\s+connected\b|unavailable/i.test(state)) return false;
+  return state === 'device' || state === 'booted' || /\bconnected\b/i.test(state);
+}

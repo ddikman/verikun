@@ -10,12 +10,13 @@
 // CLAUDE.md, "Selector auto-wait".
 
 import { Flags, flagBool, flagNum } from '../args';
-import { CliError, DumpKilledError, SelectorNotFoundError, TransientReadError } from '../errors';
+import { DeviceGoneError, CliError, DumpKilledError, SelectorNotFoundError, TransientReadError } from '../errors';
 import type { Element } from '../types';
 import { barrierClause, modalBarrierOnly } from '../ui/barrier';
 import { MatchResult, MatchTier, Selector, matchElements, resolveOne } from '../ui/selector';
 import { sleep } from '../wait';
 import type { Ctx } from './context';
+import { withAdbRecoveryDeadline } from '../drivers/adb-runner';
 
 const DEFAULT_WAIT_MS = 5000;
 const DEFAULT_POLL_MS = 300;
@@ -66,10 +67,15 @@ export function pollStep(flags: Flags, deadline: number): number {
  * read the screen"; see `ReadTally.rethrowIfBlind`.
  */
 export function readForPoll(ctx: Ctx, tally?: ReadTally, opts: { all?: boolean } = {}): Element[] {
+  const started = Date.now();
   try {
-    const els = ctx.driver.getElements(opts);
+    const els = withAdbRecoveryDeadline(tally?.recoveryUntil() ?? Infinity, () => ctx.driver.getElements(opts));
     return tally ? tally.note(els) : els;
   } catch (e) {
+    if (e instanceof DeviceGoneError && tally) {
+      tally.noteLost(e, started);
+      return [];
+    }
     if (e instanceof TransientReadError) {
       tally?.noteBlind(e);
       return [];
@@ -97,14 +103,20 @@ export class ReadTally {
   private last: Element | null = null;
   private blind: TransientReadError | undefined;
   private lastBlind = false;
+  private lost?: DeviceGoneError;
+  private lostSince?: number;
 
-  constructor(private readonly ctx: Ctx) {}
+  constructor(private readonly ctx: Ctx, private readonly deadline = Infinity) {}
+
+  recoveryUntil(): number { return Math.min(this.deadline, (this.lostSince ?? Date.now()) + 8000); }
 
   /** Record one snapshot. Returns it, so it can wrap a read in place. */
   note(els: Element[]): Element[] {
     this.reads++;
     this.okReads++;
     this.lastBlind = false;
+    this.lost = undefined;
+    this.lostSince = undefined;
     this.last = modalBarrierOnly(els, this.ctx.driver.viewport());
     if (this.last) this.barrierReads++;
     return els;
@@ -117,9 +129,20 @@ export class ReadTally {
   }
 
   /** Record a read that never happened — a transient failure `readForPoll` absorbed as `[]`. */
+  noteLost(e: DeviceGoneError, started = Date.now()): void {
+    this.reads++;
+    this.lastBlind = true;
+    this.last = null;
+    this.lost = e;
+    this.lostSince ??= started;
+    if (Date.now() - this.lostSince >= 8000) throw e;
+  }
+
   noteBlind(e: TransientReadError): void {
     this.reads++;
     this.blind = e;
+    this.lost = undefined;
+    this.lostSince = undefined;
     this.lastBlind = true;
     this.last = null; // a read that did not happen is not a barrier, and must not read as one
   }
@@ -154,6 +177,7 @@ export class ReadTally {
    * read anywhere in the window means the screen was legible and an ordinary miss is honest.
    */
   rethrowIfBlind(): void {
+    if (this.lost) throw this.lost;
     if (this.okReads === 0 && this.blind instanceof DumpKilledError) throw this.blind;
   }
 }
@@ -169,7 +193,7 @@ export async function matchWaiting(
   opts: { all?: boolean } = {},
 ): Promise<MatchResult & { barrier: ReadTally }> {
   const deadline = Date.now() + waitWindowMs(ctx.flags);
-  const barrier = new ReadTally(ctx);
+  const barrier = new ReadTally(ctx, deadline);
   for (;;) {
     const res = matchElements(readForPoll(ctx, barrier, opts), sel);
     if (res.matches.length > 0) return { ...res, barrier };
@@ -195,7 +219,7 @@ export async function resolveOneWaiting(
   const windowMs = waitWindowMs(ctx.flags);
   const start = Date.now();
   const deadline = start + windowMs;
-  const barrier = new ReadTally(ctx);
+  const barrier = new ReadTally(ctx, deadline);
   for (;;) {
     const els = readForPoll(ctx, barrier, opts);
     if (matchElements(els, sel).matches.length >= 1) {

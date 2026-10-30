@@ -36,6 +36,9 @@ $ vk tap @sign_in_btn
 tapped [3] Button "Sign in" @sign_in_btn (540,1020) tap
 ```
 
+**Remote compatibility in 1.0:** upgrade the CLI and server together. Remote execution requires
+a streaming held lease and device supervision; pre-hold peers are no longer supported.
+
 ## Install
 
 Requires Node ≥ 18 and the Android platform-tools (`adb`) on your `PATH`.
@@ -70,6 +73,10 @@ Walk through the whole thing, including reading the report: **[Your first test](
 verikun ships as a skill and plugin, not an MCP server, and that is deliberate. A skill lets us **guide the agent on how to use verikun** — when to inspect the hierarchy, what to assert, which command fits the step, and how to read the result back. That domain knowledge travels with the tool, so the agent drives the device *well*, not just correctly.
 
 There is also no need for an MCP here: verikun runs locally with all its dependencies, and the agent calls it through the plain `vk` CLI — no shared session, data, or authentication to broker.
+
+Remote suites acquire after compilation, wait in a server FIFO, and rerun typed device loss
+without spending a retry. Held leases release on client disappearance; recovering devices
+restore settings and verify the retained build before returning to service.
 
 ## Documentation
 

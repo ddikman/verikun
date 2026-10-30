@@ -1,6 +1,6 @@
 import { CliError } from '../errors';
 import { backoffMs, sleep } from '../wait';
-import { parsePlan, PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
+import { PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
 import { Usage } from './cost';
 import {
   AgentProvider,
@@ -8,6 +8,7 @@ import {
   CompileResult,
   RepairContext,
   RepairResult,
+  compileResult,
   compileUserPrompt,
   repairDecision,
   repairUserPrompt,
@@ -156,7 +157,7 @@ export class OpenAiProvider implements AgentProvider {
     // Generous completion budget: on reasoning models the plan JSON shares this ceiling
     // with reasoning tokens, so leave headroom (a 'length' finish is surfaced as an error).
     const { json, usage } = await this.call(GRAMMAR, compileUserPrompt(input), PLAN_JSON_SCHEMA, 16384);
-    return { plan: parsePlan(json), usage };
+    return compileResult(json, usage);
   }
 
   async repair(ctx: RepairContext): Promise<RepairResult> {

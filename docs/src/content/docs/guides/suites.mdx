@@ -131,11 +131,11 @@ point more devices buy nothing.
   [the plan cache](/verikun/reference/ai-plans/#the-plan-cache).
 - **Duration splits in two.** `totals.wallClockMs` is how long the gate took;
   `totals.durationMs` keeps its meaning but is now device-seconds across the pool.
-- **`--app` resets inside the test**, on the device that test holds. Known gap: a reset that
-  fails transiently fails the test in parallel where it would be retried serially, and can
-  retire a healthy device ([#107](https://github.com/ddikman/verikun/issues/107)).
-- **A device that breaks retires its lane.** Its remaining tests move to the others; the suite
-  aborts (exit `3`) only when every device is gone.
+- **`--app` resets inside the test**, after compilation and lease acquisition, on the device that test holds.
+- **A local device that breaks is benched and re-probed every 45 seconds.** A typed loss gets
+  up to two free reruns on another device. A remote rerun waits for a healthy sibling
+  even when it is busy, falling back to the original only if it is the sole ready phone.
+  Server lanes rely on the server's device health.
 - **Over `--server`, a lane with no free device waits for one.** A test that never got a device
   is not a failure, and a test whose device left the pool mid-run is re-run without spending a
   retry (at most twice; needs the matching `vk server`). If no lane can get a device for
@@ -161,6 +161,12 @@ failures. Separate hosts, or physical devices, deliver the win that stacked emul
 is fine; the run just did not finish). It is off by default; `--max-cost-usd` still caps each
 test. See [Cost & budget](/verikun/reference/cost/#the-budget) for how the two ceilings
 interact.
+
+Every `--server` suite uses lanes, including capacity one, preserving file order there.
+`--ensure-device` is accepted with a single `--server` URL and runs once in the parent.
+Compilation holds no remote lease. A held lease waits in the server FIFO and releases on
+client disappearance. Servers without held leases and supervision are rejected. Suites pin the retained install
+SHA, so a different build between tests aborts with `build changed mid-suite`.
 
 ## The overview report
 

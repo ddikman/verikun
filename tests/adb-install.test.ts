@@ -21,8 +21,7 @@ const OLDER =
 // Every install failure that is NOT a conflict keeps the plain message it has always
 // had. This is the pairing `install` has to get right: `blockingPackage` returning null
 // means "named no package", NOT "was not a conflict", and reading it as the latter makes
-// a full disk report a signing-key mismatch and recommend `adb uninstall`. It also feeds
-// device/failover.ts, which classifies on the thrown string.
+// a full disk report a signing-key mismatch and recommend `adb uninstall`.
 test('isSignatureConflict: only a signing conflict, not every install failure', () => {
   for (const out of [CURRENT, OLDER, 'Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]']) {
     assert.equal(isSignatureConflict(out), true, out);

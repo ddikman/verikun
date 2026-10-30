@@ -1,3 +1,4 @@
+import { DeviceGoneError, UnsupportedOnPlatformError } from '../errors';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync, unlinkSync } from 'node:fs';
@@ -9,7 +10,7 @@ import { CliError, probeFailure } from '../errors';
 import { runText } from '../exec';
 import { parseIosHierarchy } from '../ui/ios-parse';
 import { viewportFor } from '../ui/viewport';
-import { isUsableState } from '../device/failover';
+import { isUsableState } from '../device/pool';
 import {
   SettingKey,
   canonicalFontScale,
@@ -164,7 +165,11 @@ export function listSimulators(): DeviceInfo[] {
 export function listPhysicalDevices(): DeviceInfo[] {
   const r = runText(XCRUN, ['devicectl', 'list', 'devices']);
   if (r.code !== 0) return [];
-  const lines = r.stdout.split('\n');
+  return parsePhysicalDevices(r.stdout);
+}
+
+export function parsePhysicalDevices(stdout: string): DeviceInfo[] {
+  const lines = stdout.split('\n');
   const headerIdx = lines.findIndex((l) => l.includes('Identifier'));
   if (headerIdx < 0) return [];
   const header = lines[headerIdx];
@@ -336,6 +341,7 @@ export class IdbDriver implements Driver {
     }
     if (r.code !== 0) {
       const why = r.stderr.trim().split('\n')[0] || `exit code ${r.code}`;
+      this.throwIfSimulatorGone();
       throw probeFailure({ name: 'idb', ok: false, detail: `idb cannot reach ${this.udid()}: ${why}`, hint: IDB_HINT });
     }
   }
@@ -394,7 +400,7 @@ export class IdbDriver implements Driver {
     // `isUsableState`, not a bare `/connected/i`: that also matches `disconnected` and
     // `not connected`, so an unplugged phone reads as a candidate. The pool and failover
     // ask the same predicate, and a driver that disagrees with them about which phones
-    // exist is the drift device/failover.ts owns this rule to prevent.
+    // exist is the drift device/pool.ts owns this rule to prevent.
     return bootedSims.length > 0 ? bootedSims : listPhysicalDevices().filter((d) => isUsableState(d.state));
   }
 
@@ -408,9 +414,16 @@ export class IdbDriver implements Driver {
   }
 
   /** Run an idb subcommand against the resolved target, returning stdout. */
+  private throwIfSimulatorGone(): void {
+    if (!this.isSimulator()) return;
+    const target = listSimulators().find(d => d.serial === this.udid());
+    if (!target || target.state !== 'booted') throw new DeviceGoneError(`simulator ${this.udid()} is no longer Booted`);
+  }
+
   private idbText(args: string[], opts?: { timeout?: number }): string {
     const r = runText(IDB, [...args, '--udid', this.udid()], opts);
     if (r.code !== 0) {
+      this.throwIfSimulatorGone();
       throw new CliError(`idb ${args.join(' ')} failed: ${r.stderr.trim() || `exit code ${r.code}`}`, 3);
     }
     return r.stdout;
@@ -572,11 +585,10 @@ export class IdbDriver implements Driver {
 
   clearApp(appId: string): void {
     // Honest degrade (no clean per-app data reset on iOS): don't silently uninstall.
-    throw new CliError(
+    throw new UnsupportedOnPlatformError(
       `iOS app-data clearing is not supported (requested for '${appId}').\n` +
         'iOS has no per-app data reset; the manual equivalent is uninstall + reinstall ' +
         '(`xcrun simctl uninstall <udid> <bundleId>`), which removes the app too.',
-      3,
     );
   }
 
@@ -587,10 +599,9 @@ export class IdbDriver implements Driver {
 
   getLogs(opts: { lines?: number; appId?: string; since?: string; scopedOnly?: boolean } = {}): string {
     if (!this.isSimulator()) {
-      throw new CliError(
+      throw new UnsupportedOnPlatformError(
         'iOS physical-device log capture is not supported (simulator logs work via `log show`).\n' +
           'Use Console.app or `idb log` directly for a connected device.',
-        3,
       );
     }
     // `log show` on the whole store is huge, so ALWAYS bound it: a session marker
@@ -626,7 +637,7 @@ export class IdbDriver implements Driver {
     // which disables windowing gracefully. Never throws (called at run start).
     try {
       if (!this.isSimulator()) return '';
-      return runText(XCRUN, ['simctl', 'spawn', this.udid(), 'date', '+%Y-%m-%d %H:%M:%S']).stdout.trim();
+      return runText(XCRUN, ['simctl', 'spawn', this.udid(), 'date', '+%Y-%m-%d %H:%M:%S'], { timeout: 3000 }).stdout.trim();
     } catch {
       return '';
     }
@@ -654,7 +665,7 @@ export class IdbDriver implements Driver {
 
   /** Shared refusal for a key iOS cannot honor. */
   private unsupportedSetting(key: SettingKey, detail: string): never {
-    throw new CliError(`Device setting '${key}' is not supported on iOS.\n${detail}`, 3);
+    throw new UnsupportedOnPlatformError(`Device setting '${key}' is not supported on iOS.\n${detail}`);
   }
 
   private assertSimulator(key: SettingKey): void {

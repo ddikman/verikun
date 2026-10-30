@@ -1,6 +1,6 @@
 import { CliError } from '../errors';
 import { backoffMs, sleep } from '../wait';
-import { parsePlan, PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
+import { PLAN_JSON_SCHEMA, REPAIR_DECISION_JSON_SCHEMA } from './ir';
 import { Usage } from './cost';
 import {
   AgentProvider,
@@ -8,6 +8,7 @@ import {
   CompileResult,
   RepairContext,
   RepairResult,
+  compileResult,
   compileUserPrompt,
   repairDecision,
   repairUserPrompt,
@@ -51,7 +52,7 @@ export class ClaudeProvider implements AgentProvider {
   async compile(input: CompileInput): Promise<CompileResult> {
 
     const { json, usage } = await this.call(GRAMMAR, compileUserPrompt(input), PLAN_JSON_SCHEMA, 8192);
-    return { plan: parsePlan(json), usage };
+    return compileResult(json, usage);
   }
 
   async repair(ctx: RepairContext): Promise<RepairResult> {

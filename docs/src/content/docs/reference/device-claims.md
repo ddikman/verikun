@@ -125,8 +125,8 @@ in a fresh shell with no stable session id, so either signal is enough.
 
 ## Remote devices
 
-Over [`--server`](/verikun/guides/remote-devices-and-ci/) the claim is held by the server
-process, on the host where the devices are; two clients sharing one server are arbitrated by
-the server's own per-run lease. When a server
-[fails over](/verikun/guides/remote-devices-and-ci/#when-the-bound-device-fails), the claim
-moves with the binding, and a candidate another job holds is skipped.
+Over [`--server`](/verikun/guides/remote-devices-and-ci/) the server holds the host claim.
+Its run leases use a FIFO and a separate heartbeat thread: socket close or 30 seconds
+without heartbeat bytes ends a held lease. Setting overrides restore before the next
+holder. Execution requires a held lease. Retired executors keep their
+host claim until actual exit and companion cleanup, so a second executor cannot overlap.

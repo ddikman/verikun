@@ -1,3 +1,4 @@
+import { AdbRunner } from '../drivers/adb-runner';
 // Lifecycle for the on-device companion: get one running, prove it agrees with the
 // platform, use it, and get out of its way the moment anything goes wrong.
 //
@@ -8,10 +9,10 @@
 // therefore gets the companion off the connection BEFORE the caller falls back.
 
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { runText, sleepSync } from '../exec';
+import { join, resolve } from 'node:path';
+import { spawnCollect, sleepSync } from '../exec';
 import { err } from '../output';
-import { NoWindowError } from '../errors';
+import { rethrowIfLost, NoWindowError } from '../errors';
 import { VERSION } from '../version';
 import { dumpsAgree } from './dump-match';
 import {
@@ -135,6 +136,7 @@ export function barrierRecycleDue(runMs: number, alreadyRecycled: boolean): bool
 
 export interface CompanionDeps {
   adb: string;
+  runner?: AdbRunner;
   serial: string;
   /** Run a stock `uiautomator dump` and return its XML. Injected rather than imported so
    *  calibration compares the companion against exactly the implementation the rest of
@@ -204,6 +206,7 @@ export class Companion {
    *  exits after one command — see TRANSIENT_RETRY_MS. */
   private retryAfter = 0;
   private dims?: DimensionSource;
+  private startTimedOut = false;
   /** When the current unbroken run of null-root replies started (0 = not in one), and
    *  whether this run has already spent its one connection recycle. See nullRootAction. */
   private nullRootSince = 0;
@@ -222,7 +225,7 @@ export class Companion {
   }
 
   private adb(args: string[], timeout = 15000) {
-    return runText(this.deps.adb, ['-s', this.deps.serial, ...args], { timeout });
+    return (this.deps.runner ??= new AdbRunner(this.deps.adb, this.deps.serial)).text(args, { timeout });
   }
 
   /**
@@ -264,6 +267,7 @@ export class Companion {
       try {
         return this.attemptDump(idleMs);
       } catch (e) {
+        rethrowIfLost(e);
         if (e instanceof NoWindowError) throw e; // the screen's state, not the companion's
         if (attempt === 0 && this.dims) {
           this.dims = undefined;
@@ -398,7 +402,7 @@ export class Companion {
       //   - several `vk` processes cold-started at once and collided, which is transient and
       //     usually leaves a perfectly good companion running (started by whoever won).
       const jar = companionJarPath();
-      const deviceIsAtFault = jar && !this.probeState().usable;
+      const deviceIsAtFault = jar && this.startTimedOut && !this.probeState().usable;
       if (deviceIsAtFault) this.writeDeviceNote('unsupported');
       // Only the two facts that cannot change under a running process are terminal. A start
       // that failed for any OTHER reason — most often the cold-start collision above — must
@@ -444,6 +448,7 @@ export class Companion {
       requestSync(this.port, 'acquire', 20000);
       return true;
     } catch (e) {
+      rethrowIfLost(e);
       this.standDown(`companion could not reacquire the connection (${(e as Error).message})`, 'transient');
       return false;
     }
@@ -459,6 +464,7 @@ export class Companion {
 
   /** Push the jar, forward the socket, spawn detached, wait for it to answer. */
   private start(): boolean {
+    this.startTimedOut = false;
     const jar = companionJarPath();
     if (!jar) {
       // Nothing to push. A source checkout that has not run tools/verikun-companion/build.sh
@@ -488,6 +494,7 @@ export class Companion {
       if (this.probeState().usable) return true;
       sleepSync(START_POLL_MS);
     }
+    this.startTimedOut = true;
     err('[verikun] companion did not start; using the stock hierarchy dump');
     return false;
   }
@@ -543,6 +550,7 @@ export class Companion {
       this.standDown('companion output did not match the platform dump; using the stock path', 'transient');
       return undefined;
     } catch (e) {
+      rethrowIfLost(e);
       this.standDown(`companion calibration failed (${(e as Error).message})`, 'transient');
       return undefined;
     }
@@ -579,7 +587,7 @@ export class Companion {
   /** Kill by command line rather than a remembered pid — the companion outlives the process
    *  that started it, so whoever needs it gone usually never had the pid. */
   private killByName(): void {
-    this.adb(['shell', `pkill -f ${MAIN_CLASS}`], 5000);
+    try { this.adb(['shell', `pkill -f ${MAIN_CLASS}`], 5000); } catch { /* preserve the original failure */ }
   }
 
   /** Explicit teardown: `vk companion stop`. */
@@ -607,4 +615,10 @@ export class Companion {
       return NOT_RUNNING;
     }
   }
+}
+
+/** Server teardown yields while the companion releases its connection. */
+export async function releaseCompanionOnAsync(serial: string): Promise<boolean> {
+  const r = await spawnCollect(process.execPath, [join(__dirname, 'sock-client.js'), String(portForSerial(serial)), 'release'], { timeout: 4000 });
+  return r.code === 0;
 }

@@ -107,6 +107,10 @@ The returned exit code, or a thrown `CliError`'s code:
 | `1` | `<failure>` — an assertion |
 | `≥ 2` | `<error>` — environment or usage |
 
+`vk ai --json` includes an `outcome` for every result, including errors before a run
+starts. Failures after recording starts keep their run directory and device. Typed device
+loss skips evidence collection; other failure captures have a 20-second total ceiling.
+
 ### A failed run can never archive green
 
 A failure the `vk ai` engine produces with no command to attach it to — a guard giving up, a
@@ -153,7 +157,7 @@ CI compose over it.
 |---|---|
 | `schemaVersion` | Currently `1`. Additive changes do not bump it. |
 | `verikun` | Version of the process that wrote the manifest — the **client's**. For a `--server` run that is not what drove the device; see `server`. |
-| `server` | `--server` runs only: `{url, verikun, reads}` — which server drove the device, on which version, and whether it read the hierarchy via the [companion](/verikun/guides/companion/) or the stock dump |
+| `server` | `--server` runs only: `{url, verikun, reads, installedSha?}` — which server drove the device, on which version, and whether it read the hierarchy via the [companion](/verikun/guides/companion/) or the stock dump |
 | `tests[]` | Per-test: pass/fail, step count, cost, duration, run id |
 | `tests[].modelRepairs` | How many steps the model repaired. `0` on a clean replay — gate on it to [fail a build that needed healing](/verikun/guides/self-healing-in-ci/#if-you-want-the-strict-gate-anyway) |
 | `tests[].planSteps` | Top-level steps in the plan that ran — the **compile's** size, unlike `steps`, which counts what executed. Comparable across a pass and a failure, so an unusually short compile is visible when diffing runs of the same test |
@@ -163,7 +167,7 @@ CI compose over it.
 | `totals` | Suite-level counts |
 | `totals.durationMs` | **Device time** — the sum of every test's duration. Equal to elapsed time serially; across N devices it is what the gate cost in device-seconds |
 | `totals.wallClockMs` | Elapsed time, `startedAt` → `finishedAt` — how long you actually waited |
-| `warnings[]` | Recovered flakes, environment retries, devices retired mid-suite, tests re-run after their device left the pool, and lanes that waited for a free device |
+| `warnings[]` | Recovered flakes, environment retries, devices benched mid-suite, tests re-run after their device left the pool, and lanes that waited for a free device |
 | `aborted` | `{reason, notRun, kind}` when the suite stopped early. `kind` is `environment` (exit `3`) or `budget` (exit `1`, from `--max-suite-cost-usd`) |
 
 On an abort, the not-run tests get **no rows and no place in `totals`**, so

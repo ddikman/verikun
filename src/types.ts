@@ -185,6 +185,8 @@ export interface ScreenState {
 }
 
 export interface Driver {
+  /** A real device round trip that also clears a latched transport breaker. */
+  probeLiveness?(): boolean;
   readonly platform: Platform;
   /**
    * Verify this driver's toolchain can actually drive the target: throws

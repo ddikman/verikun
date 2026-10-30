@@ -57,7 +57,8 @@ Commands the grammar permits:
 | `device` | subcommand is the **first positional**: `set` / `get` / `reset` / `caps` |
 
 A command outside this table is **rejected, never run** — the same gate is applied to the
-compile output and to every model repair.
+compile output and to every model repair. A compile the gate rejects gets one guided recompile;
+rejected again, the test fails at compile with exit `1`, and nothing is cached.
 
 ## 2. `if-present`
 
@@ -84,7 +85,8 @@ A bounded loop that runs until a selector appears.
 
 ## 4. `when`
 
-Ordered n-way dispatch, with an optional `else`. No match and no `else` is a failure.
+Ordered n-way dispatch, with an optional `else`. No match and no `else` is a failure. A
+branch may have an empty body: that screen is expected, and there is nothing to do.
 
 Use `when` for "the app is in one of these states"; use `if-present` for "this may or may not
 be there".
