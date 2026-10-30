@@ -89,5 +89,5 @@ line and nothing else: [Contributing](/verikun/internals/contributing/#the-docum
 ## Versioning
 
 The version is declared once, in `package.json`; `src/version.ts` is generated from it. Any
-behaviour change bumps it and adds a `CHANGELOG.md` line:
-[Contributing](/verikun/internals/contributing/#versioning-and-changelog).
+behaviour change adds a `CHANGELOG.md` line, and only an owner or member of the repository bumps
+the version: [Contributing](/verikun/internals/contributing/#versioning-and-changelog).

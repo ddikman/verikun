@@ -6,8 +6,8 @@ description: >-
   PR", "open a pull request", "raise a PR", "put up a PR", "submit this for review", or
   "make a draft PR" — including right after finishing a change on a branch. Rebases the
   branch onto `origin/main` first, then creates a draft with `gh pr create --draft --base
-  main`. For a user-facing change it also bumps the SemVer version and cuts the CHANGELOG
-  entry. Produces a short summary that leads with
+  main`. For a user-facing change it also writes the CHANGELOG entry and, for an owner or
+  member of the repo, bumps the SemVer version. Produces a short summary that leads with
   intent, bans filler openers and file-by-file narration, and points the reviewer at the
   real risk areas. Does not publish (mark ready for review) unless explicitly asked.
 metadata:
@@ -22,7 +22,7 @@ To keep the PR's base current, **rebase onto `origin/main`** before opening it, 
 
 ## High-level flow
 
-1. Pre-flight — for a user-facing change, bump the version + cut the CHANGELOG entry; commit everything; get the local gate (`npm run build`, `npm test`) green.
+1. Pre-flight — for a user-facing change, write the CHANGELOG entry (an owner or member also bumps the version and cuts the release); commit everything; get the local gate (`npm run build`, `npm test`) green.
 2. Rebase the branch onto `origin/main`, then push.
 3. Summarise scope from the commit log + diffstat (never the full diff).
 4. Draft the body against `.github/pull_request_template.md`, applying the rules below.
@@ -34,6 +34,8 @@ To keep the PR's base current, **rebase onto `origin/main`** before opening it, 
 Do these as part of the change and commit them **together** with your code:
 
 - **Changelog & version — user-facing changes only** (a new/changed command, flag, selector, or exit code, or a bug a user would notice). Purely internal work — refactors, tests, CI, docs — gets neither; if that's worth stating, put it in the PR's *Out of scope*.
+
+  **An outside contributor gets the changelog line only.** Unless `gh repo view ddikman/verikun --json viewerPermission --jq .viewerPermission` prints `ADMIN`, `MAINTAIN` or `WRITE` (an owner or member of the repo), skip steps 1 and 2, and in step 3 add the bullet under the existing `## [Unreleased]` heading instead of renaming it — a maintainer picks the version when they release.
   1. **Pick the SemVer bump** from what changed: `patch` (a fix, no new surface), `minor` (a new command/flag or other back-compatible feature), `major` (a breaking change — pre-1.0 you may fold a break into `minor`; use judgment).
   2. **Bump the version — `package.json` is the source of truth; two other spots must match, and one is generated:** run `npm version <patch|minor|major> --no-git-tag-version` (updates `package.json` **and** `package-lock.json`, no git tag/commit), then edit the `version` in `.claude-plugin/plugin.json` (the Claude Code plugin manifest — it has drifted before) to the same value. `src/version.ts`'s `VERSION` (what `vk --version` prints, and the plan-cache compiler fingerprint) is **generated from `package.json`** by the `prebuild` step (`scripts/gen-version.mjs`) — do NOT hand-edit it; the gate's `npm run build` below regenerates it and recompiles `dist/`.
   3. **Cut the changelog entry:** in `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - <today>` (new version + today's date), describe this change under the right `### Added` / `### Fixed` / `### Changed` heading, and add a fresh empty `## [Unreleased]` above it. Write the bullet in the house style — **one line, ≤ 25 words, leading with the command or flag** — per `.claude/skills/changelog-entry/SKILL.md`. The root cause, the benchmarks and the design rationale go in *this PR's* body, not in the entry; that is the same split the PR rules below ask for.
@@ -209,7 +211,7 @@ If it should be a draft but isn't, `gh pr ready <n> --undo`. Leave it as a draft
 - URLs or code identifiers in the TL;DR *sentence* (the `Resolves #12` line below it is the exception); filler openers ("This PR introduces…", "This pull request…").
 - A side-effect framed as the reason; irrelevant facts.
 - Restating what CI proves ("builds clean", "units pass") — CI runs `npm run build` + `npm run test:ci` on Node 20.x and 22.x.
-- Bumping the version or dating a `CHANGELOG.md` entry for a purely internal change (refactor / CI / tests / docs) — those ship without either.
+- Bumping the version or dating a `CHANGELOG.md` entry for a purely internal change (refactor / CI / tests / docs) — those ship without either — or as an outside contributor, whose entry stays under `## [Unreleased]`.
 - Bumping `package.json` but forgetting `package-lock.json` or `.claude-plugin/plugin.json` — they've drifted before; keep them in lockstep. (`src/version.ts` is regenerated from `package.json` by `npm run build`'s `prebuild`, so never hand-edit it — it follows automatically.)
 - Skipping the testing section (if untested, say why), or claiming testing without the result — include the before/after, output, screenshot, or reference.
 - A "Generated with Claude Code" footer; Slack/internal thread URLs in the body.
