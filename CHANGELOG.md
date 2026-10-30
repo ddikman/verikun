@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Contributor docs**: outside contributors leave the version alone and add their entry under
+  `## [Unreleased]`; only owners and members of the repository bump it.
+
 ## [0.34.0] - 2026-10-24
 
 ### Added

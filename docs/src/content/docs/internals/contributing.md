@@ -162,6 +162,12 @@ a new capability, major for a broken contract) and **adds a `CHANGELOG.md` entry
 `## [Unreleased]`. The rebuild rotates `COMPILER_FINGERPRINT`, so every cached `vk ai` plan
 recompiles against the new build; that is intended.
 
+:::caution[Not an owner or member of the repository?]
+**Don't bump the version.** Leave `package.json`'s `"version"` alone and add your entry under
+`## [Unreleased]` only, never under a new `## [X.Y.Z]` heading. A maintainer picks the version
+when the change is released.
+:::
+
 ## Releasing to npm
 
 `verikun` is published to the public npm registry by **pushing a tag**;
