@@ -20,11 +20,12 @@ test('providerFor: routes known models to their backend, unknown falls back to a
   assert.equal(providerFor('claude-opus-4-8'), 'anthropic');
   assert.equal(providerFor('codex-cli'), 'codex');
   assert.equal(providerFor('cursor-cli'), 'cursor');
+  assert.equal(providerFor('claude-cli'), 'claude'); // the CLI login — NOT 'anthropic', the API-key backend
   assert.equal(providerFor('nonexistent-model'), 'anthropic');
 });
 
-// Both CLI backends are subscription-billed, so neither can ever spend against the budget.
-for (const model of ['codex-cli', 'cursor-cli']) {
+// Every CLI backend is subscription-billed, so none can ever spend against the budget.
+for (const model of ['codex-cli', 'cursor-cli', 'claude-cli']) {
   test(`${model}: allowed, resolves, and is priced $0 (billed to the subscription)`, () => {
     assert.ok(ALLOWED_MODELS.includes(model));
     assert.equal(resolveModel(model), model);
