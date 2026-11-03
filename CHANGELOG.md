@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **README and docs home page** show an animated phone wireframe — swiping a carousel, logging in,
+  opening a list item — instead of the mascot.
+
 ## [0.35.0] - 2026-10-30
 
 ### Added
