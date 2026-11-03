@@ -5,7 +5,7 @@
 <td width="260" align="center" valign="middle">
 <picture>
 <source media="(prefers-color-scheme: dark)" srcset="docs/readme/illustration-dark.svg">
-<img src="docs/readme/illustration-light.svg" alt="verikun" width="230">
+<img src="docs/readme/illustration-light.svg" alt="A phone wireframe being driven: swiping a carousel, logging in, opening a list item" width="230">
 </picture>
 </td>
 <td valign="middle">

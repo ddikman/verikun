@@ -1,47 +1,74 @@
-<svg width="183" height="253" viewBox="0 0 183 253" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- Docs home hero: a phone wireframe driven the way verikun drives one. Swipe, swipe, log in, open a list row, then wait 5s on the details page. Dark-theme twin: illustration-dark.svg, identical except the palette line. The README uses square copies in docs/readme/; keep the art and animation CSS in sync. -->
+<svg width="183" height="253" viewBox="37.54 6 164.92 228" fill="none" xmlns="http://www.w3.org/2000/svg">
 <style>
-  /* 12s expression loop: neutral → blink → look up-right → concentrate → think → surprised → neutral */
-  .face-feature { transform-box: fill-box; }
-  #eye-left  { transform-origin: center; animation: eyeLeft 12s ease-in-out infinite; }
-  #eye-right { transform-origin: center; animation: eyeRight 12s ease-in-out infinite; }
-  #mouth     { transform-origin: center; animation: mouthMood 12s ease-in-out infinite; }
-
-  @keyframes eyeLeft {
-    0%, 8%   { transform: translate(0,0) scale(1,1); }
-    9.2%     { transform: translate(0,18px) scale(1,.08); }
-    10.4%    { transform: translate(0,0) scale(1,1); }
-    18%, 28% { transform: translate(5px,-7px) scale(.88,.82); }
-    36%, 46% { transform: translate(2px,4px) scale(1.05,.58); }
-    54%, 65% { transform: translate(5px,1px) scale(.92,.48) rotate(-5deg); }
-    73%, 84% { transform: translate(-2px,-7px) scale(1.18,1.18); }
-    94%,100% { transform: translate(0,0) scale(1,1); }
-  }
-  @keyframes eyeRight {
-    0%, 8%   { transform: translate(0,0) scale(1,1); }
-    9.2%     { transform: translate(0,18px) scale(1,.08); }
-    10.4%    { transform: translate(0,0) scale(1,1); }
-    18%, 28% { transform: translate(5px,-7px) scale(.88,.82); }
-    36%, 46% { transform: translate(-2px,4px) scale(1.05,.58); }
-    54%, 65% { transform: translate(-5px,1px) scale(.92,.48) rotate(5deg); }
-    73%, 84% { transform: translate(2px,-7px) scale(1.18,1.18); }
-    94%,100% { transform: translate(0,0) scale(1,1); }
-  }
-  @keyframes mouthMood {
-    0%, 28%  { transform: translate(0,0) scale(1,1); }
-    36%, 46% { transform: translate(-1px,3px) scale(.78,.72) rotate(-4deg); }
-    54%, 65% { transform: translate(-4px,1px) scale(.62,.55) rotate(8deg); }
-    73%, 84% { transform: translate(-8px,-3px) scale(.42,.42) rotate(-18deg); }
-    94%,100% { transform: translate(0,0) scale(1,1); }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    #eye-left, #eye-right, #mouth { animation: none; }
-  }
+  svg{--ink:#000;--paper:#FFFFFA;--strong:#3E3E39;--muted:#E1E1D8;--line:#C2C2B8;--soft:#D2D2CA;--spot:#6B6B66}
+  /* One 13s timeline and no animation-delay, so every frame is a function of t mod 13s and the
+     screens never drift apart. Keyframe % = seconds / 13 x 100.
+     0.15 carousel builds · 1.2 swipe to page 2 · 2.4 swipe on to login · 3.25 login builds
+     4.45 tap the button · 5.05 list builds · 6.25 tap row 1 · 6.85 details build
+     7.6-12.6 wait 5s · 12.85 blank, loop.
+     Only opacity and translate are animated: Safari diverges on SVG scale/transform-origin. */
+  .ink{fill:var(--ink)}.paper{fill:var(--paper)}.strong{fill:var(--strong)}.muted{fill:var(--muted)}.soft{fill:var(--soft)}
+  .x{stroke:var(--line);stroke-width:1.2;stroke-linecap:round}
+  .field{fill:var(--paper);stroke:var(--line);stroke-width:1.4}
+  .label{fill:var(--paper);fill-opacity:.8}
+  .pressc{fill:var(--paper)}
+  .hlc{fill:var(--ink);fill-opacity:.07}
+  .spotc{fill:var(--spot);fill-opacity:.5;stroke:var(--ink);stroke-opacity:.3;stroke-width:1.2}
+  /* Without motion, the base styles are one still frame: the login screen, its button being tapped. */
+  .scrC,.scrS,.scrD,.hl{opacity:0}.press{opacity:.35}.spot{transform:translate(62px,148.5px)}
+  .a{animation:13s linear infinite}
+  .scrC{animation-name:scrC}.pC1{animation-name:pC1}.pC2{animation-name:pC2}.track{animation-name:track}.dots{animation-name:dots}.pill{animation-name:pill}.scrL{animation-name:scrL}.pL1{animation-name:pL1}.pL2{animation-name:pL2}.pL3{animation-name:pL3}.press{animation-name:press}.scrS{animation-name:scrS}.pS1{animation-name:pS1}.pS2{animation-name:pS2}.pS3{animation-name:pS3}.hl{animation-name:hl}.scrD{animation-name:scrD}.pD1{animation-name:pD1}.pD2{animation-name:pD2}.pD3{animation-name:pD3}.pD4{animation-name:pD4}.pD5{animation-name:pD5}.spot{animation-name:spot}
+  @keyframes scrC{0%{opacity:1}24.615%{opacity:1}24.692%{opacity:0}99.923%{opacity:0}100%{opacity:1}}
+  @keyframes pC1{0%{opacity:0;transform:translateY(3px)}1.154%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}3.462%{opacity:1;transform:translateY(0)}24.615%{opacity:1;transform:translateY(0)}24.692%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pC2{0%{opacity:0;transform:translateY(3px)}2.308%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}4.615%{opacity:1;transform:translateY(0)}24.615%{opacity:1;transform:translateY(0)}24.692%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes track{0%{transform:translateX(0px)}9.231%{transform:translateX(0px)}12.308%{transform:translateX(-44px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}15%{transform:translateX(-96px)}18.462%{transform:translateX(-96px)}21.538%{transform:translateX(-140px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}24.231%{transform:translateX(-192px)}24.769%{transform:translateX(-192px)}24.846%{transform:translateX(0px)}100%{transform:translateX(0px)}}
+  @keyframes dots{0%{transform:translateX(0px)}18.462%{transform:translateX(0px)}21.538%{transform:translateX(-44px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}24.231%{transform:translateX(-96px)}24.769%{transform:translateX(-96px)}24.846%{transform:translateX(0px)}100%{transform:translateX(0px)}}
+  @keyframes pill{0%{transform:translateX(0px)}12.308%{transform:translateX(0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}15%{transform:translateX(10px)}24.769%{transform:translateX(10px)}24.846%{transform:translateX(0px)}100%{transform:translateX(0px)}}
+  @keyframes scrL{0%{opacity:0}24.923%{opacity:0}25%{opacity:1}36.538%{opacity:1}38.077%{opacity:0}100%{opacity:0}}
+  @keyframes pL1{0%{opacity:0;transform:translateY(3px)}25%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}27.308%{opacity:1;transform:translateY(0)}38.077%{opacity:1;transform:translateY(0)}38.154%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pL2{0%{opacity:0;transform:translateY(3px)}26.154%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}28.462%{opacity:1;transform:translateY(0)}38.077%{opacity:1;transform:translateY(0)}38.154%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pL3{0%{opacity:0;transform:translateY(3px)}27.308%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}29.615%{opacity:1;transform:translateY(0)}38.077%{opacity:1;transform:translateY(0)}38.154%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes press{0%{opacity:0}34.231%{opacity:0}34.615%{opacity:.35}35.923%{opacity:.35}37.462%{opacity:0}100%{opacity:0}}
+  @keyframes scrS{0%{opacity:0}38.769%{opacity:0}38.846%{opacity:1}50.385%{opacity:1}51.923%{opacity:0}100%{opacity:0}}
+  @keyframes pS1{0%{opacity:0;transform:translateY(3px)}38.846%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}41.154%{opacity:1;transform:translateY(0)}51.923%{opacity:1;transform:translateY(0)}52%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pS2{0%{opacity:0;transform:translateY(3px)}40%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}42.308%{opacity:1;transform:translateY(0)}51.923%{opacity:1;transform:translateY(0)}52%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pS3{0%{opacity:0;transform:translateY(3px)}41.154%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}43.462%{opacity:1;transform:translateY(0)}51.923%{opacity:1;transform:translateY(0)}52%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes hl{0%{opacity:0}48.077%{opacity:0}48.538%{opacity:1}51.923%{opacity:1}52%{opacity:0}100%{opacity:0}}
+  @keyframes scrD{0%{opacity:0}52.615%{opacity:0}52.692%{opacity:1}96.923%{opacity:1}98.846%{opacity:0}100%{opacity:0}}
+  @keyframes pD1{0%{opacity:0;transform:translateY(3px)}52.692%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}55%{opacity:1;transform:translateY(0)}98.846%{opacity:1;transform:translateY(0)}98.923%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pD2{0%{opacity:0;transform:translateY(3px)}53.846%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}56.154%{opacity:1;transform:translateY(0)}98.846%{opacity:1;transform:translateY(0)}98.923%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pD3{0%{opacity:0;transform:translateY(3px)}54.615%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}56.923%{opacity:1;transform:translateY(0)}98.846%{opacity:1;transform:translateY(0)}98.923%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pD4{0%{opacity:0;transform:translateY(3px)}55.385%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}57.692%{opacity:1;transform:translateY(0)}98.846%{opacity:1;transform:translateY(0)}98.923%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes pD5{0%{opacity:0;transform:translateY(3px)}56.154%{opacity:0;transform:translateY(3px);animation-timing-function:cubic-bezier(.2,.7,.3,1)}58.462%{opacity:1;transform:translateY(0)}98.846%{opacity:1;transform:translateY(0)}98.923%{opacity:0;transform:translateY(3px)}100%{opacity:0;transform:translateY(3px)}}
+  @keyframes spot{0%{opacity:0;transform:translate(74px,170px)}9.154%{opacity:0;transform:translate(74px,170px)}9.231%{opacity:1;transform:translate(74px,170px)}12.308%{opacity:1;transform:translate(30px,170px)}14.615%{opacity:0;transform:translate(30px,170px)}18.385%{opacity:0;transform:translate(74px,170px)}18.462%{opacity:1;transform:translate(74px,170px)}21.538%{opacity:1;transform:translate(30px,170px)}23.846%{opacity:0;transform:translate(30px,170px)}34.154%{opacity:0;transform:translate(62px,148.5px)}34.231%{opacity:1;transform:translate(62px,148.5px)}35.154%{opacity:1;transform:translate(62px,148.5px)}37.462%{opacity:0;transform:translate(62px,148.5px)}48%{opacity:0;transform:translate(57px,93px)}48.077%{opacity:1;transform:translate(57px,93px)}49%{opacity:1;transform:translate(57px,93px)}51.308%{opacity:0;transform:translate(57px,93px)}51.385%{opacity:0;transform:translate(74px,170px)}100%{opacity:0;transform:translate(74px,170px)}}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
-<path fill-rule="evenodd" clip-rule="evenodd" d="M73.1191 49.7928L39 15.7223C46.6405 8.09258 59.0283 8.09258 66.6688 15.7223C77.5377 26.5756 90.8496 39.8681 90.8496 39.8681C90.8496 39.8681 104.161 26.5756 115.03 15.7223C122.671 8.09258 135.059 8.09258 142.699 15.7223L108.58 49.7928H123.134C133.94 49.7928 142.699 58.5399 142.699 69.3303H39C39 58.5399 47.7592 49.7928 58.5646 49.7928H73.1191Z" fill="black"/>
-<path fill-rule="evenodd" clip-rule="evenodd" d="M90.238 244.591C65.053 244.417 34.3199 242.783 24.8946 229.418C18.5712 220.451 17.4482 209.869 17.2698 185.253C17.1133 163.592 15.5851 108.369 21.9872 85.0035C28.3893 61.6381 38.3402 60.7308 47.3956 58.4451C64.9367 55.7526 83.953 55.1363 90.5887 54.9992C90.5918 54.9738 90.5938 54.9607 90.5938 54.9607C90.5938 54.9607 91.0216 54.9635 91.815 54.9762C92.6084 54.9635 93.0364 54.9607 93.0364 54.9607C93.0364 54.9607 93.038 54.9738 93.0411 54.9992C99.6772 55.1363 118.693 55.7526 136.234 58.4451C145.29 60.7308 155.241 61.6381 161.643 85.0035C168.045 108.369 166.517 163.592 166.36 185.253C166.182 209.869 165.059 220.451 158.735 229.418C149.31 242.783 118.577 244.417 93.3918 244.591C93.2747 244.601 93.1561 244.605 93.0364 244.605C92.6309 244.603 92.224 244.602 91.815 244.6C91.4064 244.602 90.9989 244.603 90.5938 244.605C90.4741 244.605 90.3554 244.601 90.238 244.591Z" fill="black"/>
-<path fill-rule="evenodd" clip-rule="evenodd" d="M92.7755 224.964C90.3229 225.066 80.3114 225.346 70.2897 223.694C52.5136 220.762 43.1551 216.451 40.6859 205.952C38.2171 195.454 39.0814 118.134 39.4552 104.518C39.8294 90.9016 42.3898 78.4442 55.4499 75.7261C68.51 73.0081 72.8704 73.8823 73.3645 75.7261C74.3785 85.2719 77.1165 85.5764 92.1968 85.5038C92.199 85.5002 92.2026 85.498 92.2073 85.498C92.3983 85.4991 92.5881 85.4998 92.7755 85.5009C92.963 85.4998 93.1522 85.4991 93.3433 85.498C93.3483 85.498 93.3517 85.5002 93.3538 85.5038C108.434 85.5764 111.172 85.2719 112.186 75.7261C112.68 73.8823 117.041 73.0081 130.101 75.7261C143.161 78.4442 145.721 90.9016 146.095 104.518C146.47 118.134 147.334 195.454 144.865 205.952C142.396 216.451 133.037 220.762 115.261 223.694C105.239 225.346 95.2281 225.066 92.7755 224.964Z" fill="#FFFFFA"/>
-<path id="mouth" class="face-feature" d="M92.5234 187.78C102.5 189 117 181.5 120.06 170.049" stroke="black" stroke-width="14" stroke-miterlimit="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path id="eye-left" class="face-feature" fill-rule="evenodd" clip-rule="evenodd" d="M78.9375 120.102C79.2192 120.102 79.4887 120.216 79.6849 120.417C79.8816 120.618 79.9884 120.89 79.9819 121.171C79.8378 126.956 79.1519 154.475 79.0113 160.128C78.9972 160.693 78.534 161.144 77.9677 161.144C75.3678 161.144 68.5049 161.144 65.8494 161.144C65.5682 161.144 65.2987 161.031 65.102 160.83C64.9053 160.629 64.7987 160.357 64.8058 160.076C64.9499 154.291 65.635 126.772 65.776 121.119C65.7902 120.553 66.2528 120.102 66.8196 120.102C69.4191 120.102 76.2824 120.102 78.9375 120.102Z" fill="black"/>
-<path id="eye-right" class="face-feature" fill-rule="evenodd" clip-rule="evenodd" d="M119.016 120.102C119.293 120.102 119.558 120.212 119.754 120.408C119.95 120.603 120.06 120.869 120.06 121.145C120.06 126.864 120.06 154.382 120.06 160.102C120.06 160.678 119.593 161.144 119.016 161.144H106.897C106.62 161.144 106.355 161.035 106.159 160.839C105.963 160.644 105.853 160.379 105.853 160.102V121.145C105.853 120.569 106.32 120.102 106.897 120.102C109.524 120.102 116.388 120.102 119.016 120.102Z" fill="black"/>
+<defs><clipPath id="screen"><rect x="72" y="18" width="96" height="204" rx="16"/></clipPath></defs>
+<rect x="64" y="10" width="112" height="220" rx="24" class="ink"/>
+<rect x="72" y="18" width="96" height="204" rx="16" class="paper"/>
+<g clip-path="url(#screen)"><g transform="translate(72 18)">
+<g class="a scrC">
+  <g class="a track"><g class="a pC1"><rect x="14" y="28" width="68" height="80" rx="6" class="muted"/><path d="M16.6 30.6L79.4 105.4M79.4 30.6L16.6 105.4" class="x"/></g><rect x="118" y="24" width="52" height="88" rx="6" class="muted"/><path d="M120.6 26.6L167.4 109.4M167.4 26.6L120.6 109.4" class="x"/></g>
+  <g class="a dots"><g class="a pC2"><circle cx="38" cy="134" r="2.2" class="soft"/><circle cx="48" cy="134" r="2.2" class="soft"/><circle cx="58" cy="134" r="2.2" class="soft"/><rect x="33" y="131.8" width="10" height="4.4" rx="2.2" class="a pill ink"/></g></g>
+</g>
+<g class="a scrL">
+  <g class="a pL1"><rect x="30" y="34" width="36" height="36" rx="6" class="muted"/><path d="M32.6 36.6L63.4 67.4M63.4 36.6L32.6 67.4" class="x"/></g>
+  <g class="a pL2"><rect x="14" y="112" width="68" height="17" rx="4.5" class="field"/><rect x="21" y="118.5" width="24" height="4" rx="2" class="soft"/></g>
+  <g class="a pL3"><rect x="14" y="140" width="68" height="17" rx="8.5" class="ink"/><rect x="36" y="146.5" width="24" height="4" rx="2" class="label"/><rect x="14" y="140" width="68" height="17" rx="8.5" class="a press pressc"/></g>
+</g>
+<g class="a scrS">
+  <g class="a pS1"><rect x="10" y="24" width="76" height="40" rx="6" class="muted"/></g>
+  <g class="a pS2"><rect x="4" y="78" width="88" height="30" rx="6" class="a hl hlc"/><rect x="10" y="83" width="20" height="20" rx="4" class="muted"/><rect x="36" y="86" width="44" height="5" rx="2.5" class="strong"/><rect x="36" y="95" width="30" height="4" rx="2" class="soft"/></g>
+  <g class="a pS3"><rect x="10" y="114" width="20" height="20" rx="4" class="muted"/><rect x="36" y="117" width="38" height="5" rx="2.5" class="strong"/><rect x="36" y="126" width="34" height="4" rx="2" class="soft"/></g>
+</g>
+<g class="a scrD">
+  <g class="a pD1"><rect x="0" y="0" width="96" height="80" class="muted"/><path d="M0 0L96 80M96 0L0 80" class="x"/></g>
+  <g class="a pD2"><rect x="10" y="96" width="60" height="7" rx="3.5" class="strong"/></g>
+  <g class="a pD3"><rect x="10" y="112" width="22" height="9" rx="4.5" class="muted"/></g>
+  <g class="a pD4"><rect x="10" y="132" width="76" height="4" rx="2" class="soft"/></g>
+  <g class="a pD5"><rect x="10" y="141" width="62" height="4" rx="2" class="soft"/></g>
+</g>
+<g class="a spot"><circle r="6.5" class="spotc"/></g>
+</g></g>
 </svg>

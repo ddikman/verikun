@@ -1,4 +1,4 @@
-<!-- Social-card twin of illustration-light.svg, without the animation: `npm run og` renders it to public/og.png, the og:image of every page. Keep the art in sync. -->
+<!-- Social card: the wordmark, tagline and mascot. `npm run og` renders it to public/og.png, the og:image of every page. -->
 <svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
 <rect width="1200" height="630" fill="#FFFFFA"/>
 <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif">
