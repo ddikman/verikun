@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **iOS screen size** is in points rather than pixels, for the app's display and orientation, so
+  directional `vk swipe`, off-screen detection and auto-scroll use the real screen.
+
 ## [0.35.0] - 2026-10-30
 
 ### Added

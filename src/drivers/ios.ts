@@ -29,8 +29,8 @@ import { pollUntil, throttledProgress } from '../wait';
 // process-per-command shape. Install: `brew install idb-companion` + `pip install
 // fb-idb` (see `vk doctor --ios`).
 //
-// Coordinates are in idb's point space: `idb ui describe-all` frames, `idb ui tap`,
-// and `idb describe` screen_dimensions all agree, so element.center taps land.
+// Coordinates are in idb's point space: `idb ui describe-all` frames and `idb ui tap`
+// agree, so element.center taps land.
 // (simctl screenshots are pixels = points × scale — they are for viewing only and
 // never feed back into a tap.)
 
@@ -484,13 +484,18 @@ export class IdbDriver implements Driver {
   }
 
   screenSize(): { width: number; height: number } {
-    // Prefer idb's target description (points, same space as tap/swipe).
+    // An off-screen point makes idb report the bounds taps are checked against: the app's
+    // display in its current orientation. `idb describe` only knows the primary display
+    // in its natural orientation, which is wrong on an unfolded iPhone Duo.
+    const probe = runText(IDB, ['ui', 'describe-point', '100000', '100000', '--udid', this.udid()]);
+    const bounds = /point bounds \(([\d.]+) x ([\d.]+)\)/.exec(probe.stderr);
+    if (bounds) return { width: Number(bounds[1]), height: Number(bounds[2]) };
     try {
       const d = JSON.parse(this.idbText(['describe', '--json'])) as {
-        screen_dimensions?: { width?: number; height?: number };
+        screen_dimensions?: { width_points?: number; height_points?: number };
       };
-      const w = Number(d.screen_dimensions?.width);
-      const h = Number(d.screen_dimensions?.height);
+      const w = Number(d.screen_dimensions?.width_points);
+      const h = Number(d.screen_dimensions?.height_points);
       if (w > 0 && h > 0) return { width: w, height: h };
     } catch {
       /* fall through to deriving from the hierarchy */
