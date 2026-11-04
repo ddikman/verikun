@@ -120,7 +120,7 @@ const RECORDABLE = new Set([
   'tap', 'click',
   'text', 'type',
   'key', 'back', 'home', 'enter',
-  'swipe', 'scroll',
+  'swipe', 'scroll', 'drag',
   'screenshot', 'shot',
   'wait', 'assert',
   'launch', 'open', 'stop', 'clear',
@@ -402,6 +402,8 @@ export function stepName(command: string, positionals: string[], flags: Record<s
     case 'scroll':
       if (from && to) return `swipe ${from}->${to}`;
       return `swipe ${p[0] ?? ''}${on ? ` on ${on}` : ''}`.trim();
+    case 'drag':
+      return from && to ? `drag ${from}->${to}` : `drag ${p[0] ?? ''} onto ${to ?? ''}`.trim();
     case 'screenshot':
     case 'shot':
       return 'screenshot';

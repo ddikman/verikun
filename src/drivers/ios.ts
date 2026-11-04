@@ -524,6 +524,21 @@ export class IdbDriver implements Driver {
     ]);
   }
 
+  drag(x1: number, y1: number, x2: number, y2: number, holdMs: number, durationMs: number): void {
+    this.idbText([
+      'ui',
+      'drag-and-drop',
+      '--press-duration',
+      String(holdMs / 1000),
+      '--duration',
+      String(durationMs / 1000),
+      String(Math.round(x1)),
+      String(Math.round(y1)),
+      String(Math.round(x2)),
+      String(Math.round(y2)),
+    ]);
+  }
+
   inputText(text: string): void {
     if (!text) return;
     // Passed as a single argv (spawnSync, no host shell), so no device-shell escaping

@@ -431,7 +431,7 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
 export function leafTimeoutMs(req: ExecRequest): number {
   let budget = 30_000;
   if (req.command === 'wait') budget = parseDuration(req.flags.timeout ?? '10000', 'timeout');
-  else if (['tap', 'text', 'assert', 'find', 'swipe'].includes(req.command)) budget += waitWindowMs(req.flags);
+  else if (['tap', 'text', 'assert', 'find', 'swipe', 'drag'].includes(req.command)) budget += waitWindowMs(req.flags);
   else if (req.command === 'install') budget = 600_000;
   else if (req.command === 'launch') budget = 60_000;
   return Math.max(60_000, budget + 120_000);

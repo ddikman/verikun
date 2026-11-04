@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`vk drag`** presses, holds (`--hold`, default 800ms), moves and releases, for list reordering and
+  drag-and-drop; `--from/--to` points or `<selector> --to <selector>`.
+
 ## [0.35.0] - 2026-10-30
 
 ### Added

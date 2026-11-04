@@ -233,6 +233,8 @@ const PIXEL_FORMAT_RGBA_8888 = 1;
 
 const DEFAULT_LOG_LINES = 200;
 
+const DRAG_STEPS = 10;
+
 /**
  * Escape a string for `adb shell input text <arg>`. The argument is parsed twice
  * before it reaches the field: once by the on-device shell (mksh), then by
@@ -1085,6 +1087,19 @@ export class AdbDriver implements Driver {
       String(Math.round(y2)),
       String(Math.round(durationMs)),
     ]);
+  }
+
+  drag(x1: number, y1: number, x2: number, y2: number, holdMs: number, durationMs: number): void {
+    this.ensureAwake('dragging');
+    // `input draganddrop` exists, but its hold is fixed at the long-press timeout and
+    // counted inside its duration, so a stationary hold has to be spelled out.
+    const at = (t: number) => `${Math.round(x1 + (x2 - x1) * t)} ${Math.round(y1 + (y2 - y1) * t)}`;
+    const cmds = [`input motionevent DOWN ${at(0)}`, `sleep ${holdMs / 1000}`];
+    for (let i = 1; i <= DRAG_STEPS; i++) {
+      cmds.push(`input motionevent MOVE ${at(i / DRAG_STEPS)}`, `sleep ${durationMs / DRAG_STEPS / 1000}`);
+    }
+    cmds.push(`input motionevent UP ${at(1)}`);
+    this.shell([cmds.join('; ')]);
   }
 
   inputText(text: string): void {

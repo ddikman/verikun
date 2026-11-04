@@ -104,6 +104,8 @@ usually don't need a `wait` before an action — `vk tap @next` already polls fo
 - `vk type "text" [--enter]` — type into the already-focused field
 - `vk swipe up|down|left|right [--on <selector>] [--distance f] [--duration ms]`
 - `vk swipe --from x,y --to x,y [--duration ms]`
+- `vk drag <selector> --to <selector>`  ·  `vk drag --from x,y --to x,y [--hold ms] [--duration ms]`
+  — long-press drag (default hold 800ms) for reordering and drag-and-drop
 - `vk key <name|code>`  ·  `vk back`  ·  `vk home`  ·  `vk enter`
   Named keys include `sleep` and `wakeup`. `power` is a **toggle**, so use `sleep`/`wakeup`
   when you mean a direction.
@@ -230,7 +232,7 @@ using them with `--ios` exits **3** instead of matching nothing forever.
 
 ## Auto-wait
 
-Selector commands (`tap`, `text`, `find`, `assert`, `swipe --on`) **retry the
+Selector commands (`tap`, `text`, `find`, `assert`, `swipe --on`, `drag`) **retry the
 lookup for up to 5s** instead of failing on the first miss — they re-capture the
 hierarchy until it resolves. The screen is usually still settling after the prior
 action, so this lets you act/verify directly without a `wait` in between, saving
