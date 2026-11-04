@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **iOS simulator screenshots** work on simulators with several displays (iPhone Duo), capturing the
+  display the app is on, folded or unfolded.
+
 ## [0.35.0] - 2026-10-30
 
 ### Added
