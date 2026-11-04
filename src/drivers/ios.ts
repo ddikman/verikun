@@ -510,13 +510,12 @@ export class IdbDriver implements Driver {
     this.idbText(['ui', 'tap', String(Math.round(x)), String(Math.round(y))]);
   }
 
-  swipe(x1: number, y1: number, x2: number, y2: number, _durationMs: number): void {
-    // idb controls swipe speed via `--delta` (px per step), not a ms duration, and
-    // the flag's availability varies by version — so we pass coordinates only for
-    // maximum compatibility. durationMs is not honored (a documented iOS gap).
+  swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): void {
     this.idbText([
       'ui',
       'swipe',
+      '--duration',
+      String(durationMs / 1000),
       String(Math.round(x1)),
       String(Math.round(y1)),
       String(Math.round(x2)),
