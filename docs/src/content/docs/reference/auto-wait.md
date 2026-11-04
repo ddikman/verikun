@@ -11,7 +11,7 @@ needs far fewer explicit `wait` and `swipe` calls than you would expect.
 ## Auto-wait
 
 A UI rarely settles the instant the previous action returns. So selector commands — `tap`,
-`text`, `find`, `assert`, and `swipe --on` — **do not fail the moment a lookup misses**. They
+`text`, `find`, `assert`, `swipe --on`, and `drag` — **do not fail the moment a lookup misses**. They
 re-capture the hierarchy and retry until it resolves or a **5-second** window elapses.
 
 ```sh

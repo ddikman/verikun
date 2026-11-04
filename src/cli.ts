@@ -861,6 +861,37 @@ async function cmdSwipe(ctx: Ctx): Promise<number> {
   return 0;
 }
 
+async function cmdDrag(ctx: Ctx): Promise<number> {
+  const hold = flagNum(ctx.flags, 'hold') ?? 800;
+  const duration = flagNum(ctx.flags, 'duration') ?? 500;
+  const from = flagStr(ctx.flags, 'from');
+  const to = flagStr(ctx.flags, 'to');
+  const source = ctx.positionals[0];
+  if (!to || !from === !source || hold < 0 || duration < 0) {
+    throw new CliError(
+      'Usage: verikun drag --from x,y --to x,y | drag <selector> --to <selector> [--hold ms] [--duration ms]',
+      2,
+    );
+  }
+
+  if (from) {
+    const a = parsePoint(from);
+    const b = parsePoint(to);
+    ctx.driver.drag(a.x, a.y, b.x, b.y, hold, duration);
+    ctx.record?.note({ message: `dragged (${a.x},${a.y})->(${b.x},${b.y})` });
+    out(`dragged (${a.x},${a.y})->(${b.x},${b.y})`);
+    return 0;
+  }
+
+  const srcSel = buildSelector(ctx, source);
+  const { element: src, tier, waitedMs: w1 } = await resolveOneWaiting(ctx, srcSel);
+  const { element: dst, waitedMs: w2 } = await resolveOneWaiting(ctx, buildSelector(ctx, to));
+  ctx.driver.drag(src.center.x, src.center.y, dst.center.x, dst.center.y, hold, duration);
+  ctx.record?.note({ selector: srcSel, tier, element: src, message: `dragged onto ${formatInline(dst)}` });
+  out(`dragged ${formatInline(src)} onto ${formatInline(dst)}${healNote(tier)}${waitNote(w1 + w2)}`);
+  return 0;
+}
+
 // Screenshots are downscaled by default so an agent reading them spends fewer
 // tokens (image cost scales with pixel area) — we rarely need much detail to tell
 // what's on screen, and text stays legible at a small size. The cap is the
@@ -3781,6 +3812,8 @@ async function executeCommand(command: string, ctx: Ctx): Promise<number> {
     case 'swipe':
     case 'scroll':
       return await cmdSwipe(ctx);
+    case 'drag':
+      return await cmdDrag(ctx);
     case 'screenshot':
     case 'shot':
       return cmdScreenshot(ctx);
@@ -4070,6 +4103,8 @@ ACT
   key <name|code> | back | home | enter            Send a key event
   swipe <up|down|left|right> [--on <selector>] [--distance f] [--duration ms]
   swipe --from x,y --to x,y [--duration ms]
+  drag --from x,y --to x,y | drag <selector> --to <selector> [--hold ms] [--duration ms]
+                                      Long-press drag (default hold 800ms) for reordering and drag-and-drop
   screenshot [--out path] [--more] [--max px] [--full] [--json]   Save a PNG (default: ./.verikun/screen.png)
                                       Downscaled to <=700px longest edge for token-cheap, legible reads;
                                       --more bumps detail (1400px), --max px sets an exact cap
@@ -4256,7 +4291,7 @@ SELECTORS
              on iOS they exit 3 rather than matching nothing.
 
 AUTO-WAIT (selector lookups retry until they resolve)
-  Selector commands (tap, text, find, assert, swipe --on) re-poll the screen for
+  Selector commands (tap, text, find, assert, swipe --on, drag) re-poll the screen for
   up to 5s when a lookup misses, so a settling UI needs no explicit \`wait\`.
   --wait <dur>   override the window: 8s, 800ms, or bare ms (3000); 0 disables
   --no-wait      fail fast on the first miss (same as --wait 0)

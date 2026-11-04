@@ -56,6 +56,7 @@ What varies on Android is the **device**, and three differences bite in practice
 <tr><td><code>back</code></td><td>✅</td><td>✅</td><td>❌ <code>2</code> — no hardware Back</td><td>❌ <code>2</code> — no hardware Back</td></tr>
 <tr><td><code>home</code> / <code>enter</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>swipe</code> / <code>scroll</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--duration</code> ignored</td><td>⚠️ <code>--duration</code> ignored</td></tr>
+<tr><td><code>drag</code></td><td>✅</td><td>✅</td><td>⚠️ needs idb's <code>ui drag-and-drop</code></td><td>⚠️ needs idb's <code>ui drag-and-drop</code></td></tr>
 <tr><td><code>screenshot</code> / <code>shot</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td><code>launch</code> / <code>open</code></td><td>✅</td><td>✅</td><td>⚠️ <code>--clear</code> exits <code>3</code></td><td>⚠️ <code>--clear</code> exits <code>3</code></td></tr>
 <tr><td><code>stop</code></td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
@@ -102,6 +103,8 @@ Notes on the rows that carry a caveat:
 - **`swipe --duration` is ignored on iOS.** `idb` paces a swipe in pixels per step, so
   verikun passes coordinates only. [Auto-scroll](/verikun/reference/auto-wait/#auto-scroll-into-view)
   still works; it cannot pace the gesture there.
+- **`drag` on iOS needs an idb with `ui drag-and-drop`** (fb-idb 1.7.0 has it). With an older
+  idb the command exits `3` with idb's own error.
 - **`suite --app` does not reset app data on iOS.** It degrades to a force-stop, so a test
   that depends on starting logged-out does not hold there — see
   [Suites](/verikun/guides/suites/).
