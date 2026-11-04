@@ -138,7 +138,7 @@ export const KNOWN_COMMANDS: ReadonlySet<string> = new Set([
   'tap', 'click',
   'text', 'type',
   'key', 'back', 'home', 'enter',
-  'swipe', 'scroll',
+  'swipe', 'scroll', 'drag',
   'screenshot', 'shot',
   'wait', 'assert',
   'launch', 'open', 'stop', 'clear',

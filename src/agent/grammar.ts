@@ -26,6 +26,7 @@ Each step is one of six node types, named by its "type":
      type <value...>              — type into the already-focused field
      key <name> | back | home | enter
      swipe <up|down|left|right> [--on <selector>]  — scroll/swipe (up = scroll down the page)
+     drag <selector> --to <selector>  — press and hold an element, then drag it onto another (reorder, drag-and-drop)
      assert <selector> [--text <s>] [--gone]       — assert presence/text/absence (FAILS the test if false)
      wait <selector> [--gone] [--timeout <ms>]     — block until present/absent
      screenshot                   — capture the screen into the report

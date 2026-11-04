@@ -273,7 +273,7 @@ function planMentions(tokens: string[], anchor: string): boolean {
 
 /** Commands whose FIRST positional is a selector. The rest of `text`'s positionals, and every
  *  positional of `type`/`launch`/…, is data — `type @handle` types a handle, it selects nothing. */
-const SELECTOR_FIRST: ReadonlySet<string> = new Set(['tap', 'click', 'text', 'wait', 'assert']);
+const SELECTOR_FIRST: ReadonlySet<string> = new Set(['tap', 'click', 'text', 'wait', 'assert', 'drag']);
 
 /** Every string the engine resolves as a selector — unlike `planTokens`, which also returns data. */
 function selectorsOf(plan: Plan): string[] {
@@ -283,6 +283,9 @@ function selectorsOf(plan: Plan): string[] {
       if (SELECTOR_FIRST.has(n.command) && n.positionals[0]) out.push(n.positionals[0]);
       if (n.command === 'swipe' || n.command === 'scroll') {
         for (const f of n.flags) if (f.name === 'on') out.push(f.value);
+      }
+      if (n.command === 'drag') {
+        for (const f of n.flags) if (f.name === 'to') out.push(f.value);
       }
     } else if (n.type === 'when') {
       out.push(...n.branches.map((b) => b.selector));

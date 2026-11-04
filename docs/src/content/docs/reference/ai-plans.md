@@ -51,6 +51,7 @@ Commands the grammar permits:
 | `type` | — |
 | `key` / `back` / `home` / `enter` | — |
 | `swipe` | `--on` |
+| `drag` | `--to` |
 | `assert` | `--text`, `--gone` |
 | `wait` | `--gone`, `--timeout` |
 | `screenshot` | — |
