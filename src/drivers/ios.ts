@@ -460,7 +460,9 @@ export class IdbDriver implements Driver {
   screenshot(): Buffer {
     const tmp = join(tmpdir(), `verikun-ios-${process.pid}.png`);
     if (this.isSimulator()) {
-      const r = runText(XCRUN, ['simctl', 'io', this.udid(), 'screenshot', tmp]);
+      let r = runText(XCRUN, ['simctl', 'io', this.udid(), 'screenshot', tmp]);
+      const display = r.code === 0 ? undefined : this.appDisplay(r.stderr);
+      if (display) r = runText(XCRUN, ['simctl', 'io', this.udid(), 'screenshot', `--display=${display}`, tmp]);
       if (r.code !== 0) throw new CliError(`simctl screenshot failed: ${r.stderr.trim()}`, 3);
     } else {
       this.idbText(['screenshot', tmp]);
@@ -481,6 +483,33 @@ export class IdbDriver implements Driver {
       throw new CliError('iOS screenshot was not a PNG.', 3);
     }
     return buf;
+  }
+
+  /**
+   * A simulator with several displays (iPhone Duo) refuses to screenshot without
+   * `--display` and lists them instead. Pick the one the app window fills: that is the
+   * screen idb's hierarchy and taps address, and folding moves the app between them.
+   * `idb describe` keeps reporting the primary display either way, so only the window
+   * frame tells them apart. Falls back to the primary display.
+   */
+  private appDisplay(listing: string): string | undefined {
+    const displays = [...listing.matchAll(/--display=(\d+)[^\n]*?(\d+)x(\d+)\s*$/gm)].map((m) => ({
+      id: m[1],
+      size: [Number(m[2]), Number(m[3])].sort((a, b) => a - b),
+    }));
+    try {
+      const d = JSON.parse(this.idbText(['describe', '--json'])) as { screen_dimensions?: { density?: number } };
+      const density = Number(d.screen_dimensions?.density);
+      const win = parseIosHierarchy(this.idbText(['ui', 'describe-all']), { all: true })[0]?.bounds;
+      if (density > 0 && win) {
+        const want = [win.x2 - win.x1, win.y2 - win.y1].map((v) => Math.round(v * density)).sort((a, b) => a - b);
+        const hit = displays.find((x) => x.size[0] === want[0] && x.size[1] === want[1]);
+        if (hit) return hit.id;
+      }
+    } catch {
+      /* fall back to the primary display */
+    }
+    return /--display=(\d+)[^\n]*\(primary\)/.exec(listing)?.[1];
   }
 
   screenSize(): { width: number; height: number } {
