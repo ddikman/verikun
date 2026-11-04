@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **iOS `vk swipe`** honors `--duration` (default 300ms), so it scrolls instead of doing nothing.
+
 ## [0.35.0] - 2026-10-30
 
 ### Added
