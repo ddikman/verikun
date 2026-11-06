@@ -1,3 +1,8 @@
+---
+description: >-
+  Cross-platform login and delayed-load smoke test for the Flutter fixture app.
+  Demonstrates a shared launch fragment and an explicit wait for a slow result.
+---
 # Login and delayed-load smoke test
 
 @include _launch-to-home.md

@@ -58,11 +58,27 @@ Guidance that materially improves the compiled plan:
 - **Prefer identifiers you know** over descriptions of appearance. "Tap `@get_started`" is
   compiled verbatim; "tap the big green button" is a guess.
 
-Two things the compiler cannot do yet: every line of the file is an instruction, so there is
-no way to leave a note for the next human that is not compiled as a step
-([#130](https://github.com/ddikman/verikun/issues/130)); and "the first match" has no
-compiled form, so name a unique id or text instead
+"The first match" has no compiled form yet, so name a unique id or text instead
 ([#37](https://github.com/ddikman/verikun/issues/37)).
+
+### Notes for the next person
+
+Put human-only notes in YAML frontmatter at the very start of any test or shared fragment:
+
+```md title="_signed-in.md"
+---
+notes: |
+  End the loop on the destination. Some accounts skip the onboarding screen.
+  Match the last control by label; its id differs between OS versions.
+---
+1. Repeat until the home tab is showing, handling whichever screen appears.
+2. Assert the home tab is showing.
+```
+
+`vk ai` removes the entire block before resolving `@include`, compiling, or computing plan
+cache keys. Editing only the notes does not recompile the test or any test using the fragment.
+The opening `---` must be the first line and the closing `---` must stand alone on a line;
+an unclosed block is a usage error (exit `2`). The numbered body is the test.
 
 ## Share a preamble between tests
 
@@ -95,8 +111,8 @@ Repeat until the home tab (`@home`) is showing, tapping past any onboarding card
 - **Name a fragment `_something.md`.** `vk suite` skips `_`-prefixed files, so a fragment
   never runs as a test of its own. (A fragment in a subdirectory is skipped too: suite
   discovery is not recursive.)
-- **The cache key is the resolved text**, so editing a fragment recompiles every test that
-  includes it. It cannot silently replay a stale plan.
+- **The cache key is the resolved test text**, so editing a fragment's steps recompiles every
+  test that includes it. Editing its frontmatter notes leaves the key unchanged.
 - **Each chunk compiles and caches on its own**, and the compiled steps are spliced together.
   A preamble shared by nine tests is compiled once, also across a
   [parallel suite](/verikun/guides/suites/), where the lanes share one cache.
@@ -194,9 +210,9 @@ so on a device in another locale the branch never matches and the repair decline
 
 ## When a plan is recompiled
 
-A cached plan is discarded and the test recompiled when the prose changed (including any
+A cached plan is discarded and the test recompiled when the test body changed (including any
 fragment it `@include`s), the app build changed (`--app-build`), or verikun itself was
-updated. Details: [the plan cache](/verikun/reference/ai-plans/#the-plan-cache).
+updated. Frontmatter notes are excluded. Details: [the plan cache](/verikun/reference/ai-plans/#the-plan-cache).
 
 ## Example tests
 

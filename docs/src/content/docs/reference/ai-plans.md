@@ -246,7 +246,7 @@ on a repeat run means the plan is not being cached — see
 
 ## The plan cache
 
-Plans live in `./.verikun/plans/`, keyed by the test prose + package + app build + platform,
+Plans live in `./.verikun/plans/`, keyed by the test body + package + app build + platform,
 and gated by a **compiler fingerprint** (verikun's version plus the grammar, repair and
 section prompt text).
 
@@ -262,6 +262,8 @@ section prompt text).
   fragments is keyed on the **resolved** text, and each chunk is additionally cached under
   its own text — so shared prose is compiled once across a suite. Prose that states no step
   (a title, a summary) is folded into the chunk of its own file that states the steps.
+- [Frontmatter notes](/verikun/guides/natural-language-tests/#notes-for-the-next-person) are
+  removed before the resolved text is built; editing them leaves both cache keys unchanged.
 - Concurrent runs that miss the same key **serialise**: the first compiles, the rest wait and
   take its result, printing `compiled by a concurrent run (waited 0.5s)`. A hit takes no lock.
   `VERIKUN_NO_PLAN_LOCK=1` turns this off.

@@ -267,7 +267,8 @@ rebuild rotates it.
   truncated compile into a pass replayed against every later build.
 
 The key is the **resolved** prose (every [`@include`](/verikun/guides/natural-language-tests/#share-a-preamble-between-tests)
-inlined) + package + build + platform, and each included chunk also has its own entry under
+inlined, [frontmatter notes](/verikun/guides/natural-language-tests/#notes-for-the-next-person)
+removed) + package + build + platform, and each included chunk also has its own entry under
 its own text. Reads are tolerant (a bad entry is a miss), writes are atomic, the compile is
 cached immediately, and a green run re-persists the healed plan.
 

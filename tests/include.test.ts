@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { resolveIncludes, hasInstruction, statesInstruction, segmentLabel } from '../src/agent/include';
+import { planKey } from '../src/agent/cache';
 import { CliError } from '../src/errors';
 
 // A fake filesystem: `@include` resolution is pure path arithmetic plus one read, so the
@@ -35,6 +36,36 @@ test('resolveIncludes: a test with no includes is one segment, text unchanged', 
   assert.equal(segments.length, 1);
   assert.equal(segments[0].startLine, 1);
   assert.equal(segments[0].compilable, true);
+});
+
+test('resolveIncludes: frontmatter is human-only, and body labels keep their source lines', () => {
+  const { nl, segments } = resolveIncludes('t.md', fs({
+    't.md': '---\nnotes: |\n  The loop ends at home.\n  Do not wait for onboarding.\n---\n1. Assert home is showing.\n',
+  }));
+  assert.equal(nl, '1. Assert home is showing.\n');
+  assert.deepEqual(segments.map((s) => [segmentLabel(s), s.text]), [
+    ['t.md:6', '1. Assert home is showing.\n'],
+  ]);
+});
+
+test('resolveIncludes: fragment notes and their includes stay out of prompts and cache keys', () => {
+  const host = '@include _shared.md\n2. Assert home is showing.\n';
+  const fragment = (note: string): string =>
+    `---\nnotes: |\n  ${note}\n  @include _not-a-test.md\n---\n1. Launch the app.\n`;
+  const first = resolveIncludes('t.md', fs({ 't.md': host, '_shared.md': fragment('Use the destination.'), '_not-a-test.md': 'SHOULD NOT APPEAR' }));
+  const second = resolveIncludes('t.md', fs({ 't.md': host, '_shared.md': fragment('An edited explanation.\n  More context.'), '_not-a-test.md': 'SHOULD NOT APPEAR' }));
+  assert.equal(first.nl, '1. Launch the app.\n2. Assert home is showing.\n');
+  assert.equal(second.nl, first.nl);
+  assert.deepEqual(second.segments.map((s) => s.text), first.segments.map((s) => s.text));
+  assert.equal(planKey({ nl: first.nl, platform: 'android' }), planKey({ nl: second.nl, platform: 'android' }));
+});
+
+test('resolveIncludes: CRLF frontmatter works, while an unclosed block is a usage error', () => {
+  const { nl } = resolveIncludes('t.md', fs({ 't.md': '\uFEFF---\r\nnotes: a human note\r\n---\r\n1. Tap Login\r\n' }));
+  assert.equal(nl, '1. Tap Login\r\n');
+  const error = caught(() => resolveIncludes('t.md', fs({ 't.md': '---\nnotes: explain this\n1. Tap Login\n' })));
+  assert.equal(error.exitCode, 2);
+  assert.match(error.message, /unclosed frontmatter.*t\.md/);
 });
 
 test('resolveIncludes: @include splices the fragment in place, in file order', () => {
@@ -273,10 +304,12 @@ test('resolveIncludes: reads real files, relative to the including file', () => 
 test('resolveIncludes: the shipped device-state example no longer compiles its summary alone (#133)', () => {
   // The repo's own instance of the reported shape — a title and a summary above the first
   // `@include`. Kept as written, so this stays a live fixture rather than a synthetic one.
-  const { segments } = resolveIncludes('example/example-test-devicestate.md');
+  const { nl, segments } = resolveIncludes('example/example-test-devicestate.md');
   assert.equal(segments.length, 2, 'the title and summary folded into the test’s own chunk');
   assert.match(segments[0].source, /_launch-to-home\.md$/);
-  assert.equal(segmentLabel(segments[1]), 'example/example-test-devicestate.md:1');
+  assert.equal(segmentLabel(segments[0]), 'example/_launch-to-home.md:5');
+  assert.equal(segmentLabel(segments[1]), 'example/example-test-devicestate.md:6');
+  assert.doesNotMatch(nl, /^description:/m);
   assert.ok(
     segments[1].text.startsWith('# Device-state smoke test'),
     'the summary is context for the steps it describes, not a test of its own',
@@ -284,7 +317,8 @@ test('resolveIncludes: the shipped device-state example no longer compiles its s
 });
 
 test('resolveIncludes: the login example, which never had the broken shape, is unchanged', () => {
-  const { segments } = resolveIncludes('example/example-test.md');
+  const { nl, segments } = resolveIncludes('example/example-test.md');
   assert.deepEqual(segments.map((s) => s.compilable), [false, true, true]);
-  assert.equal(segmentLabel(segments[0]), 'example/example-test.md:1');
+  assert.equal(segmentLabel(segments[0]), 'example/example-test.md:6');
+  assert.doesNotMatch(nl, /^description:/m);
 });
