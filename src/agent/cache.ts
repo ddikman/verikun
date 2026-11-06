@@ -24,7 +24,7 @@ import { GRAMMAR, REPAIR_GRAMMAR, SECTION_NOTE } from './grammar';
 // never persisted — a failed run leaves the clean compile cached instead.
 
 export interface CacheKeyInput {
-  /** The natural-language test source, verbatim. */
+  /** The resolved test body, with frontmatter removed and includes expanded. */
   nl: string;
   /** App package / bundle id under test (when known). */
   pkg?: string;

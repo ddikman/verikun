@@ -1808,9 +1808,9 @@ function parseAiOptions(flags: Flags): AiOptions {
   };
 }
 
-/** Read a test and inline every `@include` it names (see agent/include.ts). The returned
- *  `nl` is the RESOLVED text, so it is what gets hashed into the plan-cache key — editing
- *  a fragment invalidates every test that includes it. */
+/** Read a test, strip frontmatter, and inline every `@include` (see agent/include.ts).
+ *  The returned `nl` is the RESOLVED text hashed into the plan-cache key — editing a
+ *  fragment's steps invalidates every test that includes it. */
 function readAiTest(file: string): ResolvedTest {
   const resolved = resolveIncludes(file);
   if (!resolved.nl.trim()) throw new CliError(`ai: '${file}' is empty`, 2);

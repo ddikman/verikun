@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-11-06
+
+### Added
+- **`vk ai`** strips human-only frontmatter notes before compiling and caching tests or shared fragments. ([#130])
+
+[#130]: https://github.com/ddikman/verikun/issues/130
+
 ## [0.35.0] - 2026-10-30
 
 ### Added

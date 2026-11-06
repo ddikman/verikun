@@ -1,3 +1,8 @@
+---
+description: >-
+  Checks dark mode and larger system text in the Flutter fixture app, then restores
+  the device settings that were in place before the test.
+---
 # Device-state smoke test
 
 Checks that the app copes when the **device** changes underneath it — dark mode and
