@@ -10,9 +10,9 @@
 //
 // Three properties make the mechanism honest:
 //
-//  - **The resolved text is the cache key.** Callers hash `nl` (fragments already inlined),
-//    so editing a fragment invalidates every test that includes it. Keying on the top-level
-//    file would silently replay stale plans for all of them.
+//  - **The resolved text is the cache key.** Callers hash `nl` (frontmatter removed,
+//    fragments already inlined), so editing a fragment's steps invalidates every test that
+//    includes it. Keying on the top-level file would silently replay stale plans.
 //  - **A fragment is not a test.** `vk suite` skips `_`-prefixed files and never recurses
 //    into subdirectories, so a fragment gets no report row and no `--app` data reset.
 //  - **A chunk is a whole prompt, so a chunk that is not a test must not become one.** Prose
@@ -33,6 +33,10 @@ import { IMPERATIVES } from './lint';
  *  Deliberately a whole-line form — a path is everything after the keyword, so it needs
  *  no quoting and can contain spaces. */
 const INCLUDE_RE = /^\s*@include\s+(\S.*?)\s*$/;
+
+/** Human-only YAML frontmatter starts on the first line and ends at the next delimiter.
+ *  Strip it before looking for includes or building either compile text or cache keys. */
+const FRONTMATTER_RE = /^---\r?$/;
 
 /** A fenced code block delimiter. A test that *documents* `@include` in a code fence
  *  is showing the syntax, not using it. */
@@ -174,6 +178,12 @@ function expand(path: string, stack: string[], ex: Expansion, from: string | nul
   // A file ending in a newline splits to a trailing '' — drop it, or an include on the
   // last line leaves a stray blank chunk behind it. Each flush re-terminates its own text.
   if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  let bodyStart = 0;
+  if (FRONTMATTER_RE.test(lines[0]?.replace(/^\uFEFF/, '') ?? '')) {
+    const end = lines.findIndex((line, i) => i > 0 && FRONTMATTER_RE.test(line));
+    if (end < 0) throw new CliError(`ai: unclosed frontmatter in '${shortName(path)}'`, 2);
+    bodyStart = end + 1;
+  }
   let buf: string[] = [];
   let bufStart = 1;
   let fenced = false;
@@ -191,7 +201,8 @@ function expand(path: string, stack: string[], ex: Expansion, from: string | nul
     buf = [];
   };
 
-  lines.forEach((line, i) => {
+  lines.slice(bodyStart).forEach((line, index) => {
+    const i = bodyStart + index;
     if (FENCE_RE.test(line)) fenced = !fenced;
     const m = fenced ? null : INCLUDE_RE.exec(line);
     if (!m) {
