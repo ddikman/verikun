@@ -78,7 +78,7 @@ Change the *device* the app runs on, then put it back. Full detail:
 
 | Command | Description |
 |---|---|
-| `device set <key>=<value> …` | Apply settings, snapshotting each original first. Keys: `animations`, `airplane`, `dark`, `font-scale`, `rotation`, `stay-awake`, `screen-timeout`, `dnd`, `doze`. Every change is **verified by reading it back**. Refuses `airplane=on` over wireless adb; `--allow-wireless` overrides. |
+| `device set <key>=<value> …` | Apply settings, snapshotting each original first. Keys: `animations`, `airplane`, `download-limit`, `dark`, `font-scale`, `rotation`, `stay-awake`, `screen-timeout`, `dnd`, `doze`. Every change is **verified by reading it back**. Refuses `airplane=on` over wireless adb; `--allow-wireless` overrides. `download-limit` needs Android 13+ and exits `3` below it. |
 | `device get [key] [--json]` <br/>*alias:* `device status` | Current values; `n/a` where the platform cannot answer. |
 | `device reset [key …]` | Restore what this run changed. `batch`, `ai` and `suite` also do this automatically when the flow ends **or fails**. |
 | `device prep [--dry-run] [--json]` <br/>`device prep --revert` | Prepare a **test** device once: `animations=off`, `stay-awake=off`, `screen-timeout=1m`, `dnd=on`, `doze=off`. Unlike `device set` this is **sticky** — it survives the run and is undone only by `--revert`. A **physical** device must be named with `--device`, so prep can never land on a personal phone. `--no-sleep-when-idle` selects the other display policy — `stay-awake=on`, `screen-timeout=max`, so it never turns off. See [Device state](/verikun/reference/device-state/). |
