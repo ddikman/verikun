@@ -288,6 +288,12 @@ export interface Driver {
    */
   setDeviceSetting(key: SettingKey, value: string): void;
   /**
+   * The Android API level (`ro.build.version.sdk`), for a `device set` key that needs a newer
+   * Android than the rest (`SettingSpec.minAndroid`). OPTIONAL, like `screenState?()`: iOS omits
+   * it. Never throws for an unanswered probe — null means "could not tell", and the gate passes.
+   */
+  apiLevel?(): number | null;
+  /**
    * Display + lock state. OPTIONAL, in the shape of `screenshotRaw?()` / `hierarchySource?()`:
    * a backend with nothing to report omits the method entirely and callers then say nothing
    * rather than inventing an answer. iOS omits it — a simulator does not sleep and has no

@@ -7,15 +7,17 @@ import {
 } from '../types';
 import type { RawImage } from '../image';
 import { Companion, barrierRecycleDue, companionEnabled, releaseCompanionOn } from '../companion/manager';
-import { DeviceUnresponsiveError, CliError, DumpKilledError, NoUsableDeviceError, NoWindowError, dumpKilledMessage, probeFailure } from '../errors';
+import { DeviceUnresponsiveError, CliError, DumpKilledError, NoUsableDeviceError, NoWindowError, UnsupportedOnPlatformError, dumpKilledMessage, isDeviceLoss, probeFailure } from '../errors';
 import { runText, sleepSync, commandExists, spawnDetached, TextResult } from '../exec';
 import { isInteresting, parseHierarchy, parseRotation } from '../ui/android-parse';
 import { describeBarrier, modalBarrierOnly } from '../ui/barrier';
 import { viewportFor } from '../ui/viewport';
 import {
   SettingKey,
+  DOWNLOAD_LIMIT_OFF,
   ROTATION_AUTO,
   canonicalFontScale,
+  downloadLimitFromSetting,
   rotationToUserRotation,
   userRotationToRotation,
 } from '../device/settings';
@@ -386,6 +388,44 @@ const SCREEN_POWER_KEYS = new Set(['sleep', 'wakeup', 'power']);
 /** The three `global` scales behind the `animations` setting. All must be zero for it to
  *  read `off` — one live scale is enough to make a dump flaky. */
 const ANIMATION_SCALES = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'];
+
+/** The `global` setting behind `download-limit`, in bytes per second (Android 13+, the
+ *  setting Developer options' "Network download rate limit" writes). */
+const INGRESS_RATE_LIMIT = 'ingress_rate_limit_bytes_per_second';
+
+/**
+ * The interface a route lookup leaves on — `ip route get` prints `… dev wlan0 table …`. PURE,
+ * exported for the unit suite. Null when there is no route, or a name unsafe to hand back to
+ * the device shell.
+ *
+ * A `v4-` interface is 464xlat's IPv4 tunnel stacked on an IPv6-only network (`v4-rmnet_data0`).
+ * Android limits the network's BASE interface, so checking the tunnel would find no limiter on
+ * a perfectly limited device.
+ */
+export function routeInterface(ipRouteOutput: string): string | null {
+  const m = /\bdev\s+(\S+)/.exec(ipRouteOutput);
+  if (!m) return null;
+  const iface = m[1].replace(/^v4-/, '');
+  return /^[A-Za-z0-9_.-]+$/.test(iface) ? iface : null;
+}
+
+/**
+ * Every police rate on an interface's ingress, in BYTES per second, from `tc filter show dev
+ * <iface> ingress` — e.g. `police 0x3 rate 256Kbit burst 128Kb`. PURE, exported for the unit
+ * suite. tc prints bits, with a 1000-based unit prefix (1024-based when it says `Kibit`).
+ */
+export function policeRates(tcOutput: string): number[] {
+  const scale: Record<string, number> = { '': 0, k: 1, m: 2, g: 3, t: 4 };
+  return [...tcOutput.matchAll(/\bpolice\b[^\n]*?\brate\s+(\d+(?:\.\d+)?)([KMGT]?)(i?)bit\b/gi)].map((m) => {
+    const bits = Number(m[1]) * (m[3] ? 1024 : 1000) ** scale[m[2].toLowerCase()];
+    return Math.round(bits / 8);
+  });
+}
+
+/** tc rounds what it prints (`1234567bit` shows as `1234Kbit`), so a match is within 1%. */
+export function rateMatches(observed: number, wanted: number): boolean {
+  return Math.abs(observed - wanted) <= Math.max(1, wanted * 0.01);
+}
 /**
  * Parse `adb devices -l` output into DeviceInfo[]. PURE — exported for unit tests
  * and reused by the device-lifecycle layer, which needs the attached-device list
@@ -682,6 +722,8 @@ export class AdbDriver implements Driver {
   private barrierRecycled = false;
   /** Until when `ensureAwake` may skip its probe. See AWAKE_FRESH_MS. */
   private awakeUntil = 0;
+  /** undefined = not asked yet, null = the device would not say. See apiLevel(). */
+  private cachedApiLevel?: number | null;
   private adbRunner?: AdbRunner;
   private runner(): AdbRunner { return this.adbRunner ??= new AdbRunner(ADB, this.resolvedSerial()); }
 
@@ -1315,8 +1357,9 @@ export class AdbDriver implements Driver {
   //
   // Every device token below is a constant (the value domain is a closed enum in
   // device/settings.ts), so no caller-supplied string reaches the device shell and
-  // no escaping gate is needed. The one non-constant, font-scale's number, has
-  // already been reduced to /^\d+(\.\d+)?$/ by the table's parse().
+  // no escaping gate is needed. The non-constants are numbers the table's parse() has
+  // already reduced to digits: font-scale's /^\d+(\.\d+)?$/, and download-limit's
+  // bytes per second, which setDownloadLimit re-checks because a restore skips parse().
 
   /** Like shell(), but keeps stderr and the exit code — needed because a refusal
    *  ("Permission denial", "cmd: Can't find service") arrives on stderr and would
@@ -1329,6 +1372,21 @@ export class AdbDriver implements Driver {
   private readSetting(ns: string, key: string): string | null {
     const v = this.shell(['settings', 'get', ns, key]).trim();
     return v === '' || v === 'null' ? null : v;
+  }
+
+  /** `ro.build.version.sdk`, asked once per driver: it cannot change under a running process.
+   *  Null when the device will not say — the caller's gate then lets the write's own
+   *  verification decide, rather than refusing on a failed probe. A lost device still throws. */
+  apiLevel(): number | null {
+    if (this.cachedApiLevel !== undefined) return this.cachedApiLevel;
+    let level: number | null = null;
+    try {
+      const n = Number(this.shell(['getprop', 'ro.build.version.sdk']).trim());
+      if (Number.isInteger(n) && n > 0) level = n;
+    } catch (e) {
+      if (isDeviceLoss(e)) throw e;
+    }
+    return (this.cachedApiLevel = level);
   }
 
   /** Poll a readback until it satisfies `ok`. Returns the final value (or null). */
@@ -1376,6 +1434,9 @@ export class AdbDriver implements Driver {
       }
       case 'airplane':
         return this.readSetting('global', 'airplane_mode_on') === '1' ? 'on' : 'off';
+      case 'download-limit':
+        // Unset on a device older than Android 13 too, which reads `off` — truthfully.
+        return downloadLimitFromSetting(this.readSetting('global', INGRESS_RATE_LIMIT));
       case 'dark': {
         // `cmd uimode night` prints e.g. "Night mode: no". Some builds also report
         // "auto"/"custom", which our on|off domain cannot express — report null
@@ -1448,6 +1509,8 @@ export class AdbDriver implements Driver {
         );
       case 'airplane':
         return this.setAirplane(value === 'on');
+      case 'download-limit':
+        return this.setDownloadLimit(value);
       case 'dark':
         return this.applyAndVerify(
           `dark=${value}`,
@@ -1557,6 +1620,83 @@ export class AdbDriver implements Driver {
       () => this.readSetting('global', 'wifi_on'),
       (v) => isOff(v) === on,
       '`svc wifi` is refused by some OEM skins; toggle it in Settings instead.',
+    );
+  }
+
+  /**
+   * The download cap, verified by EFFECT for the same reason as airplane mode: the stored
+   * setting is not the limit being enforced. ConnectivityService turns it into a tc police
+   * filter on every internet network's interface, and where the kernel cannot police it only
+   * logs an error — the setting still reads back exactly as written. A slow-network test on
+   * an unthrottled device would pass for the wrong reason.
+   *
+   * `off` is checked by readback alone. Proving the limiter GONE means asserting no police
+   * filter at all on the interface, and an OEM's own traffic shaping would fail that on a
+   * device that did exactly what it was told.
+   */
+  private setDownloadLimit(value: string): void {
+    const off = value === DOWNLOAD_LIMIT_OFF;
+    // A restore hands back a snapshot without going through parse() — never let anything but
+    // digits reach the device shell.
+    if (!off && !/^\d+$/.test(value)) {
+      throw new CliError(`Invalid download-limit '${value}': expected bytes per second or '${DOWNLOAD_LIMIT_OFF}'.`, 2);
+    }
+    this.applyAndVerify(
+      `download-limit=${value}`,
+      // Delete rather than write -1, so a device that never had the row is left without one.
+      () => this.shellFull(off
+        ? ['settings', 'delete', 'global', INGRESS_RATE_LIMIT]
+        : ['settings', 'put', 'global', INGRESS_RATE_LIMIT, value]),
+      () => this.getDeviceSetting('download-limit'),
+      (v) => v === value,
+      'Writing global settings requires an unrestricted adb shell.',
+    );
+    if (!off) this.verifyRateLimiter(Number(value));
+  }
+
+  /** What is actually limiting the interface that carries traffic: one route lookup (nothing
+   *  is sent) and one `tc` read, both readable by the adb shell without root. */
+  private probeRateLimiter():
+    | { kind: 'no-route' }
+    | { kind: 'unreadable'; why: string }
+    | { kind: 'read'; iface: string; rates: number[] } {
+    // IPv6 second, for an IPv6-only network without 464xlat.
+    const iface =
+      routeInterface(this.shellFull(['ip', 'route', 'get', '8.8.8.8'], PROBE_TIMEOUT_MS).stdout) ??
+      routeInterface(this.shellFull(['ip', '-6', 'route', 'get', '2001:4860:4860::8888'], PROBE_TIMEOUT_MS).stdout);
+    if (!iface) return { kind: 'no-route' };
+    const r = this.shellFull(['tc', 'filter', 'show', 'dev', iface, 'ingress'], PROBE_TIMEOUT_MS);
+    if (r.code !== 0) return { kind: 'unreadable', why: (r.stderr || r.stdout).trim() || `tc exited ${r.code}` };
+    return { kind: 'read', iface, rates: policeRates(r.stdout) };
+  }
+
+  /**
+   * Only a limiter seen at a DIFFERENT rate, or seen missing, fails — those are observations.
+   * A device with no network, or whose `tc` this shell cannot read, gets a note instead:
+   * refusing on a probe we could not make would be a new way to fail.
+   */
+  private verifyRateLimiter(bytesPerSec: number): void {
+    const enforced = (rates: number[]) => rates.some((r) => rateMatches(r, bytesPerSec));
+    const deadline = Date.now() + VERIFY_TIMEOUT_MS;
+    let p = this.probeRateLimiter();
+    while (p.kind === 'read' && !enforced(p.rates) && Date.now() < deadline) {
+      sleepSync(VERIFY_INTERVAL_MS);
+      p = this.probeRateLimiter();
+    }
+    if (p.kind === 'no-route') {
+      err('note: no network is connected, so the download limit could not be confirmed — Android applies it when one connects');
+      return;
+    }
+    if (p.kind === 'unreadable') {
+      err(`warning: could not confirm the download limit is enforced — the device would not show its rate limiter (${p.why})`);
+      return;
+    }
+    if (enforced(p.rates)) return;
+    const seen = p.rates.length ? `${p.iface} is limited to ${p.rates.join(', ')} bytes/s instead` : `${p.iface} has no rate limiter`;
+    throw new UnsupportedOnPlatformError(
+      `download-limit=${bytesPerSec} was stored, but ${seen} after ${VERIFY_TIMEOUT_MS}ms — this device does not ` +
+        'enforce it, most likely because its kernel lacks traffic-control police support.\n' +
+        "Look for 'tcFilterAddDevIngressPolice … failure' in `adb logcat -s ConnectivityService`.",
     );
   }
 

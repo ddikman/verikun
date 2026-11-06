@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 - **`vk ai`** strips human-only frontmatter notes before compiling and caching tests or shared fragments. ([#130])
+- **`vk device set download-limit=256kbps`** caps download speed on Android 13+, verified against
+  the limiter Android installs; adds no latency. Older Android and iOS exit `3`.
 
 [#130]: https://github.com/ddikman/verikun/issues/130
 

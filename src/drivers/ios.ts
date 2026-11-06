@@ -12,6 +12,7 @@ import { parseIosHierarchy } from '../ui/ios-parse';
 import { viewportFor } from '../ui/viewport';
 import { isUsableState } from '../device/pool';
 import {
+  SETTINGS,
   SettingKey,
   canonicalFontScale,
   contentSizeToFontScale,
@@ -695,6 +696,7 @@ export class IdbDriver implements Driver {
         }
         case 'animations':
         case 'airplane':
+        case 'download-limit':
         case 'rotation':
         case 'stay-awake':
         case 'screen-timeout':
@@ -736,6 +738,8 @@ export class IdbDriver implements Driver {
             'only repaints the status bar). Use Xcode > Open Developer Tool > Network Link ' +
             "Conditioner, or toggle the host Mac's own network — the simulator shares it.",
         );
+      case 'download-limit':
+        return this.unsupportedSetting(key, SETTINGS[key].manual.ios ?? '');
       case 'rotation':
         return this.unsupportedSetting(
           key,

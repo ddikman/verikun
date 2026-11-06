@@ -14,12 +14,13 @@
 // while the app is still online is the worst outcome a testing tool can produce, so
 // there is no fourth state that means "we tried".
 
-import { CliError } from '../errors';
+import { CliError, UnsupportedOnPlatformError } from '../errors';
 import type { Platform } from '../types';
 
 export type SettingKey =
   | 'animations'
   | 'airplane'
+  | 'download-limit'
   | 'dark'
   | 'font-scale'
   | 'rotation'
@@ -50,6 +51,11 @@ export interface SettingSpec {
   manual: Partial<Record<Platform, string>>;
   /** Required wherever support is 'noop', plus any platform caveat worth printing. */
   note: Partial<Record<Platform, string>>;
+  /** The Android API level the key needs, where that is newer than the rest of the table.
+   *  `support` is per PLATFORM and cannot say "Android, but only 13+", and the table cannot see
+   *  the device — so `checkMinApi` asks the attached one before any write. Below it the key is
+   *  refused exactly like an 'unsupported' one: exit 3, naming `manual` as the way out. */
+  minAndroid?: { api: number; release: string; manual: string };
 }
 
 // --- value parsers ----------------------------------------------------------
@@ -148,6 +154,63 @@ function parseScreenTimeout(raw: string): string {
     );
   }
   return String(ms);
+}
+
+// --- download limit ---------------------------------------------------------
+
+/** No limit. Unset, and every negative value, read back as this. */
+export const DOWNLOAD_LIMIT_OFF = 'off';
+
+/** Below 1 KB/s the network is gone in all but name — airplane mode is the honest tool for
+ *  that — and a bare number that small is nearly always kilobits typed without the unit:
+ *  `256` meant as 256kbps would cap the device at 2 kbit/s. Refuse it and name the spelling. */
+const DOWNLOAD_LIMIT_MIN = 1000;
+
+/** Android hands the rate to the kernel as a signed 32-bit int of bytes per second. */
+const DOWNLOAD_LIMIT_MAX = 2147483647;
+
+/**
+ * Canonical form is the bare BYTES-per-second string, not the rate you typed, because that is
+ * what the device stores and reads back — the same choice, for the same reason, as
+ * screen-timeout's milliseconds. `kbps`/`mbps` are BITS per second, as network speeds are quoted.
+ */
+function parseDownloadLimit(raw: string): string {
+  const t = raw.trim().toLowerCase();
+  if (['off', 'none', 'unlimited', 'default'].includes(t)) return DOWNLOAD_LIMIT_OFF;
+  const m = /^(\d+(?:\.\d+)?)(kbps|mbps)?$/.exec(t);
+  if (!m) {
+    throw new CliError(
+      `Invalid value '${raw}' for 'download-limit': expected a rate like 256kbps or 2mbps, ` +
+        "a bare number of bytes per second, or 'off'.",
+      2,
+    );
+  }
+  const n = Number(m[1]);
+  const bytes = Math.round(m[2] === 'mbps' ? n * 125_000 : m[2] === 'kbps' ? n * 125 : n);
+  if (bytes < DOWNLOAD_LIMIT_MIN) {
+    throw new CliError(
+      `Invalid value '${raw}' for 'download-limit': must be at least ${DOWNLOAD_LIMIT_MIN} bytes per second (8kbps)` +
+        (m[2] ? '.' : ` — a bare number is BYTES per second; for kilobits write ${m[1]}kbps.`),
+      2,
+    );
+  }
+  if (bytes > DOWNLOAD_LIMIT_MAX) {
+    throw new CliError(`Invalid value '${raw}' for 'download-limit': must be at most ${DOWNLOAD_LIMIT_MAX} bytes per second.`, 2);
+  }
+  return String(bytes);
+}
+
+/**
+ * The canonical value for what the device stores. Android limits for any value >= 0, so unset
+ * and every negative number mean `off`; anything unparseable is null, so a snapshot declines
+ * rather than restoring a guess. Only ever returns `off` or digits — the driver writes it back.
+ */
+export function downloadLimitFromSetting(stored: string | null): string | null {
+  const t = (stored ?? '').trim();
+  if (t === '' || t === 'null') return DOWNLOAD_LIMIT_OFF;
+  if (!/^-?\d+$/.test(t)) return null;
+  const n = Number(t);
+  return n < 0 ? DOWNLOAD_LIMIT_OFF : String(n);
 }
 
 /** Android `user_rotation` values, by the name we expose. */
@@ -263,6 +326,27 @@ export const SETTINGS: Record<SettingKey, SettingSpec> = {
         "or toggle the host Mac's own network — the simulator shares it.",
     },
     note: {},
+  },
+  'download-limit': {
+    key: 'download-limit',
+    describe: 'Cap the download rate on every network — for slow-connection handling (adds no latency)',
+    values: "a rate like 256kbps or 2mbps, a bare number of bytes per second, or 'off'",
+    parse: parseDownloadLimit,
+    support: { android: 'supported', ios: 'unsupported' },
+    manual: {
+      ios: 'Neither `simctl` nor `idb` can shape the network. Use Xcode > Open Developer Tool > ' +
+        "Network Link Conditioner on the host Mac — the simulator shares the Mac's network.",
+    },
+    note: {
+      android: 'Android 13+ (API 33). Downloads only — no added latency, uploads untouched — and up to ' +
+        '128 KiB passes at full speed after an idle moment, so a small response is not slowed',
+    },
+    minAndroid: {
+      api: 33,
+      release: '13',
+      manual: 'Older Android has no scriptable download cap. Throttle the connection upstream of the ' +
+        'device instead, on the router or hotspot it joins.',
+    },
   },
   dark: {
     key: 'dark',
@@ -406,4 +490,21 @@ export function checkSupport(key: SettingKey, platform: Platform): Support {
     );
   }
   return support;
+}
+
+/**
+ * The device-level half of that gate, also applied before any write: a key newer than the
+ * attached Android device is refused like an 'unsupported' one. `UnsupportedOnPlatformError`
+ * rather than a bare exit 3, so a `vk server` never counts it against the phone's health.
+ *
+ * `apiLevel` null — the device would not say — passes. The write's own verification still
+ * catches a device that cannot do it, and refusing on a failed probe would be a new way to fail.
+ */
+export function checkMinApi(key: SettingKey, platform: Platform, apiLevel: number | null): void {
+  const min = SETTINGS[key].minAndroid;
+  if (platform !== 'android' || !min || apiLevel === null || apiLevel >= min.api) return;
+  throw new UnsupportedOnPlatformError(
+    `Device setting '${key}' needs Android ${min.release} (API ${min.api}) or newer; this device runs API ${apiLevel}.\n` +
+      min.manual,
+  );
 }
