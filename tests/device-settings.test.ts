@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { CliError } from '../src/errors';
+import { CliError, UnsupportedOnPlatformError } from '../src/errors';
 import {
   SETTINGS,
   SETTING_KEYS,
   SettingKey,
   canonicalFontScale,
+  checkMinApi,
   checkSupport,
   contentSizeToFontScale,
+  downloadLimitFromSetting,
   fontScaleToContentSize,
   isSettingKey,
   parseDeviceAssignments,
@@ -176,7 +178,90 @@ test('support matrix: the verified per-platform truth', () => {
   assert.equal(SETTINGS.doze.support.ios, 'noop'); // no Doze equivalent
   assert.equal(SETTINGS.dark.support.ios, 'supported'); // simctl ui appearance
   assert.equal(SETTINGS['font-scale'].support.ios, 'supported'); // simctl ui content_size
+  assert.equal(SETTINGS['download-limit'].support.ios, 'unsupported'); // nothing shapes a simulator's network
   for (const k of SETTING_KEYS) assert.equal(SETTINGS[k].support.android, 'supported');
+});
+
+// --- download-limit ----------------------------------------------------------
+
+test('download-limit: rates canonicalize to the bytes-per-second string the device stores', () => {
+  // kbps/mbps are BITS per second, as network speeds are quoted; the device stores bytes.
+  const parse = SETTINGS['download-limit'].parse;
+  assert.equal(parse('256kbps'), '32000');
+  assert.equal(parse('2mbps'), '250000');
+  assert.equal(parse('1.5mbps'), '187500');
+  assert.equal(parse(' 2MBPS '), '250000');
+  assert.equal(parse('125000'), '125000'); // a bare number is bytes/s — what `device get` returns
+  assert.equal(parse('8kbps'), '1000'); // the floor itself is allowed
+});
+
+test("download-limit: 'off' and its aliases mean no limit", () => {
+  const parse = SETTINGS['download-limit'].parse;
+  for (const raw of ['off', 'OFF', 'none', 'unlimited', 'default']) assert.equal(parse(raw), 'off', raw);
+});
+
+test('download-limit: a bare number below the floor names the kilobit spelling', () => {
+  // `256` meant as 256kbps would otherwise cap the device at 2 kbit/s.
+  assert.throws(
+    () => SETTINGS['download-limit'].parse('256'),
+    (e: unknown) => isCli2(e) && (e as CliError).message.includes('256kbps'),
+  );
+  assert.throws(() => SETTINGS['download-limit'].parse('7kbps'), isCli2);
+});
+
+test('download-limit: out-of-range and malformed values are usage errors', () => {
+  const parse = SETTINGS['download-limit'].parse;
+  assert.equal(parse('2147483647'), '2147483647'); // the kernel's signed 32-bit ceiling
+  for (const bad of ['2147483648', '17180mbps', '0', '-1', '1e6', 'fast', '2 mbps', '2MB/s', '100kB', '']) {
+    assert.throws(() => parse(bad), isCli2, `expected '${bad}' rejected`);
+  }
+});
+
+test('download-limit: a parsed value re-parses to itself and survives the readback', () => {
+  // The two properties restore depends on: parse is idempotent, and the driver's readback of a
+  // written value compares equal to it (or every good write would be reported as refused).
+  const parse = SETTINGS['download-limit'].parse;
+  for (const raw of ['256kbps', '2mbps', '1.5mbps', '125000', 'off']) {
+    assert.equal(parse(parse(raw)), parse(raw), `${raw} does not round-trip through parse`);
+    assert.equal(downloadLimitFromSetting(parse(raw) === 'off' ? null : parse(raw)), parse(raw), `${raw} does not survive readback`);
+  }
+});
+
+test('downloadLimitFromSetting: unset and negatives are off, garbage is unknown', () => {
+  assert.equal(downloadLimitFromSetting(null), 'off'); // never set — and every pre-13 device
+  assert.equal(downloadLimitFromSetting(''), 'off');
+  assert.equal(downloadLimitFromSetting('null'), 'off');
+  assert.equal(downloadLimitFromSetting('-1'), 'off'); // what "No limit" in Developer options writes
+  assert.equal(downloadLimitFromSetting('-5'), 'off');
+  assert.equal(downloadLimitFromSetting(' 125000\n'), '125000');
+  // 0 is a real limit on Android (it limits any value >= 0), so it restores as itself.
+  assert.equal(downloadLimitFromSetting('0'), '0');
+  assert.equal(downloadLimitFromSetting('abc'), null);
+  assert.equal(downloadLimitFromSetting('1.5'), null);
+});
+
+// --- checkMinApi (the device half of the fail-early gate) --------------------
+
+test('checkMinApi: download-limit below Android 13 is unsupported, exit 3, naming the way out', () => {
+  assert.throws(
+    () => checkMinApi('download-limit', 'android', 32),
+    (e: unknown) =>
+      // UnsupportedOnPlatformError, not a bare exit 3: a `vk server` must not strike the phone for it.
+      e instanceof UnsupportedOnPlatformError &&
+      e.exitCode === 3 &&
+      /Android 13 \(API 33\)/.test(e.message) &&
+      /API 32/.test(e.message) &&
+      /router or hotspot/.test(e.message),
+  );
+});
+
+test('checkMinApi: Android 13 and newer, an unknown level, iOS and floorless keys all pass', () => {
+  checkMinApi('download-limit', 'android', 33);
+  checkMinApi('download-limit', 'android', 37);
+  // The device would not say: the write's own verification decides, never a failed probe.
+  checkMinApi('download-limit', 'android', null);
+  checkMinApi('download-limit', 'ios', 10); // iOS is refused by checkSupport, not here
+  for (const k of SETTING_KEYS.filter((k) => !SETTINGS[k].minAndroid)) checkMinApi(k, 'android', 21);
 });
 
 // --- screen-timeout --------------------------------------------------------

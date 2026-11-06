@@ -16,6 +16,7 @@ import {
   SETTING_KEYS,
   SettingKey,
   Support,
+  checkMinApi,
   checkSupport,
   isSettingKey,
   parseDeviceAssignments,
@@ -1239,6 +1240,13 @@ function deviceSet(ctx: Ctx, args: string[]): number {
   // Gate 1: capability, for EVERY key, before touching the device.
   const support = new Map<SettingKey, Support>();
   for (const { key } of assignments) support.set(key, checkSupport(key, ctx.platform));
+
+  // Gate 1b: a key newer than this device's Android. The one gate that has to ask the
+  // device, so it is asked only when some key declares a floor.
+  if (ctx.platform === 'android' && assignments.some(({ key }) => SETTINGS[key].minAndroid)) {
+    const api = ctx.driver.apiLevel?.() ?? null;
+    for (const { key } of assignments) checkMinApi(key, ctx.platform, api);
+  }
 
   // Gate 2: would this cut the wire we are talking over? Only wireless adb is at
   // risk, and only from the radios. A stderr warning would be useless here — the

@@ -134,6 +134,7 @@ banner, the retry path, dark theme, a layout that breaks at accessibility text s
   |---|---|---|---|
   | `animations` | `on\|off` | yes | **no** — nothing disables UIKit animation |
   | `airplane` | `on\|off` | yes | **no** — a simulator has no radio |
+  | `download-limit` | `256kbps` / `2mbps` / bytes/s / `off` | Android 13+ (exit 3 below) | **no** — nothing shapes its network |
   | `dark` | `on\|off` | yes | yes |
   | `font-scale` | `0.5`–`3.0`, `default` | yes | yes (nearest Dynamic Type category) |
   | `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` | yes | **no** |
@@ -168,6 +169,9 @@ banner, the retry path, dark theme, a layout that breaks at accessibility text s
     `vk assert <selector> --wait 10s`, never an immediate `tap`.
   - **Over wireless adb, `airplane=on` is refused** (exit 2) — it would cut the connection
     carrying your next command. Use USB, or `--allow-wireless` if you accept losing it.
+  - **`download-limit` slows downloads only** — no added latency, uploads untouched, and up to
+    128 KiB arrives at full speed after an idle moment, so one small request is not slowed.
+    Exercise a large download or a run of requests.
 
 ## Selectors
 
@@ -675,7 +679,7 @@ owns the redaction and the review-first flow.
   use `xcrun simctl`. Run `vk doctor --ios` to check the toolchain. Caveats: `clear`
   is unsupported (no per-app reset), `current` is `(unknown)`, device logs are
   simulator-only, and `device set` is partial — `dark`/`font-scale` work on a simulator
-  while `animations`/`airplane`/`rotation`/`dnd` do not exist there at all, and
+  while `animations`/`airplane`/`download-limit`/`rotation`/`dnd` do not exist there at all, and
   `stay-awake`/`screen-timeout`/`doze` are no-ops (`vk device caps --ios`). That makes
   `vk device prep` effectively Android-only: on iOS it applies nothing and says so. iOS
   accessibility ids are often unset, so prefer `text:`/`desc:` selectors there.

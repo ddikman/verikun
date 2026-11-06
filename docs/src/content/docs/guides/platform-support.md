@@ -23,7 +23,7 @@ This page is the canonical matrix. Other pages link here rather than restating i
 A ⊘ is only used where the intent is already true (a simulator never sleeps, so `stay-awake`
 has nothing to do). Everything else refuses rather than reporting a success that did not happen.
 
-The two Android columns differ on exactly one row: a phone and an emulator run the same code.
+The two Android columns rarely differ: a phone and an emulator run the same code.
 What varies on Android is the **device**, and three differences bite in practice:
 
 - **OEM skins silently ignore `settings put` / `svc` / `cmd`.** Every device-state write is
@@ -167,6 +167,7 @@ how the snapshot-and-restore works and what each value domain accepts.
 <tbody>
 <tr><td><code>animations</code></td><td>✅</td><td>✅</td><td>❌ <code>3</code> — nothing disables UIKit animation</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>airplane</code></td><td>⚠️ refused over wireless adb</td><td>✅</td><td>❌ <code>3</code> — no radio</td><td>❌ <code>3</code></td></tr>
+<tr><td><code>download-limit</code></td><td>⚠️ Android 13+, else <code>3</code></td><td>⚠️ Android 13+; caps above ~100 KB/s undershoot</td><td>❌ <code>3</code> — nothing shapes its network</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>dark</code></td><td>✅</td><td>✅</td><td>✅</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>font-scale</code></td><td>✅</td><td>✅</td><td>⚠️ nearest Dynamic Type category</td><td>❌ <code>3</code></td></tr>
 <tr><td><code>rotation</code></td><td>✅</td><td>✅</td><td>❌ <code>3</code> — nothing rotates it</td><td>❌ <code>3</code></td></tr>
@@ -185,6 +186,10 @@ how the snapshot-and-restore works and what each value domain accepts.
   this page, or `set`, over `caps` there.
 - **`font-scale` on iOS maps to the nearest Dynamic Type category.** The category applied is
   printed to stderr; `1.3` can land at an effective ratio near `1.35`.
+- **`download-limit` needs Android 13 (API 33).** Below it, `set` exits `3` before changing
+  anything. On an emulator, limits above about 100 KB/s undershoot: an API 36 emulator delivered
+  ~90 KB/s for both `2mbps` and `4mbps`, while a Pixel 10 held every limit from `800kbps` to
+  `8mbps` to within 6%. Use a physical device to test a faster connection.
 
 An unsupported key exits `3` **before any device I/O**. For `vk ai` and `vk suite` it is
 caught when the plan is validated, so a suite asking for `rotation` on iOS fails before the
