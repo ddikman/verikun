@@ -514,6 +514,7 @@ If the device is attached to another machine running `vk server`, point
 export VERIKUN_SERVER=http://100.64.0.7:8391
 export VERIKUN_SERVER_AUTH_KEY=<key printed/configured by the server>
 vk install ./app-debug.apk --server "$VERIKUN_SERVER"   # server needs --allow-install
+vk install --url "$APK_URL" --sha256 "$APK_SHA256" --server "$VERIKUN_SERVER" # Android; digest optional
 vk suite tests/ --app com.example.app --server "$VERIKUN_SERVER"
 ```
 

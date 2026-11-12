@@ -78,6 +78,10 @@ Remote suites acquire after compilation, wait in a server FIFO, and rerun typed 
 without spending a retry. Held leases release on client disappearance; recovering devices
 restore settings and verify the retained build before returning to service.
 
+For APKs already in artifact storage, `vk install --url "$APK_URL" --server "$VERIKUN_SERVER"`
+lets an updated Android server download them directly. Add `--sha256 "$APK_SHA256"` to verify
+content; the server must have `--allow-install` enabled.
+
 ## Documentation
 
 | | |

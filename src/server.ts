@@ -1,3 +1,5 @@
+import { parseInstallUrl, validateInstallSha } from './install-url';
+import { downloadApk } from './server-download';
 import { recycleHostAdb, hostAdbRotting } from './server-host';
 import { DeviceTable } from './server-devices';
 import { LeaseTable } from './server-leases';
@@ -653,7 +655,19 @@ export function buildServer(config: ServerConfig): Server {
   }
 
   async function handleInstall(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const ext = String(req.headers['x-verikun-ext'] ?? '').toLowerCase();
+    const fromUrl = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase() === 'application/json';
+    let source: URL | undefined;
+    let expected = String(req.headers['x-verikun-sha256'] ?? '').toLowerCase();
+    if (fromUrl) {
+      const json = await readBody(req, 16 * 1024);
+      let body;
+      try { body = JSON.parse(json.toString('utf8')); }
+      catch { throw new HttpError(400, 'install: invalid URL request JSON'); }
+      source = parseInstallUrl(body?.url);
+      expected = validateInstallSha(body?.sha256) ?? '';
+      if (config.platform !== 'android') throw new HttpError(400, 'URL installs support Android APKs only');
+    }
+    const ext = fromUrl ? 'apk' : String(req.headers['x-verikun-ext'] ?? '').toLowerCase();
     if (ext !== 'apk' && ext !== 'ipa') {
       throw new HttpError(400, `x-verikun-ext must be 'apk' or 'ipa' (got '${ext || '(missing)'}')`);
     }
@@ -677,11 +691,26 @@ export function buildServer(config: ServerConfig): Server {
       },
     });
     try {
-      await pipeline(req, counter, createWriteStream(tmpPath));
-      const digest = hasher.digest('hex');
-      const expected = String(req.headers['x-verikun-sha256'] ?? '').toLowerCase();
+      let digest: string;
+      if (source) {
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        res.once('close', cancel);
+        try {
+          if (res.destroyed) cancel();
+          const downloaded = await downloadApk(source, tmpPath, {
+            cap: INSTALL_BODY_CAP, signal: controller.signal,
+            log: message => err(`[server] install${requestTag(req)}: ${message}`),
+          });
+          size = downloaded.bytes;
+          digest = downloaded.sha256;
+        } finally { res.removeListener('close', cancel); }
+      } else {
+        await pipeline(req, counter, createWriteStream(tmpPath));
+        digest = hasher.digest('hex');
+      }
       if (expected && expected !== digest) {
-        throw new HttpError(400, `sha256 mismatch: upload arrived corrupted (got ${digest.slice(0, 12)}…, expected ${expected.slice(0, 12)}…)`);
+        throw new HttpError(400, `sha256 mismatch: artifact differs from expected digest (got ${digest.slice(0, 12)}…, expected ${expected.slice(0, 12)}…)`);
       }
       const targets = table.ready().filter(s => pool.get(s));
       if (!targets.length) throw new HttpError(503, 'no device is left to install onto', 3);
@@ -909,6 +938,7 @@ export function buildServer(config: ServerConfig): Server {
         deviceStates: table.all().map(({serial, state, reason, since}) => ({serial, state, reason, since})),
         ...(lastInstall ? { installedSha: lastInstall.sha } : {}),
         installEnabled: config.allowInstall,
+        installFromUrl: config.allowInstall && config.platform === 'android',
         ...(reads ? { reads } : {}),
         deviceControlEnabled: config.deviceControl !== undefined,
         deviceNamingEnabled: (config.deviceControl?.allowedTargets.length ?? 0) > 0,

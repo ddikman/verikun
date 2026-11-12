@@ -1,3 +1,4 @@
+import { parseInstallUrl, validateInstallSha } from './install-url';
 import { errorOutcome, isDeviceDrop, isDeviceLoss, Outcome } from './errors';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, basename, sep, join } from 'node:path';
@@ -3051,15 +3052,29 @@ async function cmdAi(positionals: string[], flags: Flags): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function cmdInstall(positionals: string[], flags: Flags): Promise<number> {
-  const appPath = positionals[0];
-  if (!appPath) throw new CliError('Usage: verikun install <app.apk|app.ipa> [--server url]', 2);
-  const path = resolve(process.cwd(), appPath);
-  if (!existsSync(path)) throw new CliError(`install: '${appPath}' does not exist`, 2);
+  const url = flagStr(flags, 'url');
+  const sha256 = flagStr(flags, 'sha256');
+  if (url) {
+    parseInstallUrl(url);
+    validateInstallSha(sha256);
+    if (positionals.length || !serverFromFlags(flags))
+      throw new CliError('install --url requires --server (or VERIKUN_SERVER) and no local file', 2);
+  } else if (flags.url !== undefined || flags.sha256 !== undefined) {
+    throw new CliError('install: --url requires a URL; --sha256 requires --url', 2);
+  }
+  if (flags.sha256 !== undefined && !sha256) throw new CliError('install: --sha256 requires a digest', 2);
+  const appPath = url ? 'APK from URL' : positionals[0];
+  if (!appPath || positionals.length > 1) throw new CliError('Usage: verikun install <app.apk|app.ipa> [--server url] or install --url <apk-url> --server <url> [--sha256 hex]', 2);
+  const path = url ? '' : resolve(process.cwd(), appPath);
+  if (!url && !existsSync(path)) throw new CliError(`install: '${appPath}' does not exist`, 2);
   const platform = platformFromFlags(flags);
   const { backend, remote, skipped } = await resolveBackend(platform, deviceFromFlags(flags, platform), flags);
   err(`[verikun] installing ${appPath}${remote ? ` via ${remote.url}` : ''}…`);
   try {
-    await backend.install(path);
+    if (url) {
+      if (!backend.installFromUrl) throw new CliError('URL installs require a remote server', 2);
+      await backend.installFromUrl(url, sha256);
+    } else await backend.install(path);
   } finally {
     // `close()`, deliberately NOT `grant.release()`. Remotely they are the same call; the
     // difference is local, and it is wanted: `vk install && vk suite` in one CI job wants
@@ -4077,6 +4092,8 @@ ACT
   launch <app> [--clear] [--no-restart]   stop <app>   App lifecycle (launch restarts by
                                         default — force-stops first; --clear also wipes app data)
   clear <app>                         Wipe app data — login/session, caches (fresh-install state)
+  install --url <apk-url> --server url [--sha256 hex]
+                                      Server downloads an APK over HTTP(S), then installs.
   install <app.apk|.ipa> [--server url]   Install a build on the device (adb install -r /
                                       idb install). With --server, uploads the file to a
                                       remote vk server (which must run --allow-install)

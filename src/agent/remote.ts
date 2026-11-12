@@ -1,3 +1,4 @@
+import { parseInstallUrl, validateInstallSha } from '../install-url';
 import { Worker } from 'node:worker_threads';
 import { join } from 'node:path';
 import { waitWindowMs, parseDuration } from '../commands/auto-wait';
@@ -352,6 +353,19 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
     return { code: res.code, error: res.error ? rebuildError(res.error) : undefined };
   };
 
+  const reportInstall = (res: InstallResponse): void => {
+    // A PARTIAL install is a success, and it must not be a silent one: capacity just
+    // dropped, and the operator's next question is which phone to go and look at.
+    if (res.skipped?.length) {
+      err(
+        `[verikun] server installed on ${(res.devices ?? []).join(', ') || '(none)'}; ` +
+          `${res.skipped.length} device(s) could not take this build and left the pool — ` +
+          res.skipped.map((s) => `${s.serial} (${s.reason})`).join('; '),
+      );
+      opts.onInstallSkipped?.(res.skipped);
+    }
+  };
+
   return {
     exec: (command, positionals, flags) => execRaw({ command, positionals, flags }, true),
 
@@ -383,6 +397,17 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
       return res.logs ?? '';
     },
 
+    async installFromUrl(url: string, sha256?: string): Promise<void> {
+      parseInstallUrl(url);
+      validateInstallSha(sha256);
+      if (!health.installFromUrl)
+        throw new CliError('URL installs require an updated Android server with --allow-install', 3);
+      const res = await installWhenFree(t, JSON.stringify({ url, sha256 }), REMOTE_INSTALL_TIMEOUT_MS, {
+        'content-type': 'application/json',
+      });
+      reportInstall(res);
+    },
+
     async install(appPath: string): Promise<void> {
       // v1 remote installs are single-file uploads; the extension is the only thing
       // the client tells the server about the artifact (never a path).
@@ -402,16 +427,7 @@ export function createRemoteBackend(opts: RemoteOpts, health: HealthResponse): R
         'x-verikun-ext': ext,
         'x-verikun-sha256': sha256,
       });
-      // A PARTIAL install is a success, and it must not be a silent one: capacity just
-      // dropped, and the operator's next question is which phone to go and look at.
-      if (res.skipped?.length) {
-        err(
-          `[verikun] server installed on ${(res.devices ?? []).join(', ') || '(none)'}; ` +
-            `${res.skipped.length} device(s) could not take this build and left the pool — ` +
-            res.skipped.map((s) => `${s.serial} (${s.reason})`).join('; '),
-        );
-        opts.onInstallSkipped?.(res.skipped);
-      }
+      reportInstall(res);
     },
 
     async reset(appId: string): Promise<void> {
@@ -436,7 +452,7 @@ export function leafTimeoutMs(req: ExecRequest): number {
   else if (req.command === 'launch') budget = 60_000;
   return Math.max(60_000, budget + 120_000);
 }
-async function installWhenFree(t: RemoteTransport, buf: Buffer, timeout: number, headers: Record<string, string>): Promise<InstallResponse> {
+async function installWhenFree(t: RemoteTransport, buf: Buffer | string, timeout: number, headers: Record<string, string>): Promise<InstallResponse> {
   const until = Date.now() + deviceWaitMs();
   let backoff = 500;
   for (;;) {

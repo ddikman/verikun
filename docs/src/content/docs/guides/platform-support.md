@@ -105,6 +105,7 @@ Notes on the rows that carry a caveat:
 - **`suite --app` does not reset app data on iOS.** It degrades to a force-stop, so a test
   that depends on starting logged-out does not hold there — see
   [Suites](/verikun/guides/suites/).
+- **`install --url` downloads APKs on a remote Android server only.** Local installs and iOS require a file.
 - **`install` replaces a differently-signed build on Android only.** Android refuses to update
   a package across signing keys, which is routine on a shared device. verikun removes the
   installed build and installs again, warning on stderr that its app data is gone; a same-key
