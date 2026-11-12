@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-11-12
+
+### Added
+- **`vk install --url`** lets an authorized Android server download an APK over HTTP(S), with optional `--sha256`, bounded retries, and progress logs.
+
 ## [0.35.0] - 2026-10-30
 
 ### Added

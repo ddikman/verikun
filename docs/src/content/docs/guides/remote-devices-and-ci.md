@@ -138,8 +138,31 @@ you opt in (below).
 ### Installs are opt-in
 
 `POST /v1/install` requires `--allow-install`; a read-only server refuses builds. It accepts
-only single-file `.apk` / `.ipa` uploads, writes to a **server-generated** temp path, and
-verifies a sha256 of the body.
+single-file `.apk` / `.ipa` uploads, writes to a **server-generated** temp path, and
+verifies a sha256 of the body. Android servers also accept APK download URLs:
+
+```sh
+vk install --url "$APK_URL" --sha256 "$APK_SHA256" --server "$VERIKUN_SERVER"
+```
+
+The server downloads the APK directly; the client sends only the URL and optional SHA-256.
+Use an HTTP(S) URL reachable from the server, including a short-lived signed bucket URL.
+The URL need not end in `.apk`. Upgrade both client and server; URL installs are Android-only.
+`--url` requires `--server` (or `VERIKUN_SERVER`) and cannot accompany a local file.
+`--sha256` accepts 64 hexadecimal characters and verifies the downloaded bytes before installation.
+
+Downloads stream to disk with a 512 MiB cap, a 60-second inactivity timeout, and a shared
+10-minute deadline across up to three attempts. Transient connection errors and HTTP
+408/429/5xx retry; other HTTP errors fail immediately. At most five redirects are followed;
+HTTPS cannot redirect to HTTP. Download progress is logged without the URL or its query string.
+The existing 15-minute client deadline covers download and installation together.
+The pool stays reserved throughout the operation, as with file uploads; a disconnected client
+cancels the download. Completed downloads use the same pool installation and partial-success rules.
+
+`--allow-install` authorizes outbound HTTP(S) downloads to addresses the server can reach,
+including internal artifact hosts. Verikun's server auth key is never sent to the download host.
+The HTTP API accepts `Content-Type: application/json` with `{ "url": "…", "sha256": "…" }`
+at `/v1/install`; `sha256` is optional. `/v1/health` advertises `installFromUrl` when enabled.
 
 That one flag also authorizes the removal an install sometimes needs: an Android build signed
 by a different key than the installed one cannot be updated over, so the server removes the

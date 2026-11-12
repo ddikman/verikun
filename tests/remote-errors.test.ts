@@ -216,3 +216,28 @@ for (const route of ['/v1/elements','/v1/exec']) test(`socket reset on ${route}:
 test('the major client rejects an old server before acquiring or driving a device',()=>{
   assert.throws(()=>createRemoteBackend({url:'http://unused'}, {ok:true,version:'0.31.0',platform:'android',serial:'a',installEnabled:false}),/upgrade the server/);
 });
+
+test('remote URL install sends only a JSON descriptor and preserves partial-install reporting', async () => {
+  let posted: unknown;
+  const server = createServer((req, res) => {
+    assert.equal(req.url, '/v1/install');
+    assert.equal(req.headers['content-type'], 'application/json');
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      posted = JSON.parse(body);
+      res.end(JSON.stringify({ ok: true, bytes: 8, sha256: 'test', devices: ['a'], skipped: [{ serial: 'b', reason: 'offline' }] }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const skipped: string[] = [];
+  const health = { deviceHealth: 1 as const, leaseHold: 1 as const, deviceStates: [], ok: true as const, version: 'test', platform: 'android' as const, serial: 'a', installEnabled: true };
+  try {
+    const backend = createRemoteBackend({ url, onInstallSkipped: rows => skipped.push(...rows.map(r => r.serial)) }, { ...health, installFromUrl: true });
+    await backend.installFromUrl!('https://storage.example/download?signature=SECRET', 'a'.repeat(64));
+    assert.deepEqual(posted, { url: 'https://storage.example/download?signature=SECRET', sha256: 'a'.repeat(64) });
+    assert.deepEqual(skipped, ['b']);
+    await assert.rejects(createRemoteBackend({ url }, health).installFromUrl!('https://storage.example/app.apk'), /updated Android server/);
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});

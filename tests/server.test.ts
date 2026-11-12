@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // Policy tests for `vk server`'s device-control gate. buildServer has no device
 // dependency once `lifecycle` and `makeDriver` are injected, so the whole matrix —
 // which is where a regression would actually be dangerous — runs without a device.
@@ -5,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { AddressInfo } from 'node:net';
-import { request, ClientRequest, Server } from 'node:http';
+import { createServer, request, ClientRequest, Server } from 'node:http';
 import { buildServer, parseDeviceControl, parseFailover, ServerConfig } from '../src/server';
 import type { ServerLifecycle } from '../src/server-lifecycle';
 import { parseDevicePool } from '../src/device/pool';
@@ -1286,4 +1287,105 @@ test('an old install straggler catches up to a newer build before dealing',async
     assert.ok(bInstalls>=2,'the old straggler installs currentBuild before returning');
     assert.equal(((await(await call('/v1/lease',{method:'POST',body:'{}',token:'run-B'})).json()) as {installedSha?:string}).installedSha,sha);
   }finally{unblock();}
+});
+
+// The APK origin is a real HTTP server; only the device installation is faked.
+test('URL install downloads once, verifies SHA, and installs the same artifact on every device', async () => {
+  let downloads = 0;
+  const origin = createServer((req, res) => {
+    downloads++;
+    assert.equal(req.headers.authorization, undefined);
+    assert.equal(req.headers['x-verikun-run'], undefined);
+    res.end('APKBYTES');
+  });
+  await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
+  const paths: string[] = [];
+  try {
+    await start({ allowInstall: true, serials: ['a', 'b'], onInstall: async (_serial, path) => {
+      paths.push(path);
+      assert.equal(readFileSync(path, 'utf8'), 'APKBYTES');
+    } });
+    const url = `http://127.0.0.1:${(origin.address() as AddressInfo).port}/signed?token=SECRET`;
+    const sha256 = createHash('sha256').update('APKBYTES').digest('hex');
+    const res = await call('/v1/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url, sha256 }) });
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = await res.json() as InstallResponse;
+    assert.equal(body.sha256, sha256);
+    assert.deepEqual(body.devices, ['a', 'b']);
+    assert.equal(downloads, 1);
+    assert.equal(paths.length, 2);
+    assert.equal(paths[0], paths[1]);
+    assert.equal((await (await call('/v1/health')).json() as HealthResponse).installFromUrl, true);
+  } finally { origin.closeAllConnections(); await new Promise<void>(resolve => origin.close(() => resolve())); }
+});
+
+test('URL install rejects a checksum mismatch and releases the pool', async () => {
+  let installs = 0;
+  const origin = createServer((_req, res) => res.end('APKBYTES'));
+  await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
+  try {
+    await start({ allowInstall: true, onInstall: async () => { installs++; } });
+    const url = `http://127.0.0.1:${(origin.address() as AddressInfo).port}/apk`;
+    const res = await call('/v1/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url, sha256: '0'.repeat(64) }) });
+    assert.equal(res.status, 400);
+    assert.match(await res.text(), /sha256 mismatch/);
+    assert.equal(installs, 0);
+    assert.equal((await install('run-B')).status, 200);
+  } finally { origin.closeAllConnections(); await new Promise<void>(resolve => origin.close(() => resolve())); }
+});
+
+test('URL installs enforce authentication, opt-in, and busy-pool checks before downloading', async () => {
+  let downloads = 0;
+  const origin = createServer((_req, res) => { downloads++; res.end('APKBYTES'); });
+  await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
+  try {
+    const url = `http://127.0.0.1:${(origin.address() as AddressInfo).port}/apk`;
+    const init = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url }) };
+    await start({ allowInstall: false });
+    assert.equal((await call('/v1/install', init)).status, 403);
+    await start({ allowInstall: true });
+    assert.equal((await call('/v1/install', { ...init, headers: { ...init.headers, authorization: 'Bearer wrong' } })).status, 401);
+    await call('/v1/lease', { token: 'other' });
+    assert.equal((await call('/v1/install', init)).status, 409);
+    assert.equal(downloads, 0);
+  } finally { origin.closeAllConnections(); await new Promise<void>(resolve => origin.close(() => resolve())); }
+});
+
+test('URL install validates JSON, URL, SHA, and Android platform before fetching', async () => {
+  await start({ allowInstall: true });
+  for (const body of ['{', '{}', '{"url":"file:///SECRET"}', '{"url":"https://example.com/app.apk","sha256":"bad"}']) {
+    const res = await call('/v1/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    assert.equal(res.status, 400);
+    assert.ok(!(await res.text()).includes('SECRET'));
+  }
+  await start({ allowInstall: true, platform: 'ios' });
+  const res = await call('/v1/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"url":"https://example.com/app.apk"}' });
+  assert.equal(res.status, 400);
+  assert.match(await res.text(), /Android/);
+});
+
+test('URL install client disconnect cancels the download and frees the pool', async () => {
+  let downloading!: () => void;
+  const began = new Promise<void>(resolve => { downloading = resolve; });
+  let closed = false;
+  const origin = createServer((_req, res) => {
+    res.on('close', () => { closed = true; });
+    res.write('partial');
+    downloading();
+  });
+  await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
+  try {
+    await start({ allowInstall: true, onInstall: async () => {} });
+    const url = `http://127.0.0.1:${(origin.address() as AddressInfo).port}/apk`;
+    const req = request(`${base}/v1/install`, { method: 'POST', headers: {
+      authorization: `Bearer ${KEY}`, 'x-verikun-run': 'run-A', 'content-type': 'application/json',
+    } });
+    req.on('error', () => {});
+    req.end(JSON.stringify({ url }));
+    await began;
+    assert.equal((await install('run-B')).status, 409);
+    req.destroy();
+    await until(async () => closed, 'origin download cancelled');
+    assert.equal((await install('run-B')).status, 200);
+  } finally { origin.closeAllConnections(); await new Promise<void>(resolve => origin.close(() => resolve())); }
 });

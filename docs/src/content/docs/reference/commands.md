@@ -126,6 +126,13 @@ Change the *device* the app runs on, then put it back. Full detail:
 | `--max-suite-cost-usd <n>` | — | Stop the suite once **total** model spend crosses this (exit `1`). Off by default; the per-test [`--max-cost-usd`](/verikun/reference/cost/#the-budget) still applies |
 | `--name <n>` | directory name | Suite name in the manifest and the overview page |
 
+### `install` URL flags
+
+`vk install --url <apk-url> --server <server-url> [--sha256 <hex>]` asks an Android server
+to download and install an APK directly. `--url` replaces the local file argument;
+`--sha256` optionally verifies its bytes. Requires an updated server with `--allow-install`.
+See [download limits and retries](/verikun/guides/remote-devices-and-ci/#installs-are-opt-in).
+
 ## Remote
 
 | Command | Description |

@@ -128,6 +128,8 @@ export interface HealthResponse {
   devices?: string[];
   /** Whether POST /v1/install is enabled on this server (`--allow-install`). */
   installEnabled: boolean;
+  /** Server accepts JSON { url, sha256? } at /v1/install for APK downloads. */
+  installFromUrl?: boolean;
   /**
    * Which read path this server's driver will use for the next hierarchy read, and why.
    *
@@ -298,6 +300,7 @@ export interface ExecBackend {
   getLogs?(opts?: { lines?: number; since?: string; appId?: string; scopedOnly?: boolean }): string | Promise<string>;
   /** Install an app build (`vk install`). */
   install(appPath: string): Promise<void> | void;
+  installFromUrl?(url: string, sha256?: string): Promise<void>;
   /** Reset app state between suite tests (clear on Android; honest degrade to stop on iOS). */
   reset(appId: string): Promise<void> | void;
   /** Verify the backend can actually drive the device, throwing CliError(…, 3) if not
