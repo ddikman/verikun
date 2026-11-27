@@ -32,7 +32,7 @@ things cause a miss:
 
 | Cause | Detail |
 |---|---|
-| The cache key changed | Key is the test prose **byte-exact**, plus `--package`, `--app-build` and the platform. A reworded sentence is a new key. |
+| The cache key changed | Key is the resolved test body **byte-exact**, plus `--package`, `--app-build` and the platform. A reworded instruction is a new key; frontmatter notes are excluded. |
 | The compiler fingerprint rotated | verikun's version plus its grammar and repair-prompt text. **A verikun upgrade re-spends the whole suite.** |
 | `--recompile` / `--no-cache` | Skips the read outright. |
 | No cache on disk | A fresh CI runner has no `./.verikun/plans/` — see [the cold cache](/verikun/guides/self-healing-in-ci/#what-it-costs--and-the-cold-cache). |

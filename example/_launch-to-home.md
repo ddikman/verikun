@@ -1,3 +1,7 @@
+---
+description: >-
+  Shared launch and home-screen check used by both fixture-app example tests.
+---
 Launch the `dev.verikun.testapp` app — the fixture app in `example/flutter-app`.
 
 It keeps no state between runs, so a fresh launch is a complete reset and always lands on
