@@ -36,13 +36,15 @@ Each step is one of six node types, named by its "type":
                                     {"command":"device","positionals":["set","dark=on","font-scale=1.3"]}
                                     {"command":"device","positionals":["reset"]}
                                   Keys: airplane=on|off (go offline — for retry/error
-                                  handling), dark=on|off, font-scale=<0.5-3.0>,
+                                  handling), download-limit=<rate like 256kbps|2mbps>|off
+                                  (a slow connection; Android 13+), dark=on|off,
+                                  font-scale=<0.5-3.0>,
                                   rotation=portrait|landscape|portrait-reverse|
                                   landscape-reverse|auto, stay-awake=on|off.
                                   ALWAYS finish the scenario with a "reset" step. Do NOT
                                   tap immediately after airplane=off — the radio is back
                                   but the network is not; follow it with a wait/assert.
-                                  Android only for airplane + rotation.
+                                  Android only for airplane, download-limit and rotation.
 
 2. IF-PRESENT — { "type":"if-present", "selector":<sel>, "body":[<command leaves>] }
    Run body ONLY if the selector is on screen now. Use for OPTIONAL interstitials:

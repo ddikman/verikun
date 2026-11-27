@@ -1,6 +1,6 @@
 ---
 title: Device state
-description: Change the device the app runs on — airplane mode, dark mode, font scale, rotation, stay-awake — and put it back.
+description: Change the device the app runs on — airplane mode, a slow network, dark mode, font scale, rotation, stay-awake — and put it back.
 sidebar:
   order: 8
 ---
@@ -17,6 +17,8 @@ vk tap @retry
 vk assert text:"No connection"
 vk device reset                                          # back online
 
+vk device set download-limit=256kbps                     # a slow connection (Android 13+)
+
 vk device set dark=on font-scale=1.3 rotation=landscape  # several at once
 vk device get --json
 vk device caps                                           # what this platform supports
@@ -28,6 +30,7 @@ vk device caps                                           # what this platform su
 |---|---|
 | `animations` | `on\|off` |
 | `airplane` | `on\|off` |
+| `download-limit` | a rate like `256kbps` / `2mbps`, a bare number of bytes per second, or `off` |
 | `dark` | `on\|off` |
 | `font-scale` | `0.5`–`3.0`, or `default` |
 | `rotation` | `portrait\|landscape\|portrait-reverse\|landscape-reverse\|auto` |
@@ -36,13 +39,14 @@ vk device caps                                           # what this platform su
 | `dnd` | `on\|off` |
 | `doze` | `on\|off` |
 
-Android supports all nine. iOS does not, and a simulator and a physical device differ —
+Android supports them all, `download-limit` from Android 13 (API 33) — an older device exits
+`3` before anything is changed. iOS does not, and a simulator and a physical device differ —
 [Platform support](/verikun/guides/platform-support/#device-settings) is the per-key matrix.
 Note that `vk device caps` on iOS reports the **simulator** answer even when you resolved a
 physical device.
 
-`screen-timeout` reads back as **milliseconds**, not as the duration you typed, because that
-is what the device stores.
+`screen-timeout` reads back as **milliseconds** and `download-limit` as **bytes per second**
+(`256kbps` → `32000`), not as what you typed, because that is what the device stores.
 
 ### Value domains
 
@@ -52,6 +56,9 @@ is what the device stores.
   `1.0`). `1.30`, `1.3` and `1.300` compare equal on readback.
 - **`rotation`** takes only the five named values; bare integers are rejected. `auto` is a
   real value, so a snapshot can restore auto-rotate.
+- **`download-limit`** takes `kbps` / `mbps` (bits per second, as network speeds are quoted), a
+  bare number of bytes per second, or `off` (also `none`, `unlimited`, `default`). Below 1000
+  bytes per second is refused: a bare `256` is almost always meant as `256kbps`.
 
 ### When a platform cannot do it
 
@@ -82,6 +89,20 @@ Follow it with a real wait rather than tapping straight away:
 vk device set airplane=off
 vk assert @content --wait 10s
 ```
+
+### `download-limit` is verified by effect, too
+
+A stored limit is not an enforced one: where the kernel cannot police traffic, Android keeps
+the setting and drops the limit. verikun therefore reads the rate limiter Android attached to
+the interface carrying traffic, and exits `3` if it is missing or set to another rate. With no
+network connected there is nothing to read — verikun says so on stderr, and Android applies the
+limit when a network connects.
+
+### `download-limit` slows downloads, nothing else
+
+It adds no latency and leaves uploads alone. After an idle moment up to 128 KiB arrives at full
+speed, so a single small API response is not slowed — exercise a large download or a run of
+requests.
 
 ## Preparing a test device
 
