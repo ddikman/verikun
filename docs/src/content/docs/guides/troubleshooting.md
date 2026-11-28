@@ -365,8 +365,8 @@ symptoms are in the
 
 Anything that exits `3` naming a capability — `clear`, `--selected`, `--focused`, a device
 setting — is a documented gap, not a broken setup: `--tree` renders flat, `current` returns
-`(unknown)`, `swipe --duration` is ignored. Every one of these, plus what a physical device
-supports: [Platform support](/verikun/guides/platform-support/).
+`(unknown)`. Every one of these, plus what a physical device supports:
+[Platform support](/verikun/guides/platform-support/).
 
 ## `vk ai` and suites
 
