@@ -241,6 +241,8 @@ export interface Driver {
   viewport(): Viewport | null;
   tap(x: number, y: number): void;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): void;
+  /** Press at (x1,y1), hold still for `holdMs`, move to (x2,y2) over `durationMs`, release. */
+  drag(x1: number, y1: number, x2: number, y2: number, holdMs: number, durationMs: number): void;
   /** Type into the currently focused field. */
   inputText(text: string): void;
   pressKey(name: string): void;

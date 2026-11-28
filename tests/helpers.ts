@@ -121,6 +121,7 @@ export function makeDriver(overrides: Partial<Driver> = {}): Driver {
     screenSize: () => ({ width: 1080, height: 2400 }),
     tap: unused('tap'),
     swipe: unused('swipe'),
+    drag: unused('drag'),
     inputText: unused('inputText'),
     pressKey: unused('pressKey'),
     launch: unused('launch'),
